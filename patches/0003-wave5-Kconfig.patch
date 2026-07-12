@@ -1,0 +1,18 @@
+Why: upstream gates VIDEO_WAVE_VPU behind `depends on ARCH_K3 || COMPILE_TEST`
+(the TI SoC family that upstreamed the driver). The Wave5 core is not
+TI-specific, and this is a pure-DT arm64 build that defines no ARCH_* symbol,
+so the gate makes the driver unselectable. Drop the arch gate; all functional
+depends/selects are unchanged.
+
+--- a/drivers/media/platform/chips-media/wave5/Kconfig
++++ b/drivers/media/platform/chips-media/wave5/Kconfig
+@@ -1,9 +1,8 @@
+ # SPDX-License-Identifier: GPL-2.0
+ config VIDEO_WAVE_VPU
+ 	tristate "Chips&Media Wave Codec Driver"
+ 	depends on V4L_MEM2MEM_DRIVERS
+ 	depends on VIDEO_DEV && OF
+-	depends on ARCH_K3 || COMPILE_TEST
+ 	select VIDEOBUF2_DMA_CONTIG
+ 	select VIDEOBUF2_VMALLOC
+ 	select V4L2_MEM2MEM_DEV

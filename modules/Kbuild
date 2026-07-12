@@ -1,0 +1,57 @@
+# Open Artosyn kernel modules, built out-of-tree against the 6.18 port.
+# (modules/build.sh). modpost resolves inter-module hil_* in one pass.
+
+obj-m += ar_osal.o
+obj-m += ar_vb.o
+obj-m += ar_sys.o
+obj-m += ar_sysctl.o
+obj-m += ar_mpp_drv.o
+obj-m += ar_mpp_proc_ctrl.o
+# Runtime DT overlay adding ar_mpp's ahb_dma/axi_dma children (reflash-free bring-up
+# path; load before ar_mpp_drv). Embeds ar_mpp_overlay_dtbo.h from ar_mpp_overlay.dts.
+obj-m += ar_mpp_overlay.o
+
+# Runtime DT overlay adding the mmc@1b00000 (AR8030) + mmc@1c00000 (microSD) +
+# gpio@a10a000 nodes (reflash-free path; load before artosyn_gpio/dw_mci-artosyn).
+# Embeds ar_dtbo_sdio_dtbo.h from ar_dtbo_sdio.dts. Permanent home: the DTS, batched
+# with the pending codec/watchdog DT work.
+obj-m += ar_dtbo_sdio.o
+obj-m += ar_framebuffer.o
+obj-m += ar_scaler.o
+obj-m += artosyn_sdio.o
+
+# dw_mmc platform glue for the Proxima SDMMC clock. Needs the dw_mci core's private
+# header (drivers/mmc/host/dw_mmc.h); resolves dw_mci_pltfm_* from the seeded
+# Module.symvers. Per-file include so the other modules are unaffected.
+obj-m += dw_mci-artosyn.o
+CFLAGS_dw_mci-artosyn.o := -I$(srctree)/drivers/mmc/host
+
+# artosyn,gpio controller - needed to drive the AR8030 reset (GPIO23). Uses the
+# exported gpiochip_add_data_with_key (bgpio_init is not exported, so custom ops).
+obj-m += artosyn_gpio.o
+
+# artosyn,adc SAR ADC - IIO provider for the button voltage ladder (adc-keys consumes
+# it via io-channels). Needs CONFIG_IIO=m (industrialio.ko) in the kernel config.
+obj-m += artosyn_adc.o
+
+# artosyn,protemp - SoC temperature sensor sharing the ADC's MMIO window (@0x0A108000).
+# IIO_TEMP provider for the menu's SoC-temperature readout (in_temp_scale). Same
+# CONFIG_IIO=m dependency as artosyn_adc. RE: ../docs/artosyn-protemp.md.
+obj-m += artosyn_protemp.o
+
+# artosyn,ar9301-pwm - PWM controller for the LCD backlight (pwmchip0 ch1) + buzzer.
+# pwm-backlight (mainline) sits on top via a pwm-backlight DT node.
+obj-m += artosyn_pwm.o
+
+# NOTE: the display DRM/KMS drivers (VO CRTC + dw-mipi-dsi glue + QY45043A0 panel) are
+# NOT here. DRM helper symbols (DRM_KMS_HELPER/DRM_GEM_DMA_HELPER/DRM_DW_MIPI_DSI) are
+# select-only, so the drivers must be in-tree to enable them: see
+# patches/drivers/gpu/drm/artosyn/ (CONFIG_DRM_ARTOSYN, overlaid by build.sh).
+
+# Standalone DesignWare MMC host - open re-impl of the vendor dw_mci path (not mainline dw_mmc).
+obj-m += artosyn_mmc.o
+
+# ml_dmablit - char-device shim exposing the built-in dw-axi-dmac copy engine to userspace
+# as a batched dmabuf memcpy, for the GStreamer two-tile compositor (off-CPU compose). Uses
+# only in-kernel dmaengine + dma-buf APIs (both =y). Test: ../test_tools/ml_dmablit_test.c.
+obj-m += ml_dmablit.o

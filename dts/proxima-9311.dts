@@ -1,0 +1,753 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Artosyn Proxima-9311 (BetaFPV VR04 / ArtLynk goggle) mainline DT. Derived
+ * from the vendor DT plus captures from the running stock device (clk_summary,
+ * iomem, interrupts).
+ */
+/dts-v1/;
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/gpio/gpio.h>
+
+/ {
+	model = "Artosyn Proxima-9311 (BetaFPV VR04 goggle)";
+	compatible = "artosyn,proxima-9311";
+	interrupt-parent = <&gic>;
+	#address-cells = <2>;
+	#size-cells = <2>;
+
+	aliases { serial0 = &uart0; };
+
+	chosen {
+		stdout-path = "serial0:1152000n8";
+		/*
+		 * Bare `earlycon` (no args) drives the early console from stdout-path ->
+		 * the serial0 node, so it picks up reg-shift=2 / reg-io-width=4 from the DT.
+		 * The cmdline form `earlycon=uart8250,mmio32,0x1500000` would default to
+		 * regshift=0 and write the WRONG register offsets on this DesignWare UART
+		 * (only ti,omap setup forces regshift=2), giving a silent boot.
+		 */
+		/* First-boot diagnostics: keep_bootcon keeps the (known-good) earlycon alive
+		 * even after the ttyS0 handoff, so we still see output if the full 8250_dw
+		 * console mis-probes; ignore_loglevel prints every message incl. debug. Drop
+		 * both once it boots clean. Add `initcall_debug` if it hangs in driver init. */
+		/* Falcon/SPL boot takes the cmdline from HERE, not the U-Boot env. Root MUST be
+		 * specified or the kernel panics at mount_root. Alpine rootfs = UBIFS vol "rootfs"
+		 * on userapp1. `ubi.mtd` MUST be the NUMERIC stock mtd index (18 = userapp1, given
+		 * CONFIG_MTD_PARTITIONED_MASTER=y): on a slot-B boot the SPL Falcon rewrites this
+		 * field in-place to <active-userapp GPT-ordinal + 6> = 18, and it MANGLES a
+		 * non-numeric value (userapp1 -> "18erapp1"). Keep it numeric. */
+		bootargs = "earlycon keep_bootcon ignore_loglevel console=ttyS0,1152000 mem=148m ubi.mtd=18 root=ubi:rootfs rootfstype=ubifs rw";
+	};
+
+	cpus {
+		#address-cells = <2>;
+		#size-cells = <0>;
+
+		/*
+		 * The SPL parks CPU1 with a custom release protocol, so mainline
+		 * "spin-table" never wakes it (CPU1 fails to come online). Use the
+		 * "ar-spin-table" method our kernel adds (patches/arch/arm64/
+		 * kernel/smp_spin_table.c), which writes the SPL handshake words the
+		 * vendor kernel writes in addition to the standard entry point.
+		 * cpu-release-addr stays at 0x100000 (SRAM), the slot the SPL polls.
+		 *
+		 * The vendor nodes also carry next-level-cache/l2-cache (cacheinfo
+		 * topology in sysfs only), intentionally omitted.
+		 *
+		 * clocks + operating-points-v2 = cpufreq: <&pixclk 2> is the
+		 * settable cgu_cpu_clk (register 0xa100008 + mirror,
+		 * clk-ar9311-cgu.c); the OPP table is the vendor's verbatim
+		 * (8 shared OPPs at a constant 900 mV, no regulator). The default
+		 * governor is performance = exact vendor behavior (stock pins it
+		 * and never leaves 800 MHz).
+		 */
+		cpu0: cpu@0 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a53";
+			reg = <0 0>;
+			enable-method = "ar-spin-table";
+			clocks = <&pixclk 2>;
+			operating-points-v2 = <&cpu_opp_table>;
+		};
+		cpu1: cpu@1 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a53";
+			reg = <0 1>;
+			enable-method = "ar-spin-table";
+			cpu-release-addr = <0 0x100000>;
+			clocks = <&pixclk 2>;
+			operating-points-v2 = <&cpu_opp_table>;
+		};
+	};
+
+	/* Vendor OPP table, verbatim (the decompiled vendor DTS opp-table):
+	 * same 8 rates, constant 900000 uV (so no regulator is needed), 150 us
+	 * transition latency, 24 MHz marked opp-suspend. Every rate is exactly
+	 * producible by cgu_cpu_clk's parent/divider grid (800/1, 666666666/1,
+	 * 600/1, 400/1, 666666666/2, 800/4, 800/8, 24/1). */
+	cpu_opp_table: opp-table {
+		compatible = "operating-points-v2";
+		opp-shared;
+
+		opp-24000000 {
+			opp-hz = /bits/ 64 <24000000>;
+			opp-microvolt = <900000>;
+			clock-latency-ns = <150000>;
+			opp-suspend;
+		};
+		opp-100000000 {
+			opp-hz = /bits/ 64 <100000000>;
+			opp-microvolt = <900000>;
+			clock-latency-ns = <150000>;
+		};
+		opp-200000000 {
+			opp-hz = /bits/ 64 <200000000>;
+			opp-microvolt = <900000>;
+			clock-latency-ns = <150000>;
+		};
+		opp-333333333 {
+			opp-hz = /bits/ 64 <333333333>;
+			opp-microvolt = <900000>;
+			clock-latency-ns = <150000>;
+		};
+		opp-400000000 {
+			opp-hz = /bits/ 64 <400000000>;
+			opp-microvolt = <900000>;
+			clock-latency-ns = <150000>;
+		};
+		opp-600000000 {
+			opp-hz = /bits/ 64 <600000000>;
+			opp-microvolt = <900000>;
+			clock-latency-ns = <150000>;
+		};
+		opp-666666666 {
+			opp-hz = /bits/ 64 <666666666>;
+			opp-microvolt = <900000>;
+			clock-latency-ns = <150000>;
+		};
+		opp-800000000 {
+			opp-hz = /bits/ 64 <800000000>;
+			opp-microvolt = <900000>;
+			clock-latency-ns = <150000>;
+		};
+	};
+
+	memory@20000000 {
+		device_type = "memory";
+		reg = <0 0x20000000 0 0x40000000>;	/* 1 GiB; Linux capped via mem=148m */
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		/* MMZ media pool (vendor: ar_osal mmz=anonymous,0,0x29400000,0x06c00000),
+		 * 108 MiB just above the kernel's mem=148m RAM (ends at 0x29400000). When the
+		 * vendor MPP stack runs, the reimplemented MMZ driver manages it directly. The
+		 * wave5 codec claims it as its dma-coherent pool via the `memory-region`
+		 * phandle on video-codec@a080000 + of_reserved_mem_device_init in probe, so
+		 * codec buffers do NOT compete with the display for the shared 64 MiB CMA
+		 * (which fragments and fails the ~4.8 MiB vb_task alloc). `no-map`: the region
+		 * is outside the kernel linear map, so it is a coherent (uncached) carveout,
+		 * not a reusable CMA (CMA needs struct pages). */
+		mmz_pool: mmz@29400000 {
+			compatible = "shared-dma-pool";
+			reg = <0 0x29400000 0 0x06c00000>;
+			no-map;
+		};
+	};
+
+	timer {
+		compatible = "arm,armv8-timer";
+		interrupts = <GIC_PPI 13 IRQ_TYPE_LEVEL_LOW>,
+			     <GIC_PPI 14 IRQ_TYPE_LEVEL_LOW>,
+			     <GIC_PPI 11 IRQ_TYPE_LEVEL_LOW>,
+			     <GIC_PPI 10 IRQ_TYPE_LEVEL_LOW>;
+		clock-frequency = <24000000>;	/* arch timer @ 24 MHz (osc24M) */
+	};
+
+	/* Cortex-A53 PMU (perf counters). Per-core overflow interrupts, SPI 109 ->
+	 * cpu0 and SPI 110 -> cpu1, taken from the vendor DTS pmu_a53 node. Fully
+	 * mainline driver (ARM_PMUV3, already =y); validation: test_tools/pmu_test.c. */
+	pmu {
+		compatible = "arm,cortex-a53-pmu";
+		interrupts = <GIC_SPI 109 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 110 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-affinity = <&cpu0>, <&cpu1>;
+	};
+
+	/* uart/spi/i2c reference clock = 150 MHz (live clk_summary: i2c_clk/host_ref).
+	 * A fixed-clock stand-in, kept even though the CGU provider exists: the
+	 * 150 MHz bus/peripheral ref is not one of the 49 modelled leaves, and
+	 * re-pointing consumers is deliberately done one at a time. */
+	clk150m: clk150m {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <150000000>;
+	};
+
+	/* 24 MHz osc, the dw-wdt reference clock (vendor wdt clock-names = osc24M). */
+	clk24m: clk24m {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <24000000>;
+	};
+
+	gic: interrupt-controller@200000 {
+		compatible = "arm,gic-400";
+		#interrupt-cells = <3>;
+		interrupt-controller;
+		reg = <0 0x201000 0 0x1000>,	/* GICD */
+		      <0 0x202000 0 0x2000>,	/* GICC */
+		      <0 0x204000 0 0x2000>,	/* GICH */
+		      <0 0x206000 0 0x2000>;	/* GICV */
+		interrupts = <GIC_PPI 9 IRQ_TYPE_LEVEL_HIGH>;
+	};
+
+	soc {
+		compatible = "simple-bus";
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		uart0: serial@1500000 {
+			compatible = "snps,dw-apb-uart";
+			reg = <0 0x1500000 0 0x400>;
+			interrupts = <GIC_SPI 11 IRQ_TYPE_LEVEL_HIGH>;	/* GIC 43 */
+			clocks = <&clk150m>;	/* full 8250_dw driver derives baud from this (150 MHz, DLF) */
+			/* No clock-frequency: keeps earlycon at U-Boot's already-set 1152000 baud
+			 * (with it, earlycon reprograms DLL to divisor 8 = 1171875, ~1.7% off). */
+			reg-shift = <2>;
+			reg-io-width = <4>;
+			status = "okay";
+		};
+
+		/* i2c0 (DesignWare, mainline driver) carrying the board's DS1307 RTC at
+		 * 0x68 - the vendor's actual RTC path (its kernel drives the DS1307 with
+		 * the same mainline rtc-ds1307 driver and binds nothing to the SoC-internal
+		 * rtc@0a10c000). Timing/frequency properties are verbatim from the vendor
+		 * DTS. The vendor node also has resets = <&artosyn_reset 0x10>; dropped
+		 * here (no open reset-controller driver) - the block is already out of
+		 * reset when we boot, and the driver treats resets as optional. */
+		i2c0: i2c@1200000 {
+			compatible = "snps,designware-i2c";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			reg = <0 0x1200000 0 0x2000>;
+			interrupts = <GIC_SPI 32 IRQ_TYPE_LEVEL_HIGH>;	/* vendor 0x20 -> GIC 64 */
+			clock-frequency = <400000>;
+			i2c-sda-hold-time-ns = <300>;
+			i2c-sda-falling-time-ns = <300>;
+			i2c-scl-falling-time-ns = <300>;
+			clocks = <&clk150m>;	/* vendor i2c_clk = 150 MHz host_ref */
+			status = "okay";
+
+			rtc@68 {
+				compatible = "dallas,ds1307";
+				reg = <0x68>;
+			};
+		};
+
+		/* Active DesignWare watchdog (vendor wdt@01600000, status okay; the other
+		 * @01056000 is disabled). The bootloader leaves it running, so with
+		 * CONFIG_WATCHDOG_HANDLE_BOOT_ENABLED the kernel auto-feeds it and stays up
+		 * (without this node the driver never binds and the wdt resets us to stock). */
+		watchdog@1600000 {
+			compatible = "snps,dw-wdt";
+			reg = <0 0x1600000 0 0x1000>;
+			interrupts = <GIC_SPI 37 IRQ_TYPE_LEVEL_HIGH>;	/* vendor 0x25 -> GIC 69 */
+			clocks = <&clk24m>;
+			/* The block is synthesized WITHOUT the fixed-TOP feature
+			 * (COMP_PARAMS_1 bit6 = 0, live-read), so the driver asks the DT
+			 * for the user TOP values. Artosyn synthesized them to the
+			 * standard 2^(16+i) scheme anyway: live-proven by a /dev/watchdog
+			 * ping reloading CCVR to ~2^28 with TORR TOP=12, and by the
+			 * vendor 4.9 driver (which hardcodes this formula) working with
+			 * no DT property. Listing them pins the hardware truth and
+			 * silences the probe-time "No valid TOPs array" warning. */
+			snps,watchdog-tops = <0x00010000 0x00020000 0x00040000 0x00080000
+					      0x00100000 0x00200000 0x00400000 0x00800000
+					      0x01000000 0x02000000 0x04000000 0x08000000
+					      0x10000000 0x20000000 0x40000000 0x80000000>;
+			status = "okay";
+		};
+
+		/* Custom Artosyn QSPI controller fronting the on-board SPI-NAND (the rootfs
+		 * flash). Driver overlaid by build.sh (patches/drivers/spi/spi-ar9301.c);
+		 * the mainline spi-nand/MTD/UBI/squashfs stack binds on top. */
+		qspi: spi@1e00000 {
+			compatible = "artosyn,ar9301-qspi";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			reg = <0 0x01e00000 0 0x1000>,	/* qspi_base */
+			      <0 0x0a104034 0 0x40>,	/* cgu_base */
+			      <0 0x01e10000 0 0x1000>,	/* dma_base */
+			      <0 0x01a00030 0 0x40>;	/* hs_sel_base */
+			reg-names = "qspi_base", "cgu_base", "dma_base", "hs_sel_base";
+			interrupts = <GIC_SPI 98 IRQ_TYPE_LEVEL_HIGH>;	/* vendor 0x62 -> GIC 130 */
+			clocks = <&clk150m>;
+			status = "okay";
+
+			flash@0 {
+				compatible = "spi-nand";
+				reg = <0>;
+				spi-max-frequency = <150000000>;
+
+				/* Flash layout (matches the vendor mtdparts). Defined here so the
+				 * partitions exist regardless of the spi device name; UBI then
+				 * attaches the rootfs by name (ubi.mtd=userapp0/1, the A/B slots). */
+				partitions {
+					compatible = "fixed-partitions";
+					#address-cells = <1>;
+					#size-cells = <1>;
+					partition@0       { label = "spl0";     reg = <0x0000000 0x40000>; };
+					partition@40000   { label = "spl1";     reg = <0x0040000 0x40000>; };
+					partition@80000   { label = "spl2";     reg = <0x0080000 0x40000>; };
+					partition@c0000   { label = "spl3";     reg = <0x00c0000 0x40000>; };
+					partition@100000  { label = "gpt0";     reg = <0x0100000 0x40000>; };
+					partition@140000  { label = "gpt1";     reg = <0x0140000 0x40000>; };
+					partition@180000  { label = "vendor";   reg = <0x0180000 0x80000>; };
+					partition@200000  { label = "factory";  reg = <0x0200000 0x600000>; };
+					partition@800000  { label = "env0";     reg = <0x0800000 0x60000>; };
+					partition@860000  { label = "env1";     reg = <0x0860000 0x60000>; };
+					partition@8c0000  { label = "uboot0";   reg = <0x08c0000 0xc0000>; };
+					partition@980000  { label = "uboot1";   reg = <0x0980000 0xc0000>; };
+					partition@a40000  { label = "kernel0";  reg = <0x0a40000 0x600000>; };
+					partition@1040000 { label = "kernel1";  reg = <0x1040000 0x600000>; };
+					partition@1640000 { label = "dtb0";     reg = <0x1640000 0x60000>; };
+					partition@16a0000 { label = "dtb1";     reg = <0x16a0000 0x60000>; };
+					partition@1700000 { label = "userapp0"; reg = <0x1700000 0x2d00000>; };
+					partition@4400000 { label = "userapp1"; reg = <0x4400000 0x2d00000>; };
+					partition@7100000 { label = "usr_data"; reg = <0x7100000 0x600000>; };
+					partition@7700000 { label = "usr_log";  reg = <0x7700000 0x600000>; };
+				};
+			};
+		};
+
+		/* USB 2.0 OTG (DesignWare DWC2): the gadget UDC for the ECM network link
+		 * (host SSH / networking). The vendor compatible is "artosyn,ar9301-usb"
+		 * but the controller is a stock DWC2; mainline binds on "snps,dwc2". The
+		 * g-*-fifo-size + g-use-dma are the vendor's gadget FIFO configuration. */
+		usb@8000000 {
+			compatible = "snps,dwc2";
+			reg = <0 0x8000000 0 0x40000>;
+			interrupts = <GIC_SPI 74 IRQ_TYPE_LEVEL_HIGH>;	/* vendor 0x4a -> GIC 106 */
+			dr_mode = "otg";
+			g-np-tx-fifo-size = <0x20>;
+			g-rx-fifo-size = <0x300>;
+			g-tx-fifo-size = <0x300 0x200 0x200 0x20 0x10 0x10 0x10 0x10 0x10 0x10>;
+			g-use-dma;
+			status = "okay";
+		};
+
+		/* MPP scaler / crop-resize engine (ar_scaler). Core regs @0x08840000,
+		 * clock/power "control" regs @0x0A100000, completion on GIC 107. */
+		scaler@8840000 {
+			compatible = "artosyn,scaler";
+			reg = <0 0x8840000 0 0x1000>;
+			control = <0x0a100000>;
+			frequency = <0>;
+			interrupts = <GIC_SPI 75 IRQ_TYPE_LEVEL_HIGH>;	/* GIC 107 */
+			status = "okay";
+		};
+
+		/* Chips&Media Wave5 (WAVE521C) H.264/H.265 engine, driven by the
+		 * mainline V4L2 driver drivers/media/platform/chips-media/wave5
+		 * as overlaid from patches/drivers/media/platform/chips-media/.
+		 * Firmware = chagall.bin (the Wave5 VCPU ucode; NOT the RF firmware).
+		 *
+		 * SPI 68 (h26x GIC 100) is also listed as the "h26x" interrupt of
+		 * ar_mpp@8870000 below, so the wave5 driver and the ar_mpp /dev/mem
+		 * forwarder are mutually exclusive: both nodes stay "okay", but only
+		 * one of the two modules may be loaded (both are =m; the second
+		 * request_irq on the line fails).
+		 *
+		 * reg = the single Wave5 host-IF window (index 0). The 128 KiB aux window
+		 * 0x001f0000 is the VCPU reference SRAM, handed to the driver via the
+		 * `sram` phandle (of_gen_pool_get), NOT a second reg entry. */
+		vpu_sram: sram@1f0000 {
+			compatible = "mmio-sram";
+			reg = <0 0x001f0000 0 0x20000>;	/* 128 KiB codec SRAM */
+			#address-cells = <2>;
+			#size-cells = <2>;
+			ranges = <0 0 0 0x001f0000 0 0x20000>;
+			status = "okay";
+		};
+
+		video-codec@a080000 {
+			/* Binds via the driver's existing TI of_match ("ti,j721s2-wave521c"):
+			 * the Wave5 core is identical, so the TI binding + its match-data
+			 * (fw = cnm/wave521c_k3_codec_fw.bin, enc+dec, sram_size 64K) are
+			 * reused instead of adding an artosyn entry to wave5-vpu.c's match
+			 * table. Install chagall.bin (the extracted Wave5 VCPU fw) at that
+			 * firmware path. */
+			compatible = "ti,j721s2-wave521c";
+			reg = <0 0x0a080000 0 0x10000>;	/* Wave5 host IF, 64 KiB */
+			interrupts = <GIC_SPI 68 IRQ_TYPE_LEVEL_HIGH>;	/* h26x GIC 100 */
+			sram = <&vpu_sram>;
+			/* Allocate codec DPB/display/task buffers from the dedicated 108 MiB
+			 * media pool instead of the display-fragmented global CMA. Wired up by
+			 * of_reserved_mem_device_init() in the wave5 probe overlay. */
+			memory-region = <&mmz_pool>;
+			/* clocks: media CRG gate 0x0a106008 bit 13 (ar_video_h26x_clock_on).
+			 * Not modelled here (the driver treats clocks as optional).
+			 * TODO: add a clock phandle once a CRG clk provider exists. */
+			status = "okay";
+		};
+
+		/* MPP engine GIC-IRQ forwarder (ar_mpp_drv). NOT a codec driver: it
+		 * only forwards the engines' completion IRQs to userspace, which
+		 * programs the engines via /dev/mem. hwirqs: h26x=100, jpeg=101,
+		 * ge2d=111 (scaler GIC 107 is owned by ar_scaler, so it's excluded).
+		 * reg = the vsync poll window used by the nr7 ioctl. */
+		ar_mpp@8870000 {
+			compatible = "artosyn,ar_mpp";
+			reg = <0 0x8870000 0 0x1000>;
+			#address-cells = <2>;
+			#size-cells = <2>;
+			ranges;
+			interrupts = <GIC_SPI 68 IRQ_TYPE_LEVEL_HIGH>,	/* h26x GIC 100 */
+				     <GIC_SPI 69 IRQ_TYPE_LEVEL_HIGH>,	/* jpeg GIC 101 */
+				     <GIC_SPI 79 IRQ_TYPE_LEVEL_HIGH>;	/* ge2d GIC 111 */
+			interrupt-names = "h26x", "jpeg", "ge2d";
+			status = "okay";
+
+			/* DMA engines the vendor placed as ar_mpp children. libmpp_service's
+			 * SYS_Init queries these by compatible (ar_mpp_drv nr6) and asserts the
+			 * IRQ count equals the channel count, so both must be present with the
+			 * exact interrupt lists. IRQs = the vendor DT's SPI numbers. */
+			ahb_dma {
+				compatible = "artosyn,ahb_dma";	/* 8 channels; ahb_dma_init asserts == 8 */
+				reg = <0 0x01e10000 0 0x10000>, <0 0x01a00030 0 0x4>;
+				interrupts = <GIC_SPI 50 IRQ_TYPE_LEVEL_HIGH>,	/* vendor 0x32 */
+					     <GIC_SPI 51 IRQ_TYPE_LEVEL_HIGH>,
+					     <GIC_SPI 52 IRQ_TYPE_LEVEL_HIGH>,
+					     <GIC_SPI 53 IRQ_TYPE_LEVEL_HIGH>,
+					     <GIC_SPI 54 IRQ_TYPE_LEVEL_HIGH>,
+					     <GIC_SPI 55 IRQ_TYPE_LEVEL_HIGH>,
+					     <GIC_SPI 56 IRQ_TYPE_LEVEL_HIGH>,
+					     <GIC_SPI 57 IRQ_TYPE_LEVEL_HIGH>;	/* vendor 0x39 */
+			};
+			axi_dma {
+				compatible = "artosyn,axi_dma";	/* 3 channels; dw_dmac_axi_dev_init asserts == 3 */
+				reg = <0 0x08800000 0 0x1000>;
+				interrupts = <GIC_SPI 63 IRQ_TYPE_LEVEL_HIGH>,	/* vendor 0x3f */
+					     <GIC_SPI 64 IRQ_TYPE_LEVEL_HIGH>,
+					     <GIC_SPI 65 IRQ_TYPE_LEVEL_HIGH>;	/* vendor 0x41 */
+			};
+		};
+
+		/* DesignWare AXI DMA controller @ 0x08800000 - the SoC phys-to-phys copy engine
+		 * the vendor Fusion compositor drives via /dev/axi_dma.
+		 * We open it with mainline drivers/dma/dw-axi-dmac (CONFIG_DW_AXI_DMAC, configs/dma.config)
+		 * to offload the GStreamer two-tile compose blit off the CPU.
+		 *
+		 * This is a SECOND node at the same reg as the dormant ar_mpp/axi_dma stub above.
+		 * That stub is a compatible-only entry the vendor libmpp queries; it is NOT a
+		 * platform device (ar_mpp is not a simple-bus) and never ioremaps, so there is no
+		 * conflict - only this soc-level node becomes a platform device and binds the driver.
+		 *
+		 * The block is a stock DW-axi-dmac 1.01a, so it needs the snps,* geometry below.
+		 * Values chosen conservatively for a mem-to-mem copy engine on unknown-exact HW:
+		 *   snps,dma-masters = 1  - keep src+dst on AXI master 0; masters>1 would program a
+		 *                           second master port the driver assumes exists (bus hang if not).
+		 *   snps,data-width  = 3  - 64-bit; the memcpy path caps transfer width at 32-bit
+		 *                           internally regardless, so this is not load-bearing.
+		 *   snps,block-size  = 4096 per channel - the binding-example safe default (the true
+		 *                           HW block_ts field width is unknown; too-large silently
+		 *                           truncates). A 3 MB tile splits into ~192 LLI descriptors;
+		 *                           bump once the real max is confirmed on HW.
+		 *   snps,priority    = 0/1/2 - distinct, in [0..nr_channels-1] as the driver requires.
+		 * The base "snps,axi-dma-1.01a" match sets no HAS_RESETS flag, so no resets needed.
+		 * core-clk/cfgr-clk are clk_get-mandatory but only prepare_enable'd (rate never read),
+		 * so the clk150m stand-in stays valid; migrate to a CGU leaf only if a real
+		 * consumer need appears (same as dsi). */
+		axidma: dma-controller@8800000 {
+			compatible = "snps,axi-dma-1.01a";
+			reg = <0 0x08800000 0 0x1000>;
+			interrupts = <GIC_SPI 63 IRQ_TYPE_LEVEL_HIGH>,	/* vendor 0x3f */
+				     <GIC_SPI 64 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 65 IRQ_TYPE_LEVEL_HIGH>;	/* vendor 0x41 */
+			clocks = <&clk150m>, <&clk150m>;
+			clock-names = "core-clk", "cfgr-clk";
+			#dma-cells = <1>;
+			dma-channels = <3>;
+			snps,dma-masters = <1>;
+			snps,data-width = <3>;
+			snps,block-size = <4096 4096 4096>;
+			snps,priority = <0 1 2>;
+			status = "okay";
+		};
+
+		/* DesignWare SPI master (vendor spi@08140000; reg is 0x1102000). Drives the
+		 * status LED (WS2812-style RGB over SPI, CS0), exclusively; the display panel
+		 * uses DSI + GPIO + PWM, not this bus. Mainline dw_spi_mmio binds. Probe logs
+		 * "DMA init failed": expected and benign - no dmas property here, so the bus
+		 * runs PIO, exactly like the vendor (enable_dma = <0> in the vendor DTS). The
+		 * NAND is unaffected (it sits on the qspi above, which has its own DMA). */
+		spi@1102000 {
+			compatible = "snps,dw-apb-ssi";
+			reg = <0 0x1102000 0 0x2000>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			num-cs = <4>;
+			reg-io-width = <4>;
+			interrupts = <GIC_SPI 39 IRQ_TYPE_LEVEL_HIGH>;	/* vendor 0x27 -> GIC 71 */
+			clocks = <&clk150m>;
+			status = "okay";
+
+			/* Status LED on CS0, driven from userspace via spidev for bring-up. The
+			 * spidev whitelist rejects a literal "spidev" compatible, so use the de-facto
+			 * generic "rohm,dh2228fv"; speed matches the vendor's 6.25 MHz LED clock. */
+			led_spi: spidev@0 {
+				compatible = "rohm,dh2228fv";
+				reg = <0>;
+				spi-max-frequency = <6250000>;
+			};
+		};
+
+		/* SAR ADC (artosyn_adc.ko, modules/). 8 channels, 10-bit; reg window
+		 * 0x21c selects the "9311" register layout (DATA @0x210). Provides the IIO
+		 * channel the adc-keys node below reads. */
+		adc: adc@a108000 {
+			compatible = "artosyn,adc";
+			reg = <0 0x0a108000 0 0x21c>;
+			channels = <8>;
+			samp-count = <4>;
+			#io-channel-cells = <1>;
+			status = "okay";
+		};
+
+		/* SoC temperature sensor (artosyn_protemp.ko). Separate engine inside the
+		 * ADC's MMIO block: temperature code at 0xcc/0xd0, linear code->Celsius.
+		 * reg window 0xd4 overlaps the ADC node above (both @0x0a108000); the
+		 * protemp driver maps it non-exclusively (devm_ioremap) so it does not
+		 * fight the ADC's request_mem_region. Exposes an IIO_TEMP channel whose
+		 * in_temp_scale carries the whole temperature. */
+		protemp: temperature@a108000 {
+			compatible = "artosyn,protemp";
+			reg = <0 0x0a108000 0 0xd4>;
+			samp-count = <8>;
+			status = "okay";
+		};
+
+		/* PWM controller 0 (vendor pwm@08000000; reg is 0x1000000). 8 channels;
+		 * ch1 = LCD backlight. artosyn_pwm.ko; functional clock is
+		 * host_ref (150 MHz). */
+		pwm0: pwm@1000000 {
+			compatible = "artosyn,ar9301-pwm";
+			reg = <0 0x1000000 0 0x2000>;
+			#pwm-cells = <2>;
+			clocks = <&clk150m>;
+			status = "okay";
+		};
+
+		/* PWM controller 1 (vendor pwm@08040000; reg is 0x1002000). 8 channels;
+		 * ch0 = buzzer (tone; period 260000 ns / ~3.8 kHz, duty = 13000*volume ns).
+		 * Same artosyn_pwm.ko and host_ref clock. Under the modern pwmchip-id
+		 * allocator this comes up as pwmchip1 (controller 0 = pwmchip0); the stock
+		 * 4.9 kernel numbered it pwmchip8 (old global PWM-base scheme). */
+		pwm1: pwm@1002000 {
+			compatible = "artosyn,ar9301-pwm";
+			reg = <0 0x1002000 0 0x2000>;
+			#pwm-cells = <2>;
+			clocks = <&clk150m>;
+			status = "okay";
+		};
+
+		/* GPIO controller (artosyn_gpio.ko): 7 banks, lines 0-109 by the vendor global
+		 * numbering. One node; a custom of_xlate routes <&gpio N> to the right bank.
+		 * Used for the AR8030 RF reset (23) and the panel reset/enable (43, 95). */
+		gpio: gpio@a10a000 {
+			compatible = "artosyn,gpio";
+			reg = <0 0x0a10a000 0 0x2000>;
+			gpio-controller;
+			#gpio-cells = <2>;
+			status = "okay";
+
+			/* Panel scan-direction straps. The QY45043A0 GIP controller latches its gate
+			 * (vertical) and source (horizontal) scan direction from two pins sampled at
+			 * panel power-on, NOT from the DCS init. Stock drives both low; left floating,
+			 * the panel scans both axes reversed and the whole image comes up rotated 180.
+			 * gpio-42 = source/horizontal, gpio-107 = gate/vertical.
+			 * These MUST be driven low BEFORE panel-power (gpio-100) goes high, so they are
+			 * hogged ahead of panel_power_hog. gpio-42 is bank1 (registered before bank6);
+			 * gpio-107 shares bank6 with panel-power and is listed first here so its hog is
+			 * applied before the power hog. */
+			panel_scan_h_hog: panel-scan-h-hog {
+				gpio-hog;
+				gpios = <42 GPIO_ACTIVE_HIGH>;
+				output-low;
+				line-name = "panel-scan-h";
+			};
+
+			panel_scan_v_hog: panel-scan-v-hog {
+				gpio-hog;
+				gpios = <107 GPIO_ACTIVE_HIGH>;
+				output-low;
+				line-name = "panel-scan-v";
+			};
+
+			/* gpio-100 (bank6 line6) is a panel power rail the stock kernel drives high
+			 * at boot; left floating, the panel is unpowered. Drive it high via a hog. */
+			panel_power_hog: panel-power-hog {
+				gpio-hog;
+				gpios = <100 GPIO_ACTIVE_HIGH>;
+				output-high;
+				line-name = "panel-power";
+			};
+		};
+
+		/* CGU clock provider (drivers/clk/clk-ar9311-cgu.c, built in): the whole
+		 * 49-leaf tree read-only (the recovered vendor CGU clock table) plus the
+		 * settable pixel PLL inherited from the old pixel-clk driver. Provider
+		 * indices 0/1 are unchanged from that driver: <&pixclk 0> = the DC pixel
+		 * leaf cgu_dvp_sub_1_2x_pix_clk (VO's pclk), <&pixclk 1> = pixel_pll;
+		 * the 48 other leaves follow. The reg windows are shared with the
+		 * ADC/protemp nodes; the driver maps them non-exclusively. */
+		pixclk: clock-controller@a100000 {
+			compatible = "artosyn,ar9311-cgu";
+			reg = <0 0x0a100000 0 0x20>,	/* cpu clk @+0x08, cs_dbg @+0x10 */
+			      <0 0x0a104000 0 0x210>,	/* leaf mux+gate bank (+0x200/+0x204 incl.) */
+			      <0 0x0a108000 0 0x420>;	/* pixel PLL: +0x98 range, +0x410 feedback */
+			clocks = <&clk24m>;
+			#clock-cells = <1>;
+		};
+
+		/* VO display controller (artosyn_vo.ko, DRM CRTC) -> DSI host. IRQ 102. */
+		vo: vo@8810000 {
+			compatible = "artosyn,vo";
+			/* pclk = the DC pixel clock, a real settable clock (see pixclk
+			 * above); the driver enables it and clk_set_rate steers the
+			 * scan-out rate. */
+			clocks = <&pixclk 0>;
+			/* 0x40000, not 0x100000: the DSI host sits at 0x8850000 (= base + 0x40000),
+			 * so a 1 MiB VO window overlaps it and the VO's exclusive ioremap fails with
+			 * -EBUSY. 0x40000 is the largest non-overlapping size (VO regs end where the
+			 * DSI begins); the exact VO block size is unknown. */
+			reg = <0 0x8810000 0 0x40000>;
+			interrupts = <GIC_SPI 70 IRQ_TYPE_LEVEL_HIGH>;	/* IRQ 102 */
+			status = "okay";
+
+			port {
+				vo_out: endpoint { remote-endpoint = <&dsi_in>; };
+			};
+		};
+
+		/* MIPI-DSI host: mainline dw-mipi-dsi via the artosyn_dsi.ko glue (4-lane, 891
+		 * Mbps). The QY45043A0 panel is the DSI child. TODO: DSI pclk/byte clock. */
+		dsi: dsi@8850000 {
+			compatible = "artosyn,dsi";
+			reg = <0 0x8850000 0 0x100000>;
+			/* "pclk" = the DSI APB/register clock that mainline dw-mipi-dsi requires
+			 * (clk_get is non-optional). clk150m is a running stand-in to unblock the
+			 * probe; the MIPI pixel PLL (separate) is what actually gates scanout.
+			 * TODO: migrate to a CGU clock (the D-PHY PLL lives in the DSI window,
+			 * not the CGU banks, so this needs its own modelling; see the
+			 * mipi_tx_pll_div2 placeholder in clk-ar9311-cgu.c). */
+			clocks = <&clk150m>;
+			clock-names = "pclk";
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "okay";
+
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+				port@0 {
+					reg = <0>;
+					dsi_in: endpoint { remote-endpoint = <&vo_out>; };
+				};
+				port@1 {
+					reg = <1>;
+					dsi_out: endpoint { remote-endpoint = <&panel_in>; };
+				};
+			};
+
+			panel@0 {
+				compatible = "qiyang,qy45043a0";
+				reg = <0>;
+				reset-gpios = <&gpio 43 GPIO_ACTIVE_HIGH>;
+				enable-gpios = <&gpio 95 GPIO_ACTIVE_HIGH>;
+				backlight = <&backlight>;
+
+				port {
+					panel_in: endpoint { remote-endpoint = <&dsi_out>; };
+				};
+			};
+		};
+	};
+
+	/* LCD backlight: pwm-backlight on PWM0 channel 1, 500000 ns period (2 kHz). The
+	 * panel has a ~28% duty floor; brightness levels are the vendor's duty percents
+	 * (level*8 + 20, i.e. 28%..100% in 10 steps; vendor duty = lvl*40000+100000 ns). */
+	backlight: backlight {
+		compatible = "pwm-backlight";
+		pwms = <&pwm0 1 500000>;
+		brightness-levels = <28 36 44 52 60 68 76 84 92 100>;
+		default-brightness-level = <7>;
+	};
+
+	/* Front-panel buttons: a resistor ladder on ADC channel 0, decoded by the
+	 * in-kernel adc-keys driver into evdev key events on /dev/input/event0. Codes and
+	 * thresholds ported verbatim from the vendor DT; they match the keymap the menu
+	 * expects (libre/hardware/boards/ground/betafpv_p1_hd.c). No reg -> kept at root. */
+	adc-keys {
+		compatible = "adc-keys";
+		io-channels = <&adc 0>;
+		io-channel-names = "buttons";
+		poll-interval = <10>;
+		keyup-threshold-microvolt = <0>;
+		status = "okay";
+
+		bind-key {
+			linux,code = <0x49>;
+			label = "bind";
+			press-threshold-microvolt = <200000>;
+		};
+		back-key {
+			linux,code = <0x42>;
+			label = "back";
+			press-threshold-microvolt = <399968>;
+		};
+		record-key {
+			linux,code = <0x4d>;
+			label = "record";
+			press-threshold-microvolt = <601024>;
+		};
+		up-key {
+			linux,code = <0x57>;
+			label = "up";
+			press-threshold-microvolt = <800000>;
+		};
+		left-key {
+			linux,code = <0x41>;
+			label = "left";
+			press-threshold-microvolt = <1000000>;
+		};
+		right-key {
+			linux,code = <0x44>;
+			label = "right";
+			press-threshold-microvolt = <1200000>;
+		};
+		enter-key {
+			linux,code = <0x45>;
+			label = "enter";
+			press-threshold-microvolt = <1398016>;
+		};
+		down-key {
+			linux,code = <0x53>;
+			label = "down";
+			press-threshold-microvolt = <1550848>;
+		};
+	};
+
+	/* MPP /proc umap message shuttle (ar_mpp_proc_ctrl). No HW; kept out of
+	 * the simple-bus soc node since it has no reg. */
+	ar_mpp_proc {
+		compatible = "artosyn,ar_mpp_proc";
+		status = "okay";
+	};
+};

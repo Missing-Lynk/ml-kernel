@@ -1,0 +1,132 @@
+Why: (1) upstream's finish_encode error path returns without
+v4l2_m2m_job_finish, leaking the m2m job; the next STREAMOFF then deadlocks in
+v4l2_m2m_cancel_job (D-state with the device mutex held, VPU unusable until
+power cycle). Log the firmware error and error the buffers instead. (2) The
+coded (bitstream) sizeimage is clamped in try_fmt/s_fmt, mirroring the decoder
+clamp (patch 0009), bounding the coded-buffer allocations from the fixed pool.
+
+--- a/drivers/media/platform/chips-media/wave5/wave5-vpu-enc.c
++++ b/drivers/media/platform/chips-media/wave5/wave5-vpu-enc.c
+@@ -200,11 +200,11 @@
+ 	pic_param.code_option.encode_aud = inst->encode_aud;
+ 	ret = wave5_vpu_enc_start_one_frame(inst, &pic_param, fail_res);
+ 	if (ret) {
++		/* bring-up instrumentation: dev_dbg is compiled out on this kernel */
++		dev_warn(inst->dev->dev, "%s: wave5_vpu_enc_start_one_frame fail: %d (res: 0x%x)\n",
++			 __func__, ret, *fail_res);
+ 		if (*fail_res == WAVE5_SYSERR_QUEUEING_FAIL)
+ 			return -EINVAL;
+-
+-		dev_dbg(inst->dev->dev, "%s: wave5_vpu_enc_start_one_frame fail: %d\n",
+-			__func__, ret);
+ 		src_buf = v4l2_m2m_src_buf_remove(m2m_ctx);
+ 		if (!src_buf) {
+ 			dev_dbg(inst->dev->dev,
+@@ -224,8 +224,8 @@
+ 		v4l2_m2m_buf_done(src_buf, VB2_BUF_STATE_ERROR);
+ 		v4l2_m2m_buf_done(dst_buf, VB2_BUF_STATE_ERROR);
+ 	} else {
+-		dev_dbg(inst->dev->dev, "%s: wave5_vpu_enc_start_one_frame success\n",
+-			__func__);
++		dev_dbg(inst->dev->dev, "%s: ENC_PIC queued (src_idx %d, end_flag %u)\n",
++			__func__, pic_param.src_idx, pic_param.src_end_flag);
+ 		/*
+ 		 * Remove the source buffer from the ready-queue now and finish
+ 		 * it in the videobuf2 framework once the index is returned by the
+@@ -248,9 +248,23 @@
+ 
+ 	ret = wave5_vpu_enc_get_output_info(inst, &enc_output_info);
+ 	if (ret) {
+-		dev_dbg(inst->dev->dev,
+-			"%s: vpu_enc_get_output_info fail: %d  reason: %u | info: %u\n",
+-			__func__, ret, enc_output_info.error_reason, enc_output_info.warn_info);
++		/*
++		 * Mainline only dev_dbg's here and returns WITHOUT finishing the
++		 * m2m job, so a single failed ENC_PIC leaves the job active forever
++		 * and a later STREAMOFF deadlocks in v4l2_m2m_cancel_job (D-state,
++		 * device mutex held, whole VPU unusable). Log loudly and finish
++		 * the job so userspace gets its buffers back as errors.
++		 */
++		dev_warn(inst->dev->dev,
++			 "%s: vpu_enc_get_output_info fail: %d  reason: 0x%x | info: 0x%x\n",
++			 __func__, ret, enc_output_info.error_reason, enc_output_info.warn_info);
++		src_buf = v4l2_m2m_src_buf_remove(m2m_ctx);
++		if (src_buf)
++			v4l2_m2m_buf_done(src_buf, VB2_BUF_STATE_ERROR);
++		dst_buf = v4l2_m2m_dst_buf_remove(m2m_ctx);
++		if (dst_buf)
++			v4l2_m2m_buf_done(dst_buf, VB2_BUF_STATE_ERROR);
++		v4l2_m2m_job_finish(inst->v4l2_m2m_dev, m2m_ctx);
+ 		return;
+ 	}
+ 
+@@ -401,6 +415,15 @@
+ 
+ 	wave5_update_pix_fmt(&f->fmt.pix_mp, VPU_FMT_TYPE_CODEC,
+ 			     width, height, frmsize);
++	/*
++	 * Artosyn: clamp the coded (bitstream) sizeimage, mirroring the decoder
++	 * (wave5-vpu-dec.c). GStreamer asks for a worst-case ~17 MiB coded buffer at 1080p;
++	 * unclamped, the CAPTURE vb2 pool (from the 64 MiB CMA, shared during DVR with the two
++	 * tile decoders' capture pools) exhausts CMA and wedges the encoder. 1 MiB holds any AU
++	 * this class produces (a 50 Mbit/s 60 fps stream averages ~104 KiB/frame).
++	 */
++	f->fmt.pix_mp.plane_fmt[0].sizeimage = min(f->fmt.pix_mp.plane_fmt[0].sizeimage,
++						   1U * 1024 * 1024);
+ 	f->fmt.pix_mp.colorspace = inst->colorspace;
+ 	f->fmt.pix_mp.ycbcr_enc = inst->ycbcr_enc;
+ 	f->fmt.pix_mp.quantization = inst->quantization;
+@@ -568,6 +591,11 @@
+ 	wave5_update_pix_fmt(&inst->dst_fmt, VPU_FMT_TYPE_CODEC,
+ 			     f->fmt.pix_mp.width, f->fmt.pix_mp.height,
+ 			     vpu_fmt->v4l2_frmsize);
++	/* Artosyn: re-apply the coded sizeimage clamp (see wave5_vpu_enc_try_fmt_cap). s_fmt_out
++	 * recomputes dst_fmt after the CAPTURE clamp, and this is the value the CAPTURE vb2 pool
++	 * actually allocates from. */
++	inst->dst_fmt.plane_fmt[0].sizeimage = min(inst->dst_fmt.plane_fmt[0].sizeimage,
++						   1U * 1024 * 1024);
+ 	inst->conf_win.width = inst->dst_fmt.width;
+ 	inst->conf_win.height = inst->dst_fmt.height;
+ 
+@@ -1343,17 +1371,20 @@
+ 
+ 		ret = wave5_set_enc_openparam(&open_param, inst);
+ 		if (ret) {
+-			dev_dbg(inst->dev->dev, "%s: wave5_set_enc_openparam, fail: %d\n",
+-				__func__, ret);
++			/* bring-up instrumentation: dev_dbg is compiled out */
++			dev_warn(inst->dev->dev, "%s: wave5_set_enc_openparam, fail: %d\n",
++				 __func__, ret);
+ 			goto return_buffers;
+ 		}
+ 
+ 		ret = wave5_vpu_enc_open(inst, &open_param);
+ 		if (ret) {
+-			dev_dbg(inst->dev->dev, "%s: wave5_vpu_enc_open, fail: %d\n",
+-				__func__, ret);
++			dev_warn(inst->dev->dev, "%s: wave5_vpu_enc_open, fail: %d\n",
++				 __func__, ret);
+ 			goto return_buffers;
+ 		}
++		dev_info(inst->dev->dev, "%s: enc instance open (id %d)\n",
++			 __func__, inst->id);
+ 
+ 		if (inst->mirror_direction) {
+ 			wave5_vpu_enc_give_command(inst, ENABLE_MIRRORING, NULL);
+@@ -1376,6 +1407,8 @@
+ 			dev_warn(inst->dev->dev, "Sequence not found: %d\n", ret);
+ 			goto return_buffers;
+ 		}
++		dev_info(inst->dev->dev, "%s: enc seq init done (fbc_buf_count %u, min_src %u)\n",
++			 __func__, inst->fbc_buf_count, inst->min_src_buf_count);
+ 		ret = switch_state(inst, VPU_INST_STATE_INIT_SEQ);
+ 		if (ret)
+ 			goto return_buffers;
+@@ -1390,6 +1423,7 @@
+ 		}
+ 
+ 		ret = switch_state(inst, VPU_INST_STATE_PIC_RUN);
++		dev_info(inst->dev->dev, "%s: enc entering PIC_RUN\n", __func__);
+ 	}
+ 	if (ret)
+ 		goto return_buffers;

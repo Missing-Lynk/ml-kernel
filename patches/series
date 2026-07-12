@@ -1,0 +1,11 @@
+0001-arm64-cpu_ops.patch
+0002-arm64-smp_spin_table.patch
+0003-wave5-Kconfig.patch
+0004-wave5-helper.patch
+0005-wave5-hw.patch
+0006-wave5-vdi.patch
+0007-wave5-vpuapi.patch
+0008-wave5-vpu.patch
+0009-wave5-vpu-dec.patch
+0010-wave5-vpu-enc.patch
+0011-dma-coherent-page-granular.patch

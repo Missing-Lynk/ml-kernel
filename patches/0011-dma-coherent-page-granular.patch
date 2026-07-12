@@ -1,0 +1,97 @@
+Why: the per-device dma-coherent pool allocator (bitmap_find_free_region)
+rounds every allocation up to a power-of-2 page order and places it
+order-aligned, so an allocation can occupy up to ~2x its size and the pool
+returns ENOMEM well below its nominal capacity. Replaced with page-granular
+first-fit (bitmap_find_next_zero_area); a per-allocation page-count map lets
+the release path free the exact count instead of relying on the caller's
+get_order(size). Only wave5 binds an rmem coherent pool on this system.
+
+--- a/kernel/dma/coherent.c
++++ b/kernel/dma/coherent.c
+@@ -16,6 +16,10 @@
+ 	unsigned long	pfn_base;
+ 	int		size;
+ 	unsigned long	*bitmap;
++	/* ML (Artosyn): pages per live allocation, indexed by start page. Allocations
++	 * are page-granular (not power-of-2 order-granular), so the release path
++	 * cannot rely on the caller's get_order(size); it reads the count here. */
++	unsigned int	*nr_map;
+ 	spinlock_t	spinlock;
+ 	bool		use_dev_dma_pfn_offset;
+ };
+@@ -55,6 +59,9 @@
+ 	dma_mem->bitmap = bitmap_zalloc(pages, GFP_KERNEL);
+ 	if (!dma_mem->bitmap)
+ 		goto out_free_dma_mem;
++	dma_mem->nr_map = kvcalloc(pages, sizeof(*dma_mem->nr_map), GFP_KERNEL);
++	if (!dma_mem->nr_map)
++		goto out_free_bitmap;
+ 
+ 	dma_mem->virt_base = mem_base;
+ 	dma_mem->device_base = device_addr;
+@@ -65,6 +72,8 @@
+ 
+ 	return dma_mem;
+ 
++out_free_bitmap:
++	bitmap_free(dma_mem->bitmap);
+ out_free_dma_mem:
+ 	kfree(dma_mem);
+ out_unmap_membase:
+@@ -80,6 +89,7 @@
+ 		return;
+ 
+ 	memunmap(mem->virt_base);
++	kvfree(mem->nr_map);
+ 	bitmap_free(mem->bitmap);
+ 	kfree(mem);
+ }
+@@ -142,9 +152,15 @@
+ 				       struct dma_coherent_mem *mem,
+ 				       ssize_t size, dma_addr_t *dma_handle)
+ {
+-	int order = get_order(size);
++	/* ML (Artosyn): allocate by page count, not power-of-2 order. The order-based
++	 * bitmap_find_free_region rounds every request up to 2^order pages AND places it
++	 * order-aligned, wasting 25-30% of the pool on codec-sized buffers (1.6 MiB -> 2 MiB,
++	 * 3.06 MiB -> 4 MiB, 4.8 MiB -> 8 MiB): two wave5 tile decoders + the 1080p DVR
++	 * encoder then overrun the 108 MiB pool. Page-granular first-fit matches the vendor's
++	 * MMZ allocator, under which the same working set fits with ~20 MiB headroom. */
++	unsigned long nr = PAGE_ALIGN(size) >> PAGE_SHIFT;
++	unsigned long pageno;
+ 	unsigned long flags;
+-	int pageno;
+ 	void *ret;
+ 
+ 	spin_lock_irqsave(&mem->spinlock, flags);
+@@ -152,9 +168,11 @@
+ 	if (unlikely(size > ((dma_addr_t)mem->size << PAGE_SHIFT)))
+ 		goto err;
+ 
+-	pageno = bitmap_find_free_region(mem->bitmap, mem->size, order);
+-	if (unlikely(pageno < 0))
++	pageno = bitmap_find_next_zero_area(mem->bitmap, mem->size, 0, nr, 0);
++	if (unlikely(pageno >= (unsigned long)mem->size))
+ 		goto err;
++	bitmap_set(mem->bitmap, pageno, nr);
++	mem->nr_map[pageno] = nr;
+ 
+ 	/*
+ 	 * Memory was found in the coherent area.
+@@ -203,9 +221,15 @@
+ 		   (mem->virt_base + ((dma_addr_t)mem->size << PAGE_SHIFT))) {
+ 		int page = (vaddr - mem->virt_base) >> PAGE_SHIFT;
+ 		unsigned long flags;
++		unsigned int nr;
+ 
+ 		spin_lock_irqsave(&mem->spinlock, flags);
+-		bitmap_release_region(mem->bitmap, page, order);
++		/* ML (Artosyn): free the recorded page count, not 2^order (see alloc). */
++		nr = mem->nr_map[page];
++		if (!nr)
++			nr = 1U << order;
++		mem->nr_map[page] = 0;
++		bitmap_clear(mem->bitmap, page, nr);
+ 		spin_unlock_irqrestore(&mem->spinlock, flags);
+ 		return 1;
+ 	}

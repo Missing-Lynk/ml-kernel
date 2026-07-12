@@ -1,0 +1,23 @@
+#!/bin/busybox sh
+# PID 1 for the bare-kernel boot-test initramfs. Boots the open kernel to an interactive
+# shell on the UART console so a kernel/dtb can be exercised without a rootfs, instead of
+# panicking at rootfs-mount. RAM-only; nothing on flash is touched.
+/bin/busybox mount -t proc     proc /proc 2>/dev/null
+/bin/busybox mount -t sysfs    sys  /sys  2>/dev/null
+/bin/busybox mount -t devtmpfs dev  /dev  2>/dev/null
+/bin/busybox --install -s /bin 2>/dev/null
+
+echo
+echo "================================================================"
+echo "   MISSINGLYNK  --  open kernel booted to a shell"
+echo "================================================================"
+/bin/busybox uname -a
+echo -n "CPUs online: "; /bin/busybox grep -c ^processor /proc/cpuinfo
+/bin/busybox head -1 /proc/meminfo
+echo "----------------------------------------------------------------"
+echo "Interactive root shell on the UART. To return to STOCK:"
+echo "  * power-cycle the goggle  (sure thing; the U-Boot trigger is one-shot)"
+echo "  * or run  /recover        (best-effort watchdog auto-reset)"
+echo "================================================================"
+echo
+exec /bin/busybox sh

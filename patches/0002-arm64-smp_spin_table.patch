@@ -1,0 +1,121 @@
+Why: mainline spin-table releases a secondary CPU by writing the entry point to
+cpu-release-addr and issuing SEV. The Artosyn SPL parking loop additionally
+polls a per-CPU handshake slot above cpu-release-addr and only branches once
+two magic words are present, so the mainline write alone never releases CPU1.
+Adds an "ar-spin-table" cpu_operations that also writes the handshake words
+(protocol recovered from the vendor SPL/kernel disassembly); the stock "spin-table"
+method is kept unchanged alongside.
+
+--- a/arch/arm64/kernel/smp_spin_table.c
++++ b/arch/arm64/kernel/smp_spin_table.c
+@@ -3,6 +3,13 @@
+  * Spin Table SMP initialisation
+  *
+  * Copyright (C) 2013 ARM Ltd.
++ *
++ * Artosyn AR9311 / Proxima-9311: stock smp_spin_table.c plus a second
++ * cpu_operations method, "ar-spin-table". The vendor SPL parking loop does
++ * not release the secondary A53 on the standard cpu-release-addr write alone;
++ * it also polls a per-CPU handshake slot above cpu-release-addr and branches
++ * only once two magic words are present (see the handshake parameters below).
++ * The stock "spin-table" method and the kernel-entry side are unchanged.
+  */
+ 
+ #include <linux/delay.h>
+@@ -25,6 +32,18 @@
+ static phys_addr_t cpu_release_addr[NR_CPUS];
+ 
+ /*
++ * Artosyn SPL handshake parameters, recovered from the reconstructed vendor
++ * smp_spin_table_cpu_prepare. The vendor computes the handshake slot as
++ * cpu_release_addr[cpu] + (4 - cpu) * 8 and stores two 64-bit magic words
++ * there, then flushes 16 bytes. The constant 4 is the SPL parking-table slot
++ * base: slots are indexed downward from it, so CPU1 lands at
++ * cpu_release_addr + 0x18.
++ */
++#define AR_SPL_RELEASE_SLOT_BASE	4
++#define AR_SPL_HANDSHAKE_MAGIC0		0x3c5ULL
++#define AR_SPL_HANDSHAKE_MAGIC1		0x630ULL
++
++/*
+  * Write secondary_holding_pen_release in a way that is guaranteed to be
+  * visible to all observers, irrespective of whether they're taking part
+  * in coherency or not.  This is necessary for the hotplug code to work
+@@ -104,6 +123,66 @@
+ 	return 0;
+ }
+ 
++/*
++ * Artosyn "ar-spin-table" prepare. Identical to the mainline prepare above
++ * (write __pa(secondary_holding_pen) to cpu-release-addr) plus the SPL
++ * handshake write the vendor kernel performs: store the two magic words into
++ * the per-CPU handshake slot so the SPL parking loop releases the secondary.
++ *
++ * Ordering mirrors the vendor binary: the handshake slot is written and
++ * flushed first, then the entry point is written and flushed, then SEV. The
++ * entry-point write therefore acts as the final trigger.
++ */
++static int ar_smp_spin_table_cpu_prepare(unsigned int cpu)
++{
++	__le64 __iomem *release_addr;
++	__le64 __iomem *handshake;
++	phys_addr_t handshake_pa;
++	phys_addr_t pa_holding_pen = __pa_symbol(secondary_holding_pen);
++
++	if (!cpu_release_addr[cpu])
++		return -ENODEV;
++
++	release_addr = ioremap_cache(cpu_release_addr[cpu],
++				     sizeof(*release_addr));
++	if (!release_addr)
++		return -ENOMEM;
++
++	handshake_pa = cpu_release_addr[cpu] +
++		(AR_SPL_RELEASE_SLOT_BASE - cpu) * sizeof(u64);
++	handshake = ioremap_cache(handshake_pa, 2 * sizeof(*handshake));
++	if (!handshake) {
++		iounmap(release_addr);
++		return -ENOMEM;
++	}
++
++	/*
++	 * Arm the SPL handshake slot. Both words must be present before the
++	 * SPL parking loop reads the entry point and branches.
++	 */
++	writeq_relaxed(AR_SPL_HANDSHAKE_MAGIC0, &handshake[0]);
++	writeq_relaxed(AR_SPL_HANDSHAKE_MAGIC1, &handshake[1]);
++	dcache_clean_inval_poc((__force unsigned long)handshake,
++			    (__force unsigned long)handshake +
++				    2 * sizeof(*handshake));
++
++	/*
++	 * Publish the entry point (the standard boot-protocol write, LE
++	 * regardless of kernel endianness). This is the trigger.
++	 */
++	writeq_relaxed(pa_holding_pen, release_addr);
++	dcache_clean_inval_poc((__force unsigned long)release_addr,
++			    (__force unsigned long)release_addr +
++				    sizeof(*release_addr));
++
++	sev();
++
++	iounmap(release_addr);
++	iounmap(handshake);
++
++	return 0;
++}
++
+ static int smp_spin_table_cpu_boot(unsigned int cpu)
+ {
+ 	/*
+@@ -125,3 +204,10 @@
+ 	.cpu_prepare	= smp_spin_table_cpu_prepare,
+ 	.cpu_boot	= smp_spin_table_cpu_boot,
+ };
++
++const struct cpu_operations ar_smp_spin_table_ops = {
++	.name		= "ar-spin-table",
++	.cpu_init	= smp_spin_table_cpu_init,
++	.cpu_prepare	= ar_smp_spin_table_cpu_prepare,
++	.cpu_boot	= smp_spin_table_cpu_boot,
++};

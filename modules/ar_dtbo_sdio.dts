@@ -1,0 +1,61 @@
+/dts-v1/;
+/plugin/;
+/ {
+	fragment@0 {
+		target-path = "/soc";
+		__overlay__ {
+			gpio@a10a000 {
+				/* artosyn_gpio: GPIO23 = bank1 line0 = the AR8030 active-low reset. */
+				compatible = "artosyn,gpio";
+				reg = <0 0x0a10a000 0 0x2000>;
+			};
+			mmc@1b00000 {
+				/* AR8030 RF host (mmc0), matching the stock mmc0@01b00000 node. Binds
+				 * dw_mci-artosyn; the AR8030 enumerates here as SDIO 4152:8030 (ROM
+				 * loader) / 4152:8031 (firmware running). */
+				compatible = "dwmmc0", "artosyn,proxima-dw-mshc";
+				reg = <0 0x1b00000 0 0x1000>;
+				interrupts = <0 48 4>;	/* GIC_SPI 48 -> hwirq 80 (vendor 0x30) */
+				#address-cells = <1>;
+				#size-cells = <0>;
+				clock-frequency = <100000000>;
+				clock-freq-min-max = <400000 100000000>;
+				card-detect-delay = <200>;
+				num-slots = <1>;
+				bus-width = <4>;
+				full-pwr-cycle;
+				cap-sd-highspeed;
+				cap-mmc-hw-reset;
+				disable-wp;
+				no-mmc;
+				no-sd;
+				status = "okay";
+				cap-sdio-irq;
+				broken-cd;
+			};
+			mmc@1c00000 {
+				/* microSD controller (mmc1, stock mmc1@01c00000). Same dw_mci IP as
+				 * mmc0, different instance + clock regs (0x1080c0/0x1080c4). Enumerates
+				 * an inserted SD card. */
+				compatible = "dwmmc1", "artosyn,proxima-dw-mshc";
+				reg = <0 0x1c00000 0 0x1000>;
+				interrupts = <0 49 4>;	/* GIC_SPI 49 -> hwirq 81 (vendor 0x31) */
+				#address-cells = <1>;
+				#size-cells = <0>;
+				clock-frequency = <100000000>;
+				clock-freq-min-max = <400000 100000000>;
+				card-detect-delay = <200>;
+				num-slots = <1>;
+				bus-width = <4>;
+				full-pwr-cycle;
+				cap-sd-highspeed;
+				cap-mmc-hw-reset;
+				disable-wp;
+				no-mmc;
+				no-sdio;
+				status = "okay";
+				broken-cd;
+			};
+		};
+	};
+};

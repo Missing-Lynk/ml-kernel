@@ -1,0 +1,8 @@
+# Extra typedefs checkpatch.pl doesn't know about, one per line (fed via --typedefsfile).
+# The on-device test tools are userspace and use libc opaque types; without these,
+# checkpatch misparses "DIR *d" / "FILE *f" as a multiplication and false-flags the
+# pointer spacing. Kernel-tree code learns typedefs from the tree; out-of-tree we list
+# the few libc ones here.
+DIR
+FILE
+va_list

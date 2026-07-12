@@ -1,0 +1,142 @@
+Why: (1) the VPU sleep/wake handshake is broken on this silicon - wake after
+sleep never completes - so the suspend/resume sleep and wake calls are skipped
+(the vendor never uses them either). (2) Upstream allocates codec DMA from the
+device's default (global CMA) path; this routes all codec DMA (DPB, WTL/display
+buffers, vb_task) to the SoC's dedicated mmz reserved-memory region via
+of_reserved_mem, keeping the codec working set out of general CMA.
+
+--- a/drivers/media/platform/chips-media/wave5/wave5-vpu.c
++++ b/drivers/media/platform/chips-media/wave5/wave5-vpu.c
+@@ -7,11 +7,15 @@
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+ #include <linux/platform_device.h>
++#include <linux/of_reserved_mem.h>	/* ML: dedicated codec memory pool (mmz@29400000) */
+ #include <linux/clk.h>
+ #include <linux/firmware.h>
+ #include <linux/interrupt.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/reset.h>
++#include <linux/io.h>
++#include <linux/delay.h>
++#include <linux/bits.h>
+ #include "wave5-vpu.h"
+ #include "wave5-regdefine.h"
+ #include "wave5-vpuconfig.h"
+@@ -229,7 +233,8 @@
+ 	if (vpu->irq < 0)
+ 		hrtimer_cancel(&vpu->hrtimer);
+ 
+-	wave5_vpu_sleep_wake(dev, true, NULL, 0);
++	/* Artosyn: skip VPU sleep - the wake handshake is broken on this silicon
++	 * (see the probe comment). Keep the VPU awake across runtime-suspend. */
+ 	clk_bulk_disable_unprepare(vpu->num_clks, vpu->clks);
+ 
+ 	return 0;
+@@ -240,7 +245,8 @@
+ 	struct vpu_device *vpu = dev_get_drvdata(dev);
+ 	int ret = 0;
+ 
+-	wave5_vpu_sleep_wake(dev, false, NULL, 0);
++	/* Artosyn: skip VPU wake - broken handshake (see probe comment); the VPU was
++	 * never slept, so it is already awake. Just re-enable clocks (no-op here). */
+ 	ret = clk_bulk_prepare_enable(vpu->num_clks, vpu->clks);
+ 	if (ret) {
+ 		dev_err(dev, "Enabling clocks, fail: %d\n", ret);
+@@ -278,6 +284,21 @@
+ 		return ret;
+ 	}
+ 
++	/*
++	 * ML (Artosyn): route all codec DMA (DPB, WTL/display, vb_task) to the dedicated
++	 * 108 MiB media pool (mmz@29400000, `memory-region` on our DT node) instead of the
++	 * global CMA, which the codec shares with the display and which fragments so the
++	 * ~4.8 MiB vb_task alloc fails (-ENOMEM). Non-fatal if absent: without a memory-region
++	 * this is a no-op and the driver falls back to the default CMA (upstream behaviour).
++	 */
++	ret = of_reserved_mem_device_init(&pdev->dev);
++	if (ret && ret != -ENODEV) {
++		dev_err(&pdev->dev, "Failed to use reserved memory pool: %d\n", ret);
++		return ret;
++	}
++	if (!ret)
++		dev_info(&pdev->dev, "using dedicated codec memory pool (mmz)\n");
++
+ 	dev = devm_kzalloc(&pdev->dev, sizeof(*dev), GFP_KERNEL);
+ 	if (!dev)
+ 		return -ENOMEM;
+@@ -325,6 +346,56 @@
+ 
+ 	dev->sram_size = match_data->sram_size;
+ 
++	/*
++	 * Artosyn Proxima-9311: power on the h26x/WAVE521C codec before touching any
++	 * VPU register. Without this the whole host interface reads back 0 (product
++	 * code 0x0) and probe fails at wave5_vdi_init. The mainline binding has no
++	 * clock/PMU/reset provider for this SoC's media CRG + power controller, so
++	 * program it raw here (sequence recovered from the vendor libmpp_service
++	 * ar_video_h26x_clock_on + ar_video_h26x_power_on). Must run on the cold
++	 * boot-time probe so the VCPU is initialised from a clean reset.
++	 * Media CRG page @0x0a106000, power-isolation page @0x0a102000.
++	 * TODO: model these as proper clock/power-domain controllers in DT and drop this.
++	 */
++	{
++		void __iomem *crg = ioremap(0x0a106000, 0x1000);
++		void __iomem *iso = ioremap(0x0a102000, 0x1000);
++
++		if (crg && iso) {
++			int i;
++
++			/* 1. media clock gate: 0x0a106008 = (v & 0xffffe000) | BIT(13) */
++			writel((readl(crg + 0x008) & 0xffffe000) | BIT(13), crg + 0x008);
++			/* 2. PMU unlock key */
++			writel(0x00acce55, crg + 0x200);
++			/* 3. venc power-up request: bits 6, 14, 22 */
++			writel(readl(crg + 0x204) | 0x00404040, crg + 0x204);
++			/* 4. poll power-up ack on 0x0a106208 bits 6 & 14 */
++			for (i = 0; i < 1000; i++) {
++				if ((readl(crg + 0x208) & 0x4040) == 0x4040)
++					break;
++				udelay(10);
++			}
++			if (i == 1000)
++				dev_warn(&pdev->dev, "venc power-up ack timeout (0x%08x)\n",
++					 readl(crg + 0x208));
++			/* 5. clear the power-up REQUEST pulse (bit 22) now it's acked */
++			writel(readl(crg + 0x204) & ~0x00400000, crg + 0x204);
++			/* 6. de-isolate the venc power domain */
++			writel(readl(iso + 0x004) | BIT(26), iso + 0x004);
++			writel(readl(iso + 0x014) | BIT(2), iso + 0x014);
++			/* 7. venc clock gate (belt-and-braces; usually already set): 0x0a106018 BIT(12) */
++			writel(readl(crg + 0x018) | BIT(12), crg + 0x018);
++			usleep_range(1000, 2000); /* let the domain + clock settle */
++		} else {
++			dev_warn(&pdev->dev, "could not map media CRG/PMU to power on the codec\n");
++		}
++		if (crg)
++			iounmap(crg);
++		if (iso)
++			iounmap(iso);
++	}
++
+ 	dev->product_code = wave5_vdi_read_register(dev, VPU_PRODUCT_CODE_REGISTER);
+ 	ret = wave5_vdi_init(&pdev->dev);
+ 	if (ret < 0) {
+@@ -395,7 +466,16 @@
+ 	pm_runtime_set_autosuspend_delay(&pdev->dev, 500);
+ 	pm_runtime_use_autosuspend(&pdev->dev);
+ 	pm_runtime_enable(&pdev->dev);
+-	wave5_vpu_sleep_wake(&pdev->dev, true, NULL, 0);
++	/*
++	 * Artosyn Proxima-9311: do NOT sleep the VPU here. The firmware sleep/wake
++	 * handshake (W5_SLEEP_VPU / W5_WAKEUP_VPU + REMAP_CORE_START) does not
++	 * complete on this WAVE521C integration - the wake times out
++	 * ("VPU wakeup(W5_VPU_REMAP_CORE_START) timeout") and every decode/encode
++	 * instance-create then fails (-ETIMEDOUT). Keep the VPU awake from probe;
++	 * the suspend/resume callbacks below are likewise no-sleep. Costs idle power,
++	 * but the block is only powered when this driver is loaded. TODO: fix the
++	 * wake sequence (needs the venc power-domain re-assert / correct handshake).
++	 */
+ 
+ 	return 0;
+ 

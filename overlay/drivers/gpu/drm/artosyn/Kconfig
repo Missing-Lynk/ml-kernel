@@ -1,0 +1,22 @@
+# Overlaid into drivers/gpu/drm/ by kernel/build.sh (sourced into drivers/gpu/drm/Kconfig
+# BEFORE the config-fragment merge, so the `select`s below take effect). Enable with
+# CONFIG_DRM_ARTOSYN=y in configs/display.config.
+config DRM_ARTOSYN
+	tristate "Artosyn Proxima display (VO + MIPI-DSI + QY45043A0 panel)"
+	depends on DRM && OF
+	select DRM_KMS_HELPER
+	select DRM_GEM_DMA_HELPER
+	select DRM_MIPI_DSI
+	select DRM_DW_MIPI_DSI
+	select DRM_PANEL
+	select DRM_FBDEV_DMA if DRM_FBDEV_EMULATION
+	# drm_client_setup() lives in DRM_CLIENT_LIB (a select-only symbol). A built-in driver
+	# must pull it via DRM_CLIENT_SELECTION so the lib resolves =y, not =m (otherwise the
+	# vmlinux link fails: "undefined reference to drm_client_setup"). Mainline drivers (e.g.
+	# drivers/gpu/drm/tiny) do the same.
+	select DRM_CLIENT_SELECTION
+	help
+	  DRM/KMS driver for the Artosyn Proxima goggle display: the custom VO
+	  display controller (CRTC), the DesignWare MIPI-DSI host (via the mainline
+	  dw-mipi-dsi bridge), and the QY45043A0 1080p60 panel. See
+	  ../../../../../docs/display-backlight.md.

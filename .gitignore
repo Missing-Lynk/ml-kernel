@@ -1,0 +1,24 @@
+# Kernel-wide build/test artifacts.
+
+# Reproducible kernel build tree (scripts/build.sh default: build/kernel-repro-<ver>;
+# override with BUILD_DIR=). Hermetic, so the path never affects the Image hash.
+/build/
+
+# Initramfs build artifacts (busybox binary + assembled cpio) - regenerate via
+# initramfs/build-busybox.sh + initramfs/build.sh
+initramfs/build/
+
+# Out-of-tree module build artifacts (modules/build.sh) - only .c/.h/Kbuild/scripts
+# are tracked
+*.ko
+*.o
+*.mod
+*.mod.c
+*.mod.o
+.*.cmd
+*.order
+*.symvers
+.tmp_versions/
+
+# test_tools/ built binaries (the Makefile outputs only here)
+test_tools/build/

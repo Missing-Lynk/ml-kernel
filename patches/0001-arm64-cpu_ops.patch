@@ -1,0 +1,39 @@
+Why: upstream resolves the DT `enable-method` against a fixed list that knows
+only "spin-table" and "psci". The vendor SPL parks the secondary A53 behind a
+bespoke handshake (implemented as the "ar-spin-table" cpu_operations in
+smp_spin_table.c, patch 0002); this registers that method so the DT can select
+it.
+
+--- a/arch/arm64/kernel/cpu_ops.c
++++ b/arch/arm64/kernel/cpu_ops.c
+@@ -3,6 +3,14 @@
+  * CPU kernel entry/exit control
+  *
+  * Copyright (C) 2013 ARM Ltd.
++ *
++ * Overlay copy for the open Artosyn AR9401 / Proxima-9311 kernel. This is the
++ * stock 6.18 arch/arm64/kernel/cpu_ops.c with the "ar-spin-table" method added
++ * to the DT-supported list so a cpu node with enable-method = "ar-spin-table"
++ * binds to ar_smp_spin_table_ops (defined in smp_spin_table.c). arm64 resolves
++ * enable-method through this static array, not CPU_METHOD_OF_DECLARE (which is
++ * arm32 only), so registration here is the clean path. The stock "spin-table"
++ * and "psci" entries are kept unchanged.
+  */
+ 
+ #include <linux/acpi.h>
+@@ -15,6 +23,7 @@
+ #include <asm/smp_plat.h>
+ 
+ extern const struct cpu_operations smp_spin_table_ops;
++extern const struct cpu_operations ar_smp_spin_table_ops;
+ #ifdef CONFIG_ARM64_ACPI_PARKING_PROTOCOL
+ extern const struct cpu_operations acpi_parking_protocol_ops;
+ #endif
+@@ -24,6 +33,7 @@
+ 
+ static const struct cpu_operations *const dt_supported_cpu_ops[] __initconst = {
+ 	&smp_spin_table_ops,
++	&ar_smp_spin_table_ops,
+ 	&cpu_psci_ops,
+ 	NULL,
+ };

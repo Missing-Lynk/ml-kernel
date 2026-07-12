@@ -1,0 +1,17 @@
+#!/bin/busybox sh
+# Best-effort auto-reset back to stock from the initramfs shell, for when a manual
+# power-cycle is inconvenient. RAM-only kernel, so the worst case is "nothing happens,
+# power-cycle by hand" - it cannot brick anything.
+#
+# Mechanism: arm the Synopsys dw_wdt (phys 0x1600000, per /proc/iomem wdt@01600000)
+# for a system reset and stop petting it. Registers: CR@0x00 (bit0=enable, bit1=0 ->
+# reset), TORR@0x04 (timeout index). UNVALIDATED on this SoC -- if the goggle does not
+# reset within a few seconds, just power-cycle.
+echo "arming watchdog (wdt@0x1600000) for reset; power-cycle if nothing happens..."
+busybox devmem 0x01600004 32 0x00        # TORR = shortest timeout index
+busybox devmem 0x01600000 32 0x00000001  # CR  = enable + reset response
+echo "watchdog armed; not petting -> reset imminent."
+
+# Fallback: also try a kernel restart (works only if a reset handler is wired).
+busybox sleep 3
+busybox reboot -f

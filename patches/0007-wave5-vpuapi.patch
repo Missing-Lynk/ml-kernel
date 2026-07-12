@@ -1,0 +1,183 @@
+Why: the dec/enc close paths have the same SIGKILL leak shape as patch 0004 -
+interruptible device locks plus early returns on firmware finish/timeout
+failures skip the buffer frees, permanently leaking the instance's allocations
+from the fixed pool (the fd is gone either way, so bailing out converts a
+firmware hiccup into a leak). Locks made uninterruptible, buffers always freed,
+VPU stop/reset ordered before the frees. Also disables decoder reordering
+(reorder_enable=FALSE, the vendor's DEC_PIC configuration): the low-latency
+no-B streams need no reorder delay.
+
+--- a/drivers/media/platform/chips-media/wave5/wave5-vpuapi.c
++++ b/drivers/media/platform/chips-media/wave5/wave5-vpuapi.c
+@@ -171,7 +171,9 @@
+ 	p_dec_info->stream_buf_start_addr = buffer_addr;
+ 	p_dec_info->stream_buf_size = buffer_size;
+ 	p_dec_info->stream_buf_end_addr = buffer_addr + buffer_size;
+-	p_dec_info->reorder_enable = TRUE;
++	/* ML (Artosyn): vendor golden trace runs reorder-disabled (DEC_PIC writes
++	 * FORCE_FB_LATENCY_PLUS1 = 1). Match it. */
++	p_dec_info->reorder_enable = FALSE;
+ 	p_dec_info->temp_id_select_mode = TEMPORAL_ID_MODE_ABSOLUTE;
+ 	p_dec_info->target_temp_id = DECODE_ALL_TEMPORAL_LAYERS;
+ 	p_dec_info->target_spatial_id = DECODE_ALL_SPATIAL_LAYERS;
+@@ -214,36 +216,63 @@
+ 
+ 	pm_runtime_resume_and_get(inst->dev->dev);
+ 
+-	ret = mutex_lock_interruptible(&vpu_dev->hw_lock);
+-	if (ret) {
+-		pm_runtime_put_sync(inst->dev->dev);
+-		return ret;
+-	}
++	/* ML (Artosyn): must NOT be interruptible. This runs from the file-release path; on
++	 * SIGKILL the fatal signal is already pending, so an interruptible lock returns -EINTR
++	 * immediately and every instance buffer below leaks from the mmz pool until power
++	 * cycle (~15-40 MB per killed decode; the pool starves after a few). */
++	mutex_lock(&vpu_dev->hw_lock);
+ 
+ 	do {
+ 		ret = wave5_vpu_dec_finish_seq(inst, fail_res);
+ 		if (ret < 0 && *fail_res != WAVE5_SYSERR_VPU_STILL_RUNNING) {
+ 			dev_warn(inst->dev->dev, "dec_finish_seq timed out\n");
+-			goto unlock_and_return;
++			break;
+ 		}
+ 
+ 		if (*fail_res == WAVE5_SYSERR_VPU_STILL_RUNNING &&
+ 		    retry++ >= MAX_FIRMWARE_CALL_RETRY) {
+ 			ret = -ETIMEDOUT;
+-			goto unlock_and_return;
++			break;
+ 		}
+ 	} while (ret != 0);
+ 
+ 	dev_dbg(inst->dev->dev, "%s: dec_finish_seq complete\n", __func__);
+ 
++	/* ML (Artosyn): free even when finish_seq failed/timed out - BUT only after the
++	 * VCPU is provably stopped. Freeing under a still-running instance lets the
++	 * firmware DMA into reallocated memory (hard-hangs the SoC); leaking instead
++	 * starves the fixed mmz pool. SW_RESET_SAFETY drains+halts the whole VPU first,
++	 * making the frees safe - but it is GLOBAL: resetting under other live instances
++	 * (a second decoder, possibly another process's) corrupts their firmware state.
++	 * Only reset when this is the LAST instance; otherwise leak this instance's
++	 * buffers, the lesser evil. */
++	if (ret < 0) {
++		bool last;
++		unsigned long flags;
++
++		spin_lock_irqsave(&vpu_dev->irq_spinlock, flags);
++		last = list_empty(&vpu_dev->instances);   /* this inst is already delisted (release path) */
++		spin_unlock_irqrestore(&vpu_dev->irq_spinlock, flags);
++		if (!last) {
++			dev_warn(inst->dev->dev,
++				 "%s: instance still running with siblings live, leaking its buffers (no global reset)\n",
++				 __func__);
++			goto unlock_and_return;
++		}
++		dev_warn(inst->dev->dev, "%s: instance still running, VPU safety reset before free\n",
++			 __func__);
++		if (wave5_vpu_reset(vpu_dev->dev, SW_RESET_SAFETY)) {
++			dev_err(inst->dev->dev, "%s: safety reset failed, leaking instance buffers\n",
++				__func__);
++			goto unlock_and_return;
++		}
++	}
++
+ 	wave5_vdi_free_dma_memory(vpu_dev, &p_dec_info->vb_work);
+ 
+ 	for (i = 0 ; i < MAX_REG_FRAME; i++) {
+-		ret = reset_auxiliary_buffers(inst, i);
+-		if (ret) {
+-			ret = 0;
++		if (reset_auxiliary_buffers(inst, i))
+ 			break;
+-		}
+ 	}
+ 
+ 	wave5_vdi_free_dma_memory(vpu_dev, &p_dec_info->vb_task);
+@@ -251,7 +280,7 @@
+ unlock_and_return:
+ 	mutex_unlock(&vpu_dev->hw_lock);
+ 	pm_runtime_put_sync(inst->dev->dev);
+-	return ret;
++	return ret < 0 ? ret : 0;
+ }
+ 
+ int wave5_vpu_dec_issue_seq_init(struct vpu_instance *inst)
+@@ -720,31 +749,52 @@
+ 
+ 	pm_runtime_resume_and_get(inst->dev->dev);
+ 
+-	ret = mutex_lock_interruptible(&vpu_dev->hw_lock);
+-	if (ret) {
+-		pm_runtime_resume_and_get(inst->dev->dev);
+-		return ret;
+-	}
++	/* ML (Artosyn): same leak shape as wave5_vpu_dec_close - the interruptible lock
++	 * fails instantly on SIGKILL-driven release, and the early returns below skipped
++	 * every free (they also leaked a pm_runtime ref via resume_and_get on the way out).
++	 * Take the lock uninterruptibly and always fall through to the frees. */
++	mutex_lock(&vpu_dev->hw_lock);
+ 
+ 	do {
+ 		ret = wave5_vpu_enc_finish_seq(inst, fail_res);
+ 		if (ret < 0 && *fail_res != WAVE5_SYSERR_VPU_STILL_RUNNING) {
+ 			dev_warn(inst->dev->dev, "enc_finish_seq timed out\n");
+-			pm_runtime_resume_and_get(inst->dev->dev);
+-			mutex_unlock(&vpu_dev->hw_lock);
+-			return ret;
++			break;
+ 		}
+ 
+ 		if (*fail_res == WAVE5_SYSERR_VPU_STILL_RUNNING &&
+ 		    retry++ >= MAX_FIRMWARE_CALL_RETRY) {
+-			pm_runtime_resume_and_get(inst->dev->dev);
+-			mutex_unlock(&vpu_dev->hw_lock);
+-			return -ETIMEDOUT;
++			ret = -ETIMEDOUT;
++			break;
+ 		}
+ 	} while (ret != 0);
+ 
+ 	dev_dbg(inst->dev->dev, "%s: enc_finish_seq complete\n", __func__);
+ 
++	/* ML (Artosyn): same stop-before-free + last-instance-only reset rule as
++	 * wave5_vpu_dec_close. */
++	if (ret < 0) {
++		bool last;
++		unsigned long flags;
++
++		spin_lock_irqsave(&vpu_dev->irq_spinlock, flags);
++		last = list_empty(&vpu_dev->instances);   /* this inst is already delisted (release path) */
++		spin_unlock_irqrestore(&vpu_dev->irq_spinlock, flags);
++		if (!last) {
++			dev_warn(inst->dev->dev,
++				 "%s: instance still running with siblings live, leaking its buffers (no global reset)\n",
++				 __func__);
++			goto unlock_and_return;
++		}
++		dev_warn(inst->dev->dev, "%s: instance still running, VPU safety reset before free\n",
++			 __func__);
++		if (wave5_vpu_reset(vpu_dev->dev, SW_RESET_SAFETY)) {
++			dev_err(inst->dev->dev, "%s: safety reset failed, leaking instance buffers\n",
++				__func__);
++			goto unlock_and_return;
++		}
++	}
++
+ 	wave5_vdi_free_dma_memory(vpu_dev, &p_enc_info->vb_work);
+ 
+ 	if (inst->std == W_HEVC_ENC || inst->std == W_AVC_ENC) {
+@@ -755,10 +805,11 @@
+ 	}
+ 
+ 	wave5_vdi_free_dma_memory(vpu_dev, &p_enc_info->vb_task);
++unlock_and_return:
+ 	mutex_unlock(&vpu_dev->hw_lock);
+ 	pm_runtime_put_sync(inst->dev->dev);
+ 
+-	return 0;
++	return ret < 0 ? ret : 0;
+ }
+ 
+ int wave5_vpu_enc_register_frame_buffer(struct vpu_instance *inst, unsigned int num,

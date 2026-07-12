@@ -1,0 +1,34 @@
+/dts-v1/;
+/plugin/;
+
+/*
+ * Adds the vendor's ahb_dma (8 ch) and axi_dma (3 ch) engines as children of the
+ * live ar_mpp node, so ar_mpp_drv's nr6 driver-info-by-name query can report their
+ * IRQ counts (libmpp_service asserts total_irq_num == 8 / == 3 during SYS_Init).
+ * Applied at runtime by ar_mpp_overlay.ko before ar_mpp_drv loads, so a DTB reflash
+ * is not needed. Mirrors the ar_mpp children in dts/proxima-9311.dts; keep them
+ * in sync. IRQ numbers are raw GIC SPI (0=GIC_SPI, 4=IRQ_TYPE_LEVEL_HIGH), from the
+ * vendor DT. Target by path since ar_mpp has no phandle label.
+ */
+/ {
+	fragment@0 {
+		target-path = "/soc/ar_mpp@8870000";
+		__overlay__ {
+			#address-cells = <2>;
+			#size-cells = <2>;
+			ranges;
+
+			ahb_dma {
+				compatible = "artosyn,ahb_dma";
+				reg = <0 0x01e10000 0 0x10000>, <0 0x01a00030 0 0x4>;
+				interrupts = <0 50 4>, <0 51 4>, <0 52 4>, <0 53 4>,
+					     <0 54 4>, <0 55 4>, <0 56 4>, <0 57 4>;
+			};
+			axi_dma {
+				compatible = "artosyn,axi_dma";
+				reg = <0 0x08800000 0 0x1000>;
+				interrupts = <0 63 4>, <0 64 4>, <0 65 4>;
+			};
+		};
+	};
+};

@@ -1,0 +1,134 @@
+Why: two WAVE521C defects in upstream wave5-hw.c. (1) The sec-AXI size
+accounting is a mainline TODO: only WAVE515 computes the line-buffer sizes, so
+on WAVE521C the driver enables sec-AXI into the 64 KiB SRAM with zero sizes
+(USE_SEC_AXI=0x8201), corrupting the write-back; forced to 0 (what the vendor
+writes). (2) With two decode instances sharing the one VCPU, the DEC_PIC done
+interrupt can precede the result becoming readable and the query returns
+WAVE5_SYSERR_RESULT_NOT_READY; upstream fails the picture, this retries the
+query.
+
+--- a/drivers/media/platform/chips-media/wave5/wave5-hw.c
++++ b/drivers/media/platform/chips-media/wave5/wave5-hw.c
+@@ -7,6 +7,7 @@
+ 
+ #include <linux/iopoll.h>
+ #include <linux/bitfield.h>
++#include <linux/delay.h>
+ #include "wave5-vpu.h"
+ #include "wave5.h"
+ #include "wave5-regdefine.h"
+@@ -168,10 +169,18 @@
+ 
+ 	if (vpu_dev->product_code == WAVE515_CODE)
+ 		gdi_status_check_value = 0x0738;
++	/*
++	 * Artosyn Proxima-9311 WAVE521C: the combined-backbone bus-idle status reads
++	 * 0x3f on this integration (a narrower bus than the mainline WAVE521C's
++	 * 0x00ff1f3f), verified against the vendor libmpp_service reset trace
++	 * (FIO 0xfe14 => 0x3f, after which the vendor proceeds to the block reset).
++	 * The exact-match wait_fio_readl with 0x00ff1f3f never matches on this SoC, so
++	 * wave5_vpu_reset() times out and probe fails with -EBUSY. Use 0x3f (the default).
++	 */
+ 	if (vpu_dev->product_code == WAVE521C_CODE ||
+ 	    vpu_dev->product_code == WAVE521_CODE ||
+ 	    vpu_dev->product_code == WAVE521E1_CODE)
+-		gdi_status_check_value = 0x00ff1f3f;
++		gdi_status_check_value = 0x3f;
+ 
+ 	return wave5_wait_fio_readl(vpu_dev, addr, gdi_status_check_value);
+ }
+@@ -392,6 +401,18 @@
+ 							   hw_config_def0);
+ 	}
+ 
++	/*
++	 * Artosyn Proxima-9311 WAVE521C: the STD_DEF1 feature register on this
++	 * integration does NOT advertise the decoder (support_decoders reads 0),
++	 * so setup_wave5_interrupts() below would drop the decoder interrupt enables
++	 * (INIT_SEQ, DEC_PIC, BSBUF_EMPTY) and every decode stalls at sequence-init
++	 * (VINT_ENABLE ends up 0x8300, missing the INIT_SEQ bit; no source-change).
++	 * The silicon does both HEVC+AVC decode (vendor-confirmed; match_data carries
++	 * WAVE5_IS_DEC). Assert the decoder capability when the HW under-reports it.
++	 */
++	if (vpu_dev->product_code == WAVE521C_CODE && !p_attr->support_decoders)
++		p_attr->support_decoders = BIT(STD_HEVC) | BIT(STD_AVC);
++
+ 	setup_wave5_interrupts(vpu_dev);
+ 
+ 	return 0;
+@@ -937,6 +958,16 @@
+ 		return 0;
+ 
+ 	/*
++	 * ML (Artosyn WAVE521C): the sec-AXI bit/ip/lf size calc below is a mainline TODO
++	 * only implemented for WAVE515, so on WAVE521C the sizes stay 0 and this returns
++	 * 0x8201 - enabling the sec-AXI line buffers in the tiny 64 KiB SRAM with bogus (zero)
++	 * size accounting. The vendor (golden trace DEC_PIC) writes USE_SEC_AXI=0, keeping all
++	 * internal buffers in DRAM. Match the vendor: no sec-AXI on WAVE521C.
++	 */
++	if (inst->dev->product_code != WAVE515_CODE)
++		return 0;
++
++	/*
+ 	 * TODO: calculate bit_size, ip_size, lf_size from width and bitdepth
+ 	 * for Wave521.
+ 	 */
+@@ -1006,7 +1037,7 @@
+ 
+ int wave5_vpu_dec_get_result(struct vpu_instance *inst, struct dec_output_info *result)
+ {
+-	int ret;
++	int ret, retry;
+ 	u32 index, nal_unit_type, reg_val, sub_layer_info;
+ 	struct dec_info *p_dec_info = &inst->codec_info->dec_info;
+ 	struct vpu_device *vpu_dev = inst->dev;
+@@ -1015,10 +1046,28 @@
+ 	vpu_write_reg(inst->dev, W5_CMD_DEC_REPORT_SIZE, p_dec_info->user_data_buf_size);
+ 	vpu_write_reg(inst->dev, W5_CMD_DEC_REPORT_PARAM, REPORT_PARAM_ENDIANNESS_BIG_ENDIAN);
+ 
+-	/* send QUERY cmd */
+-	ret = wave5_send_query(vpu_dev, inst, GET_RESULT);
+-	if (ret)
+-		return ret;
++	/*
++	 * Send the GET_RESULT query.
++	 *
++	 * ML (Artosyn): with two decode instances sharing the single WAVE521C VCPU, the
++	 * DEC_PIC "command done" interrupt can momentarily precede the picture result
++	 * becoming readable, so this query returns WAVE5_SYSERR_RESULT_NOT_READY (0x800).
++	 * Mainline turns that into a blanket -EIO (wave5_send_query passes a NULL fail_res)
++	 * and wave5_vpu_dec_finish_decode finishes the job with no output, dropping the
++	 * frame and breaking the instance's reference chain. The vendor waits for the
++	 * report instead; mirror that with a bounded retry, the same shape as the
++	 * STILL_RUNNING loops in wave5-vpuapi.c. A genuine error, or exhausted retries,
++	 * still returns exactly as before.
++	 */
++	for (retry = 0; ; retry++) {
++		ret = wave5_send_query(vpu_dev, inst, GET_RESULT);
++		if (!ret)
++			break;
++		if (vpu_read_reg(vpu_dev, W5_RET_FAIL_REASON) != WAVE5_SYSERR_RESULT_NOT_READY ||
++		    retry >= MAX_FIRMWARE_CALL_RETRY)
++			return ret;
++		usleep_range(50, 100);
++	}
+ 
+ 	reg_val = vpu_read_reg(inst->dev, W5_RET_QUEUE_STATUS);
+ 
+@@ -2140,6 +2189,16 @@
+ 		return 0;
+ 
+ 	/*
++	 * ML (Artosyn WAVE521C): same mainline TODO as the decode path above - the
++	 * rdo/lf size calc is unimplemented, so the sizes stay 0 and this enables
++	 * sec-AXI RDO+LF (BIT(11)|BIT(15)) into the tiny 64 KiB SRAM with bogus
++	 * (zero) size accounting. That exact pattern corrupted decode write-back
++	 * until forced to 0 (vendor writes USE_SEC_AXI=0). No sec-AXI on WAVE521C.
++	 */
++	if (inst->dev->product_code != WAVE515_CODE)
++		return 0;
++
++	/*
+ 	 * TODO: calculate rdo_size and lf_size from inst->src_fmt.width and
+ 	 * inst->codec_info->enc_info.open_param.wave_param.internal_bit_depth
+ 	 */

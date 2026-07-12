@@ -1,0 +1,146 @@
+Why: upstream sizes decoder allocations for the worst case and takes them all
+from the fixed mmz pool. The bitstream sizeimage is derived from the coded
+resolution (huge at 1080p) and the internal bitstream ring follows the
+negotiated sizeimage; both are clamped/fixed here. Pool-allocation failures get
+explicit diagnostics (they otherwise surface as opaque V4L2 errors). Adds a
+dec_cap_bufs module param to cap the LINEAR (display) CAPTURE buffer count
+independently of the FBC/DPB count - diagnostic only; capping below the
+stream's fbc_buf_count starves the firmware's display rotation.
+
+--- a/drivers/media/platform/chips-media/wave5/wave5-vpu-dec.c
++++ b/drivers/media/platform/chips-media/wave5/wave5-vpu-dec.c
+@@ -258,6 +258,24 @@
+ 	v4l2_m2m_last_buffer_done(m2m_ctx, vb);
+ }
+ 
++/* ML (Artosyn): cap the LINEAR (display) CAPTURE buffer count independently of the FBC/DPB.
++ * The FBC reconstruction/reference buffers live in the 108 MiB mmz pool; the linear CAPTURE
++ * buffers are vb2-dma-contig from the 64 MiB CMA. Stock wave5 floors the capture count at
++ * fbc_buf_count (DPB-sized), which for two concurrent tile decoders + the DVR encoder overruns
++ * the 64 MiB CMA. A consumer that returns each decoded frame immediately needs only a
++ * shallow display pool. 0 = stock (fbc_buf_count); >0 caps it. Tune at runtime via
++ * /sys/module/wave5/parameters/dec_cap_bufs before starting the pipeline. */
++static int dec_cap_bufs;
++module_param(dec_cap_bufs, int, 0644);
++MODULE_PARM_DESC(dec_cap_bufs, "linear CAPTURE (CMA) buffer count cap (0 = fbc_buf_count)");
++
++static unsigned int wave5_cap_min(struct vpu_instance *inst)
++{
++	if (dec_cap_bufs > 0)
++		return dec_cap_bufs;
++	return inst->fbc_buf_count;
++}
++
+ static void send_eos_event(struct vpu_instance *inst)
+ {
+ 	static const struct v4l2_event vpu_event_eos = {
+@@ -292,13 +310,15 @@
+ 
+ 	inst->needs_reallocation = true;
+ 	inst->fbc_buf_count = initial_info->min_frame_buffer_count + 1;
+-	if (inst->fbc_buf_count != v4l2_m2m_num_dst_bufs_ready(m2m_ctx)) {
++	/* Report the (optionally capped) linear CAPTURE minimum, NOT fbc_buf_count: the FBC/DPB
++	 * stays fbc_buf_count in mmz, but the CMA display pool can be shallower (see dec_cap_bufs). */
++	if (wave5_cap_min(inst) != v4l2_m2m_num_dst_bufs_ready(m2m_ctx)) {
+ 		struct v4l2_ctrl *ctrl;
+ 
+ 		ctrl = v4l2_ctrl_find(&inst->v4l2_ctrl_hdl,
+ 				      V4L2_CID_MIN_BUFFERS_FOR_CAPTURE);
+ 		if (ctrl)
+-			v4l2_ctrl_s_ctrl(ctrl, inst->fbc_buf_count);
++			v4l2_ctrl_s_ctrl(ctrl, wave5_cap_min(inst));
+ 	}
+ 
+ 	if (p_dec_info->initial_info_obtained) {
+@@ -672,6 +692,19 @@
+ 	wave5_update_pix_fmt(&f->fmt.pix_mp, VPU_FMT_TYPE_CODEC,
+ 			     width, height, frmsize);
+ 
++	/*
++	 * Artosyn: clamp the bitstream sizeimage. wave5_update_pix_fmt() takes the max of the
++	 * caller's sizeimage and DEFAULT_BS_SIZE, and the ring buffer is 4x sizeimage on top of
++	 * the vb2 OUTPUT buffers, all from the dedicated 108 MiB mmz pool. GStreamer asks for a
++	 * 4096x2160-sized 17.7 MiB bitstream buffer at 1080p, which alone turns into ~106 MiB
++	 * and ENOMEMs STREAMON. 1 MiB comfortably holds any AU this class of device produces
++	 * (a 50 Mbit/s 60 fps stream averages ~104 KiB/frame; FPV tile IDRs are a few
++	 * hundred KiB) and keeps two concurrent tile decoders plus the encoder inside the
++	 * 108 MiB pool.
++	 */
++	f->fmt.pix_mp.plane_fmt[0].sizeimage = min(f->fmt.pix_mp.plane_fmt[0].sizeimage,
++						   1U * 1024 * 1024);
++
+ 	return 0;
+ }
+ 
+@@ -951,9 +984,13 @@
+ 
+ 	if (q->type == V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE) {
+ 		sizes[0] = inst_format.plane_fmt[0].sizeimage;
+-		dev_dbg(inst->dev->dev, "%s: size[0]: %u\n", __func__, sizes[0]);
++		dev_info(inst->dev->dev, "OUTPUT queue: %u bufs x %u B\n", *num_buffers, sizes[0]);
+ 	} else if (q->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
+-		if (*num_buffers < inst->fbc_buf_count)
++		/* dec_cap_bufs HARD-caps the linear/CMA pool (a floor would not stop GStreamer
++		 * allocating its latency buffers on top); else stock floor at fbc_buf_count. */
++		if (dec_cap_bufs > 0)
++			*num_buffers = dec_cap_bufs;
++		else if (*num_buffers < inst->fbc_buf_count)
+ 			*num_buffers = inst->fbc_buf_count;
+ 
+ 		for (i = 0; i < *num_planes; i++) {
+@@ -994,12 +1031,28 @@
+ 	linear_num = v4l2_m2m_num_dst_bufs_ready(m2m_ctx);
+ 	non_linear_num = inst->fbc_buf_count;
+ 
++	/*
++	 * Artosyn: everything here comes from the fixed 108 MiB mmz pool and failure shows up
++	 * as a bare -12; log the demand once per stream so ENOMEM is diagnosable post-hoc.
++	 */
++	dev_info(inst->dev->dev, "prepare_fb: %d FBC + %d linear CAPTURE bufs at %ux%u (+ ring %zu)\n",
++		 non_linear_num, linear_num, inst->dst_fmt.width, inst->dst_fmt.height,
++		 inst->bitstream_vbuf.size);
++
+ 	for (i = 0; i < non_linear_num; i++) {
+ 		struct frame_buffer *frame = &inst->frame_buf[i];
+ 		struct vpu_buf *vframe = &inst->frame_vbuf[i];
+ 
+ 		fb_stride = ALIGN(inst->dst_fmt.width * bitdepth / 8, 32);
+-		fb_height = ALIGN(inst->dst_fmt.height, 32);
++		/*
++		 * ML (Artosyn WAVE521C): the FBC reconstruction plane must be sized at the coded
++		 * height (CTU-aligned = ALIGN(h,64) = 768 for 720p HEVC), NOT ALIGN(h,32)=736. The
++		 * driver's own FBC offset-table macro already uses ALIGN(_h,64), and the vendor
++		 * golden trace allocates the FBC luma at 1280*768 (Cb at Y+0xF0000). Allocating 736
++		 * left the FBC plane 32 rows short of what the decoder's WTL detile expects,
++		 * skewing the linear output. Match the coded height.
++		 */
++		fb_height = ALIGN(inst->dst_fmt.height, 64);
+ 		luma_size = fb_stride * fb_height;
+ 
+ 		chroma_size = ALIGN(fb_stride / 2, 16) * fb_height;
+@@ -1079,6 +1132,11 @@
+ 		frame->stride = fb_stride;
+ 		frame->map_type = LINEAR_FRAME_MAP;
+ 		frame->update_fb_info = true;
++		if (i == 0)   /* ML: attribute the CAPTURE pool - MMZ (0x294xxxxx) or CMA? */
++			dev_info(inst->dev->dev, "CAPTURE[0] %pad size %u %s (x%d)\n",
++				 &buf_addr_y, buf_size,
++				 (buf_addr_y >= 0x29400000 && buf_addr_y < 0x30000000) ? "MMZ" : "CMA",
++				 linear_num);
+ 	}
+ 
+ 	ret = wave5_vpu_dec_register_frame_buffer_ex(inst, non_linear_num, linear_num,
+@@ -1303,7 +1361,12 @@
+ 	int ret;
+ 	struct vpu_buf *ring_buffer = &inst->bitstream_vbuf;
+ 
+-	ring_buffer->size = ALIGN(inst->src_fmt.plane_fmt[0].sizeimage, 1024) * 4;
++	/* ML (Artosyn): fixed ring size, decoupled from the negotiated sizeimage. The upstream
++	 * ALIGN(sizeimage)*4 ballooned to 8 MiB per instance (GStreamer negotiates a 2 MiB
++	 * encoded-buffer sizeimage regardless of our try_fmt clamp), and two concurrent tile
++	 * decoders then overrun the 108 MiB mmz pool. 2 MiB holds ~80 average tile AUs and
++	 * 4-5 worst-case IDR bursts for this device class. */
++	ring_buffer->size = 2 * 1024 * 1024;
+ 	ret = wave5_vdi_allocate_dma_memory(inst->dev, ring_buffer);
+ 	if (ret) {
+ 		dev_dbg(inst->dev->dev, "%s: allocate ring buffer of size %zu fail: %d\n",

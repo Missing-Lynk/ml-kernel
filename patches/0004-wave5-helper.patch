@@ -1,0 +1,49 @@
+Why: upstream takes interruptible locks in the instance-teardown path and bails
+out early on close failure. Teardown runs from file release, where on SIGKILL a
+fatal signal is already pending, so the interruptible lock returns -EINTR
+immediately and the instance's buffers (FBC framebuffers, bitstream ring,
+work/task) leak from the fixed mmz pool until power cycle; the early returns
+leak the same way since the fd is gone regardless. Locks made uninterruptible
+and every path made to reach cleanup.
+
+--- a/drivers/media/platform/chips-media/wave5/wave5-helper.c
++++ b/drivers/media/platform/chips-media/wave5/wave5-helper.c
+@@ -82,9 +82,14 @@
+ 	 * in the wave5_vpu_dec_finish_decode.
+ 	 * So the spin lock and mutex were used to protect the list in the release function.
+ 	 */
+-	ret = mutex_lock_interruptible(&inst->dev->irq_lock);
+-	if (ret)
+-		return ret;
++	/* ML (Artosyn): must NOT be interruptible, and every path below must reach
++	 * wave5_cleanup_instance. This runs from the file-release path; on SIGKILL the
++	 * fatal signal is already pending, so an interruptible lock returns -EINTR
++	 * immediately and the whole instance (FBC framebuffers, bitstream ring, work/task
++	 * buffers) leaks from the fixed mmz pool until power cycle. Same for the early
++	 * returns on close failure: the fd is gone either way, so bailing out only
++	 * converts a firmware hiccup into a permanent pool leak. */
++	mutex_lock(&inst->dev->irq_lock);
+ 	spin_lock_irqsave(&inst->dev->irq_spinlock, flags);
+ 	list_del_init(&inst->list);
+ 	spin_unlock_irqrestore(&inst->dev->irq_spinlock, flags);
+@@ -96,17 +101,15 @@
+ 		if (fail_res == WAVE5_SYSERR_VPU_STILL_RUNNING) {
+ 			dev_err(inst->dev->dev, "%s close failed, device is still running\n",
+ 				name);
+-			return -EBUSY;
+-		}
+-		if (ret && ret != -EIO) {
++			ret = -EBUSY;
++		} else if (ret && ret != -EIO) {
+ 			dev_err(inst->dev->dev, "%s close, fail: %d\n", name, ret);
+-			return ret;
+ 		}
+ 	}
+ 
+ 	wave5_cleanup_instance(inst, filp);
+ 
+-	return ret;
++	return ret == -EIO ? 0 : ret;
+ }
+ 
+ int wave5_vpu_queue_init(void *priv, struct vb2_queue *src_vq, struct vb2_queue *dst_vq,
