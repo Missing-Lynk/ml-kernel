@@ -943,7 +943,18 @@ static int ar_scaler_probe(struct platform_device *pdev)
 	mutex_init(&sc->lock);
 	init_completion(&sc->completion);
 
-	/* (1) scaler core registers from DT reg[0], min size 0x1000. */
+	/* (1) scaler core registers from DT reg[0], min size 0x1000.
+	 *
+	 * Map NON-exclusively (devm_ioremap, not devm_platform_ioremap_resource):
+	 * the scaler's 0x08840000 window sits INSIDE the VO display controller's
+	 * block (DT/iomem: 08810000-0884ffff = 8810000.vo), and the vo DRM driver
+	 * already holds an exclusive request_mem_region over the whole range. An
+	 * exclusive request here therefore fails -EBUSY ("can't request region for
+	 * [mem 0x08840000-0x08840fff]") and probe never binds. The scaler is a
+	 * functional sub-block of VO; its regs are a disjoint sub-window vo does not
+	 * touch, so a plain ioremap (same as the "control"/CGU window below) is the
+	 * correct model - it coexists with vo instead of fighting it for the region.
+	 */
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res)
 		return -ENODEV;
@@ -951,9 +962,9 @@ static int ar_scaler_probe(struct platform_device *pdev)
 		dev_err(dev, "scaler reg window too small (%pa)\n", &res->start);
 		return -EINVAL;
 	}
-	sc->regbase = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(sc->regbase))
-		return PTR_ERR(sc->regbase);
+	sc->regbase = devm_ioremap(dev, res->start, resource_size(res));
+	if (!sc->regbase)
+		return -ENOMEM;
 
 	/* (2) "control" clock/power block: raw phys from a u32 DT prop (not a
 	 * reg resource), default 0x0A100000, mapped size 0x8000.

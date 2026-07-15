@@ -134,18 +134,28 @@ Requires `ar_osal.ko` and `ar_sys.ko` loaded first (see `../modules/load.sh`). D
 exercise the codec/scaler engines - only the foundation ioctl/mmap contracts.
 
 ### `scalertest` - ar_scaler
-Allocates a src + dst buffer from MMZ and issues one `CropResize` (1280x720 -> 640x360) on
-`/dev/arscaler`. Not a pixel-correctness check (no golden image) - the point is whether the
-op *completes*: `rc==0` means the clock bring-up + completion IRQ path work; `-ETIMEDOUT`
-means the register packing or clock sequence is wrong and the IRQ never fired.
+Pixel-correctness test for `/dev/arscaler`, no closed `libhal_scaler` needed. Allocates a
+src + dst buffer from MMZ, paints a known grayscale pattern, and runs an escalating ladder
+of `CropResize` ops, checking the destination pixels each time:
+
+- **T1 identity full-frame** and **T2 identity crop** (1:1, with offset): must be
+  **bit-exact**. At ratio 1.0 the Q16 phase step is exactly one source pixel, so a correct
+  engine copies the crop verbatim - this needs no interpolation model and is the real
+  correctness gate (clock bring-up, completion IRQ, phys/stride/crop maths, register packing).
+- **T3 2:1 downscale**: compared against a software 2x2 box reference with a generous
+  tolerance (we have no golden polyphase filter), so it catches blank/garbage/wrong-layout
+  output while tolerating small filter/phase differences.
+
+`-ETIMEDOUT` on any op means the register packing or clock sequence is wrong and the IRQ
+never fired. Exit 0 = PASS, 1 = setup/ioctl error, 2 = pixel mismatch.
 
 ```sh
 make scalertest
 scp build/scalertest root@192.168.3.100:/tmp/
-ssh root@192.168.3.100 /tmp/scalertest
+ssh root@192.168.3.100 /tmp/scalertest          # or: scalertest W H  (override src dims)
 ```
-Requires `ar_osal.ko` and `ar_scaler.ko` loaded first. After the call, `cat
-/proc/arscaler/state` on the device to inspect the programmed registers.
+Requires `ar_osal.ko` and `ar_scaler.ko` loaded first. On any failure the tool dumps
+`/proc/arscaler/state` (the on-device oracle) so the programmed registers are in the log.
 
 ### `sd_rwtest` - SD card block reads/writes (dw_mci-artosyn), hang-safe
 Validates SD-card block I/O through the real block layer (`/dev/mmcblk1` -> mmcblk -> mmc core ->

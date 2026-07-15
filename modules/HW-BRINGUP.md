@@ -51,13 +51,36 @@ DT fix (see `../ROADMAP.md`).
 - IRQ smoke test: REGISTER hwirq 100, then trigger an h26x completion (needs the codec userspace running) and confirm WAIT_EVENT returns `{hwirq=100, ktime}`. Watch `/proc/interrupts` line 100 increment.
 - proc shuttle: `ls /proc/umap/` after the MPP service CREATEs entries.
 
-## Phase 4 - ar_scaler
+## Phase 4 - ar_scaler - VALIDATED
+> **Why `regbase` maps non-exclusively.** The scaler's MMIO (`reg = 0x08840000`) sits
+> **inside the VO display controller's register block** - `/proc/iomem`:
+> `08810000-0884ffff : 8810000.vo vo@8810000`. The `vo` DRM driver claims that whole window
+> exclusively, so an exclusive `request_mem_region` here fails `-EBUSY` ("can't request region
+> for [mem 0x08840000-0x08840fff]" -> probe `-16`). The scaler is a functional sub-block *of*
+> the VO subsystem (which is also why they share the CGU), so `ar_scaler_probe` maps `regbase`
+> with `devm_ioremap` (non-exclusive, like the `control`/CGU window) to coexist with `vo`
+> instead of claiming the region.
+>
+> **SAFETY: do the first probe after any change with the display feed STOPPED.** `ar_scaler`'s
+> `control` window (`0x0A100000`) is the **shared CGU** (`cgu@0x0a100000`, `artosyn,ar9311-cgu`)
+> that also generates the display/VO pixel clocks. The probe's clock bring-up does RMW pokes
+> into it (gate `+0x6010`, unlock magic `+0x6200`, config `+0x6204`, divider `+0x405c`), so a
+> mis-recovered value could glitch the display clock. Stop the video first
+> (`rc-service ml-video stop`), then load + test; worst case is a panel glitch fixed by reboot
+> (nothing is flashed). The scaler is NOT in the open decode->display path (zero-copy DRM), so
+> validating it needs no feed.
 ```
 insmod ar_scaler.ko
 ```
-- `/dev/arscaler` exists; dmesg shows probe OK (core regs @0x08840000, control @0x0A100000, irq 107). `/proc/interrupts` has `107 ... arscaler`.
-- **`cat /proc/arscaler/state`** = the verification oracle. Run `libhal_scaler` `crop_resize` on a known src->dst; confirm the op completes (no `-ETIMEDOUT`). **A timeout means the clock-init sequence or register packing is wrong** (the IRQ never fires) - the main scaler risk. Compare `/proc/arscaler/state` field-by-field against the stock slot's scaler under the same op.
-- Pixel correctness: scale a test pattern, compare output to the stock slot. Wrong pixels but completing op => LUT or Q16 packing off.
+- `/dev/arscaler` exists; dmesg shows `ar_scaler 8840000.scaler: ready: regs 0x08840000, control 0x0a100000, irq 28`. `/proc/interrupts` has `107 ... arscaler`.
+- **`cat /proc/arscaler/state`** = the verification oracle. Run `../test_tools/scalertest`
+  (no closed `libhal_scaler` needed): it allocates MMZ src/dst, paints a pattern and runs a
+  crop/resize ladder. **A `-ETIMEDOUT` means the clock-init sequence or register packing is
+  wrong** (the IRQ never fires); on failure scalertest dumps `/proc/arscaler/state`.
+- Pixel correctness: scalertest's T1/T2 identity/crop ops are **bit-exact** (ratio 1.0 = pure
+  crop/copy); the T3 2:1 downscale is checked against a software box reference with tolerance.
+  **Result: T1/T2 bit-exact, T3 within tolerance, IRQ 107 fires** - the recovered clock
+  bring-up, phys/stride/crop packing, Q16 ratio math, LUT, and completion path are all correct.
 
 ## Phase 5 - ar_framebuffer
 ```
