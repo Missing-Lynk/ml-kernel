@@ -101,20 +101,16 @@ fi
 
 KVER="$(cat "$KTREE/include/config/kernel.release" 2>/dev/null || make -s -C "$KTREE" kernelrelease)"
 
-# Build ONLY the in-tree =m modules we actually ship + stage below: the DRM stack, the
-# wave5 codec plus its v4l2/videobuf2 deps, and dmatest. A plain `make modules` compiles
-# the ENTIRE defconfig =m set (~500 .ko, minutes of mostly-idle single-threaded tail) when
-# we keep ~a dozen - Kbuild has no per-module target, but a trailing-slash path builds just
-# that subtree. `scripts/build.sh` builds only Image+dtbs, so these are built here, before
-# the out-of-tree build. Symbol resolution stays intact: everything the out-of-tree Artosyn
-# modules import (INPUT/IIO/SPI cores, artosyn_adc's devm_iio_device_*) is built-in =y - its
-# symbols are already in vmlinux.symvers (seeded into Module.symvers above), so there is no
-# =m provider to miss. If any of those cores ever go back to =m, add its subtree here.
-SHIP_DIRS="drivers/gpu/drm/ drivers/media/v4l2-core/ drivers/media/common/videobuf2/ \
-	   drivers/media/platform/chips-media/wave5/ drivers/dma/"
-echo "=== building shipped in-tree modules ==="
-# shellcheck disable=SC2086  # word-splitting SHIP_DIRS into separate make targets is intended
-run "in-tree modules" make -C "$KTREE" ARCH=arm64 CROSS_COMPILE="$TC" $SHIP_DIRS
+# Build the in-tree =m modules (`scripts/build.sh` builds only Image+dtbs). This must be a
+# full `make modules`: a trailing-slash subtree target (`make drivers/gpu/drm/`) compiles the
+# objects but never runs modpost, so no .ko is linked and the staging below silently ships an
+# incomplete set on a fresh tree (DRM stack + wave5 missing -> broken image). The defconfig
+# is trimmed, so the =m set is small; the first build on a fresh tree pays the full cost and
+# later runs are incremental. Symbol resolution stays intact: everything the out-of-tree
+# Artosyn modules import (INPUT/IIO/SPI cores, artosyn_adc's devm_iio_device_*) is built-in
+# =y - its symbols are already in vmlinux.symvers (seeded into Module.symvers above).
+echo "=== building in-tree modules ==="
+run "in-tree modules" make -C "$KTREE" ARCH=arm64 CROSS_COMPILE="$TC" -j"$(nproc)" modules
 
 # stage sources out of the repo, then build there (keeps modules/ clean)
 rm -rf "$BUILD_OUT"
@@ -164,6 +160,11 @@ cp "$KTREE/modules.builtin" "$KTREE/modules.builtin.modinfo" "$STAGE/lib/modules
 # depmod lives in /sbin (kmod), which is NOT on a normal user's PATH, so `depmod` alone is
 # "command not found" and modules.dep silently never gets written (modprobe deps then fail).
 # Resolve the real path. Any residual modules.order warning is harmless (we ship a subset).
+# Fail loudly if the critical in-tree modules did not make it: an image staged without the
+# codec or the display stack boots to a black screen with no video and the cause is invisible.
+for critical in wave5.ko artosyn_vo.ko; do
+	[ -f "$MODDIR/$critical" ] || { echo "FATAL: $critical missing from stage (in-tree modules build incomplete)"; exit 1; }
+done
 DEPMOD="$(command -v depmod || echo /sbin/depmod)"; [ -x "$DEPMOD" ] || DEPMOD=/usr/sbin/depmod
 "$DEPMOD" -b "$STAGE" "$KVER" 2>&1 | grep -v 'WARNING: could not open modules\.' || true
 [ -f "$STAGE/lib/modules/$KVER/modules.dep" ] || echo "  WARN: depmod produced no modules.dep (modprobe deps will fail)"
