@@ -4,7 +4,8 @@ order-aligned, so an allocation can occupy up to ~2x its size and the pool
 returns ENOMEM well below its nominal capacity. Replaced with page-granular
 first-fit (bitmap_find_next_zero_area); a per-allocation page-count map lets
 the release path free the exact count instead of relying on the caller's
-get_order(size). Only wave5 binds an rmem coherent pool on this system.
+get_order(size). wave5 and ml_mmzheap (the userspace mmz dma-heap) share the
+single rmem coherent pool on this system.
 
 --- a/kernel/dma/coherent.c
 +++ b/kernel/dma/coherent.c

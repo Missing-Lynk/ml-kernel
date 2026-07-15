@@ -55,3 +55,8 @@ obj-m += artosyn_mmc.o
 # as a batched dmabuf memcpy, for the GStreamer two-tile compositor (off-CPU compose). Uses
 # only in-kernel dmaengine + dma-buf APIs (both =y). Test: ../test_tools/ml_dmablit_test.c.
 obj-m += ml_dmablit.o
+
+# ml_mmzheap - dma-heap "mmz" over the shared MMZ carveout (same rmem coherent pool as the
+# wave5 codec), so ml-pipeline's composite buffers live beside the codec's instead of in the
+# 56 MiB CMA. Binds the missinglynk,mmz-heap DT node. Init-only: dma-heaps cannot unregister.
+obj-m += ml_mmzheap.o

@@ -159,6 +159,16 @@
 		};
 	};
 
+	/* Userspace dma-heap /dev/dma_heap/mmz (ml_mmzheap.ko) over the MMZ pool.
+	 * Shares the pool's ONE per-rmem coherent allocator with the wave5 codec
+	 * (rmem_dma_device_init caches dma_coherent_mem in rmem->priv), so heap
+	 * and codec allocations coordinate in the same bitmap. ml-pipeline's
+	 * composite buffers allocate here (WC, DC-coherent) instead of CMA. */
+	mmz-heap {
+		compatible = "missinglynk,mmz-heap";
+		memory-region = <&mmz_pool>;
+	};
+
 	timer {
 		compatible = "arm,armv8-timer";
 		interrupts = <GIC_PPI 13 IRQ_TYPE_LEVEL_LOW>,
