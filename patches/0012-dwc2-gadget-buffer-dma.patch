@@ -1,0 +1,34 @@
+Why: mainline dwc2 auto-enables gadget descriptor DMA whenever the core
+advertises it (hw->dma_desc_enable), which the Proxima-9311 core does. Under a
+sustained bulk OUT transfer (host->device over CDC-ECM) concurrent with video
+decode, the descriptor-DMA OUT ring wedges: dwc2_hsotg_ep_stop_xfr then times
+out on GINTSTS.GOUTNAKEFF and DOEPCTL.EPDisable, the gadget drops and
+re-enumerates, and the recovery busy-waits starve the (2-core, memory-tight)
+video pipeline so the picture freezes. The vendor BSP (Linux 4.9) predates
+gadget descriptor-DMA support and ran plain buffer DMA on this identical core,
+DT and FIFO config with no such failure. Force buffer DMA (g_dma stays on,
+g_dma_desc off) to match. dwc2_check_params()'s CHECK_BOOL only forces
+g_dma_desc to false when it is already true, so a false value passes validation
+untouched.
+
+--- a/drivers/usb/dwc2/params.c
++++ b/drivers/usb/dwc2/params.c
+@@ -552,7 +552,17 @@
+ 	if ((hsotg->dr_mode == USB_DR_MODE_PERIPHERAL) ||
+ 	    (hsotg->dr_mode == USB_DR_MODE_OTG)) {
+ 		p->g_dma = dma_capable;
+-		p->g_dma_desc = hw->dma_desc_enable;
++		/*
++		 * ML (Artosyn): force buffer DMA, never gadget descriptor DMA.
++		 * The Proxima core advertises DDMA (hw->dma_desc_enable), so
++		 * mainline auto-enables it here. Under a sustained bulk OUT
++		 * transfer concurrent with video decode the DDMA OUT ring wedges
++		 * and dwc2_hsotg_ep_stop_xfr times out on GOUTNAKEFF/EPDisable,
++		 * dropping and re-enumerating the gadget. The vendor BSP (Linux
++		 * 4.9) predates gadget DDMA and ran buffer DMA on this same core;
++		 * match it. dwc2_check_params leaves a false value untouched.
++		 */
++		p->g_dma_desc = false;
+ 
+ 		/*
+ 		 * The values for g_rx_fifo_size (2048) and
