@@ -114,6 +114,7 @@
 #define LINK_TYPE_CMD		0xDD	/* bb command / response (cmd_txq / cmd_rxq) */
 #define LINK_TYPE_ACK		0xEE	/* flow-control ACK: big-endian u32 acked-byte count */
 #define LINK_TRAILER_LEN	4
+#define IP_HEAD_SHRINK		8	/* build_ip_head() compresses the IPv4 header 20 -> 12 */
 
 /*
  * The IPv4 tunnel ships a 12-byte compressed header: the 20-byte IPv4 header
@@ -811,13 +812,27 @@ static bool frame_log;
 module_param(frame_log, bool, 0644);
 MODULE_PARM_DESC(frame_log, "hex-log /dev/artosyn_sdio frames + RX trailer types (diagnostic)");
 
+/* Diagnostic: log the TX credit path (EVT_TX grants accept/ignore, no-credit stalls,
+ * insufficient-credit requeues) WITHOUT the frame_log hex spam. Ratelimited.
+ */
+static bool credit_log;
+module_param(credit_log, bool, 0644);
+MODULE_PARM_DESC(credit_log, "log TX credit grant/consume/stall decisions (diagnostic)");
+
 /* TX in-flight window in bytes = eth->unacked_max. 0xEE ACKs gate only the
  * goggle->air uplink; 0 disables the gate; vendor value 40960 (0xa000). See
  * artosyn_sdio_send_data() for the gate itself.
+ *
+ * Default 40960 to MATCH THE VENDOR: with the window off (0) a sustained goggle->air
+ * push (e.g. an SSH file copy) races ahead of what the air actually drains, over-runs a
+ * chip-side buffer the per-grant TX credit does not fully account for, and wedges the
+ * baseband association (RX goes to 0, "slot 0 disconnect"). The window backpressures the
+ * uplink to the ~air-drain rate; the empty-0xDD keepalive in send_cmd() keeps credit/0xEE
+ * ACKs cycling so a throttled window drains and reopens (vendor pairs the two).
  */
-static unsigned int tx_window;
+static unsigned int tx_window = 40960;
 module_param(tx_window, uint, 0644);
-MODULE_PARM_DESC(tx_window, "TX in-flight window bytes (unacked_max); 0=DISABLED (needs 0xEE ACKs first)");
+MODULE_PARM_DESC(tx_window, "TX in-flight window bytes (unacked_max); vendor 40960; 0=disabled");
 
 static void ml_framelog(const char *tag, const u8 *d, size_t n)
 {
@@ -1020,8 +1035,13 @@ static void artosyn_sdio_send_data(struct artosyn_sdio_device *dev)
 	 * on 0x60 (EVT_TX -> tx_write_acc); line ~944 packs only within that credit and
 	 * line ~975 consumes it.
 	 */
-	if (dev->tx_write_acc == dev->tx_read_acc)
+	if (dev->tx_write_acc == dev->tx_read_acc) {
+		if (credit_log && !skb_queue_empty(&eth->data_txq))
+			pr_info_ratelimited("ml-credit: send_data NO-CREDIT, %u pkts stuck (rd=%u wr=%u)\n",
+					    skb_queue_len(&eth->data_txq),
+					    dev->tx_read_acc, dev->tx_write_acc);
 		return;
+	}
 
 	/* In-flight cap (vendor @0x2b10, `b.hi`, threshold 40960): do not START a new send batch
 	 * while more than unacked_max bytes are still pending an 0xEE ACK; drained by the
@@ -1029,8 +1049,13 @@ static void artosyn_sdio_send_data(struct artosyn_sdio_device *dev)
 	 * (the default) disables the gate; vendor value 40960. (Vendor `tx_write_acc == 0x400`
 	 * gate @0x2af8 is still undecoded, deliberately not reproduced.)
 	 */
-	if (eth->unacked_max && eth->unacked_bytes > eth->unacked_max)
+	if (eth->unacked_max && eth->unacked_bytes > eth->unacked_max) {
+		if (credit_log && !skb_queue_empty(&eth->data_txq))
+			pr_info_ratelimited("ml-credit: THROTTLED unacked=%u > max=%u (%u pkts waiting)\n",
+					    eth->unacked_bytes, eth->unacked_max,
+					    skb_queue_len(&eth->data_txq));
 		return;
+	}
 
 	while ((skb = skb_dequeue(&eth->data_txq))) {
 		u32 clen;
@@ -1042,13 +1067,43 @@ static void artosyn_sdio_send_data(struct artosyn_sdio_device *dev)
 		if (skb->len < sizeof(struct iphdr) || skb->data[0] != 0x45) {
 			net_dbg_ratelimited("tx: unsupported ip version %02x\n",
 					    skb->data[0]);
+			/* start_xmit inc'd inflight for this skb; every other consume path decs it.
+			 * Missing the dec here leaks inflight upward on any IPv4-with-options /
+			 * malformed packet until it pins at the cap and the TX queue stops forever. */
+			atomic_dec_if_positive(&dev->inflight);
 			kfree_skb(skb);
 			continue;
 		}
 
-		if (ALIGN(used + skb->len + LINK_TRAILER_LEN, ARSDIO_BLOCK) > dev->tx_write_acc) {
-			skb_queue_head(&eth->data_txq, skb);
-			break;
+		/* Fit test against the current grant. The size that will ACTUALLY hit the wire is
+		 * (skb->len - IP_HEAD_SHRINK) after build_ip_head() compresses the header below, plus
+		 * the one per-batch trailer - i.e. skb->len - 4, NOT skb->len + 4. The vendor aligns
+		 * exactly this (@0x2b90: `+ 0x1fb` = ALIGN(len + used - 4, 512)); checking skb->len + 4
+		 * overstated a full-MTU (4096) packet as needing 4608 > 4096-byte grant and DROPPED every
+		 * data packet while only tiny TCP ACKs got through (SSH copies stalled at ~0 bytes). */
+		if (ALIGN(used + skb->len - IP_HEAD_SHRINK + LINK_TRAILER_LEN, ARSDIO_BLOCK)
+		    > dev->tx_write_acc) {
+			if (used) {
+				/* Batch full for this grant (vendor @0x2ba4): flush what we
+				 * packed and retry the rest on the next grant. The flush below
+				 * consumes the credit (rd=wr), reopening the EVT_TX guard.
+				 */
+				skb_queue_head(&eth->data_txq, skb);
+				break;
+			}
+			/* Head packet alone exceeds this grant (genuinely bigger than any grant can
+			 * hold). The vendor (@0x2ba8) DROPS it and keeps draining; requeuing it strands
+			 * tx_read_acc != tx_write_acc with an empty batch, so the (correct) EVT_TX guard
+			 * then ignores every future grant -> permanent goggle->air TX deadlock. Drop on.
+			 */
+			if (credit_log)
+				pr_info_ratelimited("ml-credit: DROP head pkt need=%u > credit=%u (would-wedge)\n",
+						    (unsigned int)ALIGN(skb->len - IP_HEAD_SHRINK + LINK_TRAILER_LEN, ARSDIO_BLOCK),
+						    dev->tx_write_acc);
+			dev->ndev->stats.tx_dropped++;
+			atomic_dec_if_positive(&dev->inflight);
+			kfree_skb(skb);
+			continue;
 		}
 		artosyn_sdio_build_ip_head(skb);	/* 20 -> 12 byte header */
 		clen = skb->len;
@@ -1112,8 +1167,19 @@ static void artosyn_sdio_send_cmd(struct artosyn_sdio_device *dev)
 
 		/* Pack only while the rounded running total still fits the credit. */
 		if (ALIGN(used + len + LINK_TRAILER_LEN, ARSDIO_BLOCK) > dev->tx_write_acc) {
-			skb_queue_head(&eth->cmd_txq, skb);
-			break;
+			if (used) {
+				skb_queue_head(&eth->cmd_txq, skb);
+				break;
+			}
+			/* Head cmd alone exceeds the grant: drop like the vendor (@0xaf0),
+			 * never requeue an unfittable head (see send_data for why).
+			 */
+			if (credit_log)
+				pr_info_ratelimited("ml-credit: DROP head cmd need=%u > credit=%u (would-wedge)\n",
+						    (unsigned int)ALIGN(len + LINK_TRAILER_LEN, ARSDIO_BLOCK),
+						    dev->tx_write_acc);
+			kfree_skb(skb);
+			continue;
 		}
 		if (used && used + len + LINK_TRAILER_LEN > ARSDIO_STAGING) {
 			if (artosyn_tx_flush(dev, used, LINK_TYPE_CMD))
@@ -1134,6 +1200,20 @@ static void artosyn_sdio_send_cmd(struct artosyn_sdio_device *dev)
 			pr_debug("send_cmd toio failed\n");
 		dev->tx_read_acc = dev->tx_write_acc;	/* consume the credit (vendor @0xc8c) */
 		wake_up(&dev->cmd_wq);
+	} else if (!skb_queue_empty(&eth->data_txq)
+		   && dev->tx_write_acc != dev->tx_read_acc) {
+		/* Empty-0xDD keepalive (vendor send_cmd @0xb00): nothing to send on cmd, but IP
+		 * data is queued and throttled (send_data bailed on the unacked window, so it did
+		 * NOT consume this grant). Emit a bare 0xDD/len-0 frame and consume the grant to
+		 * keep the chip cycling credit and 0xEE ACKs, so unacked_bytes drains and the
+		 * window reopens - otherwise a throttled uplink can stall until the next grant.
+		 */
+		if (artosyn_tx_flush(dev, 0, LINK_TYPE_CMD))
+			pr_debug("send_cmd keepalive toio failed\n");
+		dev->tx_read_acc = dev->tx_write_acc;	/* consume the credit (vendor @0xd14) */
+		if (credit_log)
+			pr_info_ratelimited("ml-credit: 0xDD keepalive (data throttled, unacked=%u)\n",
+					    eth->unacked_bytes);
 	}
 }
 
@@ -1258,6 +1338,12 @@ static void artosyn_sdio_irqhandler(struct sdio_func *func)
 				dev->tx_read_acc = 0;
 				dev->tx_write_acc = cnt;
 				do_tx = true;
+			} else if (credit_log) {
+				/* Credit granted but not taken. If rd!=wr persists across IRQs
+				 * (prev grant never consumed), this is the deadlock we suspect.
+				 */
+				pr_info_ratelimited("ml-credit: EVT_TX grant cnt=%u IGNORED (do_tx=%d rd=%u wr=%u)\n",
+						    cnt, do_tx, dev->tx_read_acc, dev->tx_write_acc);
 			}
 		}
 		/* bitmap == 0: fall through and re-read 0x13 (vendor does not break). */
@@ -1318,6 +1404,9 @@ static netdev_tx_t artosyn_sdio_net_start_xmit(struct sk_buff *skb,
 	/* Honor the 1024 in-flight cap. */
 	if (atomic_inc_return(&dev->inflight) > ARSDIO_INFLIGHT_CAP) {
 		atomic_dec(&dev->inflight);
+		if (credit_log)
+			pr_info_ratelimited("ml-credit: xmit BUSY (inflight cap, qlen=%u unacked=%u)\n",
+					    skb_queue_len(&eth->data_txq), eth->unacked_bytes);
 		netif_tx_stop_queue(netdev_get_tx_queue(ndev, skb_get_queue_mapping(skb)));
 		return NETDEV_TX_BUSY;
 	}
