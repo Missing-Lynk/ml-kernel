@@ -60,8 +60,9 @@ TC="${TC%${CROSS_COMPILE_PREFIX}gcc}${CROSS_COMPILE_PREFIX}"
 
 [ -f "$KTREE/.config" ] || { echo "no configured kernel tree at $KTREE - run scripts/build.sh first"; exit 1; }
 # modpost needs Module.symvers for core symbol resolution; the Image build only
-# leaves vmlinux.symvers, so seed it (MODVERSIONS is off, so CRCs are all 0 - a
-# plain copy is exactly right).
+# leaves vmlinux.symvers, so seed it. With MODVERSIONS on, vmlinux.symvers already
+# carries the real per-symbol CRCs, so this plain copy hands modpost the correct
+# versions for the exact tree we build against.
 [ -f "$KTREE/Module.symvers" ] || cp "$KTREE/vmlinux.symvers" "$KTREE/Module.symvers"
 
 # Out-of-tree .ko finalize needs scripts/module.lds (the module linker script). A
