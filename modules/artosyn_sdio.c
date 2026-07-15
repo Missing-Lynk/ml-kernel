@@ -1374,15 +1374,28 @@ static int artosyn_sdio_net_open(struct net_device *ndev)
 static int artosyn_sdio_net_close(struct net_device *ndev)
 {
 	struct artosyn_sdio_eth *eth = netdev_priv(ndev);
+	struct sk_buff *skb;
 
 	eth->net_dev_opened = false;
 	netif_tx_stop_all_queues(ndev);
-	skb_queue_purge(&eth->data_txq);
-	skb_queue_purge(&eth->cmd_txq);
 	cancel_work_sync(&eth->work);
 	cancel_delayed_work_sync(&eth->delay_work);
+
+	/* Drain, don't purge: every queued skb carries an inflight count from
+	 * start_xmit, and skb_queue_purge frees without decrementing - the
+	 * residue ratchets to ARSDIO_INFLIGHT_CAP and stalls TX permanently.
+	 * The worker is cancelled above, so consume paths don't race the drain
+	 * (and the queue ops are locked regardless).
+	 */
+	while ((skb = skb_dequeue(&eth->data_txq)) != NULL) {
+		atomic_dec_if_positive(&eth->sdio_dev->inflight);
+		kfree_skb(skb);
+	}
+
+  skb_queue_purge(&eth->cmd_txq);
 	netif_carrier_off(ndev);
-	return 0;
+
+  return 0;
 }
 
 static netdev_tx_t artosyn_sdio_net_start_xmit(struct sk_buff *skb,
@@ -1490,7 +1503,6 @@ static void artosyn_sdio_net_setup(struct net_device *ndev)
 	ndev->mtu = 4096;
 	ndev->min_mtu = 0;
 	ndev->max_mtu = 65535;
-	ndev->needs_free_netdev = true;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -2043,7 +2055,8 @@ static void sdio_artosyn_remove(struct sdio_func *func)
 		unregister_netdev(dev->ndev);
 		if (eth->workwq)
 			destroy_workqueue(eth->workwq);
-		free_netdev(dev->ndev);	/* needs_free_netdev handles this on unregister */
+
+		free_netdev(dev->ndev);
 		dev->ndev = NULL;
 	}
 
