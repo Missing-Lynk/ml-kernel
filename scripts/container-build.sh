@@ -108,6 +108,10 @@ if [ -z "$MINIMAL" ] && [ -f /repo/configs/artosyn.config ]; then
   # See configs/exfat.config.
   [ -f /repo/configs/exfat.config ] && frags="$frags /repo/configs/exfat.config"
 
+  # MTP over USB (FunctionFS f_fs) for the DVR-recordings gadget. Merged after trim
+  # (which disables f_fs) so it wins. See configs/usb-mtp.config.
+  [ -f /repo/configs/usb-mtp.config ] && frags="$frags /repo/configs/usb-mtp.config"
+
   # DesignWare AXI DMA (dw-axi-dmac, =y): the phys-to-phys copy engine for the
   # GStreamer two-tile compositor. See configs/dma.config + the axidma@8800000
   # DT node.
