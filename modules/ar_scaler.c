@@ -994,14 +994,11 @@ static int ar_scaler_probe(struct platform_device *pdev)
 	/* (1) scaler core registers from DT reg[0], min size 0x1000.
 	 *
 	 * Map NON-exclusively (devm_ioremap, not devm_platform_ioremap_resource):
-	 * the scaler's 0x08840000 window sits INSIDE the VO display controller's
-	 * block (DT/iomem: 08810000-0884ffff = 8810000.vo), and the vo DRM driver
-	 * already holds an exclusive request_mem_region over the whole range. An
-	 * exclusive request here therefore fails -EBUSY ("can't request region for
-	 * [mem 0x08840000-0x08840fff]") and probe never binds. The scaler is a
-	 * functional sub-block of VO; its regs are a disjoint sub-window vo does not
-	 * touch, so a plain ioremap (same as the "control"/CGU window below) is the
-	 * correct model - it coexists with vo instead of fighting it for the region.
+	 * the scaler is a functional sub-block of the VO display controller, and
+	 * on a DTB whose vo reg window still spans 0x8810000+0x40000 an exclusive
+	 * request here fails -EBUSY (vo holds the region). Current DTBs shrink vo
+	 * to 0x10000 so the windows are disjoint, but the plain ioremap (same as
+	 * the "control"/CGU window below) keeps the module loadable on either DTB.
 	 */
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res)

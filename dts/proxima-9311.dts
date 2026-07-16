@@ -633,11 +633,11 @@
 			 * above); the driver enables it and clk_set_rate steers the
 			 * scan-out rate. */
 			clocks = <&pixclk 0>;
-			/* 0x40000, not 0x100000: the DSI host sits at 0x8850000 (= base + 0x40000),
-			 * so a 1 MiB VO window overlaps it and the VO's exclusive ioremap fails with
-			 * -EBUSY. 0x40000 is the largest non-overlapping size (VO regs end where the
-			 * DSI begins); the exact VO block size is unknown. */
-			reg = <0 0x8810000 0 0x40000>;
+			/* 0x10000: the driver's highest register is VO_QOS @0xff00. A larger
+			 * window overlaps its neighbours and their exclusive claims fail
+			 * -EBUSY: the scaler sits at base + 0x30000 (0x8840000) and the DSI
+			 * host at base + 0x40000 (0x8850000). */
+			reg = <0 0x8810000 0 0x10000>;
 			interrupts = <GIC_SPI 70 IRQ_TYPE_LEVEL_HIGH>;	/* IRQ 102 */
 			status = "okay";
 
@@ -650,7 +650,10 @@
 		 * Mbps). The QY45043A0 panel is the DSI child. TODO: DSI pclk/byte clock. */
 		dsi: dsi@8850000 {
 			compatible = "artosyn,dsi";
-			reg = <0 0x8850000 0 0x100000>;
+			/* 0x1000: the host + PHY registers the driver touches end below
+			 * 0x300. A 1 MiB window would swallow the ar_mpp vsync block at
+			 * 0x8870000 and fail its MMIO claim -EBUSY. */
+			reg = <0 0x8850000 0 0x1000>;
 			/* "pclk" = the DSI APB/register clock that mainline dw-mipi-dsi requires
 			 * (clk_get is non-optional). clk150m is a running stand-in to unblock the
 			 * probe; the MIPI pixel PLL (separate) is what actually gates scanout.

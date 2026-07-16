@@ -7,6 +7,14 @@ the release path free the exact count instead of relying on the caller's
 get_order(size). wave5 and ml_mmzheap (the userspace mmz dma-heap) share the
 single rmem coherent pool on this system.
 
+Caveat: this drops the DMA-API natural-alignment guarantee (smallest
+power-of-2 order >= size) for EVERY per-device coherent pool, deliberately:
+order-aligned placement is where the waste comes from, and neither pool
+tenant (wave5, ml_mmzheap) masks address bits. Any future driver with a
+per-device pool whose hardware requires naturally-aligned buffers
+(address-bit-masked descriptor rings) must not rely on dma_alloc_coherent
+alignment under this patch.
+
 --- a/kernel/dma/coherent.c
 +++ b/kernel/dma/coherent.c
 @@ -16,6 +16,10 @@
@@ -79,7 +87,7 @@ single rmem coherent pool on this system.
  
  	/*
  	 * Memory was found in the coherent area.
-@@ -203,9 +221,15 @@
+@@ -203,9 +221,17 @@
  		   (mem->virt_base + ((dma_addr_t)mem->size << PAGE_SHIFT))) {
  		int page = (vaddr - mem->virt_base) >> PAGE_SHIFT;
  		unsigned long flags;
@@ -87,9 +95,11 @@ single rmem coherent pool on this system.
  
  		spin_lock_irqsave(&mem->spinlock, flags);
 -		bitmap_release_region(mem->bitmap, page, order);
-+		/* ML (Artosyn): free the recorded page count, not 2^order (see alloc). */
++		/* ML (Artosyn): free the recorded page count, not 2^order (see alloc).
++		 * A zero count means vaddr is not a live allocation start (double free
++		 * or interior pointer); the fallback would clear someone else's pages. */
 +		nr = mem->nr_map[page];
-+		if (!nr)
++		if (WARN_ON(!nr))
 +			nr = 1U << order;
 +		mem->nr_map[page] = 0;
 +		bitmap_clear(mem->bitmap, page, nr);

@@ -11,3 +11,4 @@
 0011-dma-coherent-page-granular.patch
 0012-dwc2-gadget-buffer-dma.patch
 0013-wave5-enc-plane-data-offset.patch
+0014-wave5-close-keep-dma-bufs.patch

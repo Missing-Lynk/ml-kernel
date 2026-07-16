@@ -1,0 +1,77 @@
+Why: patch 0007 deliberately leaks a non-quiesced instance's buffers (freeing
+memory a running firmware instance still DMAs into hard-hangs the SoC), but the
+release path then calls wave5_cleanup_instance, which unconditionally freed the
+FBC/DPB framebuffers and the bitstream ring - exactly the buffers the firmware
+writes - defeating the protection. The close paths now mark the instance
+(keep_dma_bufs) whenever they bail without a successful quiesce (siblings live,
+or the last-instance safety reset failed), and cleanup leaks those buffers too.
+
+--- a/drivers/media/platform/chips-media/wave5/wave5-vpuapi.h
++++ b/drivers/media/platform/chips-media/wave5/wave5-vpuapi.h
+@@ -818,6 +818,7 @@
+ 	bool cbcr_interleave;
+ 	bool nv21;
+ 	bool eos;
++	bool keep_dma_bufs;
+ 	struct vpu_buf bitstream_vbuf;
+ 	dma_addr_t last_rd_ptr;
+ 	size_t remaining_consumed_bytes;
+--- a/drivers/media/platform/chips-media/wave5/wave5-vpuapi.c
++++ b/drivers/media/platform/chips-media/wave5/wave5-vpuapi.c
+@@ -257,6 +257,7 @@
+ 			dev_warn(inst->dev->dev,
+ 				 "%s: instance still running with siblings live, leaking its buffers (no global reset)\n",
+ 				 __func__);
++			inst->keep_dma_bufs = true;
+ 			goto unlock_and_return;
+ 		}
+ 		dev_warn(inst->dev->dev, "%s: instance still running, VPU safety reset before free\n",
+@@ -264,6 +265,7 @@
+ 		if (wave5_vpu_reset(vpu_dev->dev, SW_RESET_SAFETY)) {
+ 			dev_err(inst->dev->dev, "%s: safety reset failed, leaking instance buffers\n",
+ 				__func__);
++			inst->keep_dma_bufs = true;
+ 			goto unlock_and_return;
+ 		}
+ 	}
+@@ -784,6 +786,7 @@
+ 			dev_warn(inst->dev->dev,
+ 				 "%s: instance still running with siblings live, leaking its buffers (no global reset)\n",
+ 				 __func__);
++			inst->keep_dma_bufs = true;
+ 			goto unlock_and_return;
+ 		}
+ 		dev_warn(inst->dev->dev, "%s: instance still running, VPU safety reset before free\n",
+@@ -791,6 +794,7 @@
+ 		if (wave5_vpu_reset(vpu_dev->dev, SW_RESET_SAFETY)) {
+ 			dev_err(inst->dev->dev, "%s: safety reset failed, leaking instance buffers\n",
+ 				__func__);
++			inst->keep_dma_bufs = true;
+ 			goto unlock_and_return;
+ 		}
+ 	}
+--- a/drivers/media/platform/chips-media/wave5/wave5-helper.c
++++ b/drivers/media/platform/chips-media/wave5/wave5-helper.c
+@@ -45,10 +45,19 @@
+ 	    inst->dev->product_code != WAVE515_CODE)
+ 		wave5_vdi_free_sram(inst->dev);
+ 
+-	for (i = 0; i < inst->fbc_buf_count; i++)
+-		wave5_vpu_dec_reset_framebuffer(inst, i);
++	/* ML (Artosyn): when close left the firmware instance running (keep_dma_bufs),
++	 * the framebuffers and bitstream ring are still firmware DMA targets; freeing
++	 * them lets the firmware write reallocated memory and hard-hangs the SoC.
++	 * Leak them, matching the work/task buffers the close path already leaked. */
++	if (inst->keep_dma_bufs) {
++		dev_warn(inst->dev->dev,
++			 "instance not quiesced, leaking framebuffers and bitstream ring\n");
++	} else {
++		for (i = 0; i < inst->fbc_buf_count; i++)
++			wave5_vpu_dec_reset_framebuffer(inst, i);
+ 
+-	wave5_vdi_free_dma_memory(inst->dev, &inst->bitstream_vbuf);
++		wave5_vdi_free_dma_memory(inst->dev, &inst->bitstream_vbuf);
++	}
+ 	v4l2_ctrl_handler_free(&inst->v4l2_ctrl_hdl);
+ 	if (inst->v4l2_fh.vdev) {
+ 		v4l2_fh_del(&inst->v4l2_fh, filp);
