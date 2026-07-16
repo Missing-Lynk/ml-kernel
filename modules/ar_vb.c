@@ -28,6 +28,7 @@
 #include <linux/slab.h>
 #include <linux/bitmap.h>
 #include <linux/list.h>
+#include <linux/overflow.h>
 
 #include "ar_mmz.h"
 
@@ -243,12 +244,21 @@ static long vb_crtpl(void __user *arg, unsigned int sz)
 {
 	struct vb_pool_cfg cfg;
 	struct vb_pool *p = NULL;
+	u64 total;
 	int i;
 
 	if (sz != sizeof(cfg) || copy_from_user(&cfg, arg, sizeof(cfg)))
 		return -EFAULT;
 	if (!cfg.blk_size || !cfg.blk_cnt || cfg.blk_cnt > 0xffff)
 		return -EINVAL;
+	/* blk_size is an unchecked user u64: a wrapping product would create a
+	 * tiny allocation with large logical pool geometry, and getblk/hl2pa
+	 * would hand out physical addresses far past it.
+	 */
+	if (check_mul_overflow(cfg.blk_size, (u64)cfg.blk_cnt, &total))
+		return -EINVAL;
+	/* name arrives unterminated from userspace; strscpy over-reads. */
+	cfg.name[sizeof(cfg.name) - 1] = '\0';
 	for (i = 0; i < MAX_POOLS; i++) {
 		if (!g_pools[i].used) {
 			p = &g_pools[i];
@@ -258,8 +268,7 @@ static long vb_crtpl(void __user *arg, unsigned int sz)
 	if (!p)
 		return -ENOSPC;
 
-	p->mmb = hil_mmb_alloc(cfg.name, cfg.blk_size * cfg.blk_cnt, PAGE_SIZE,
-			       0, "");
+	p->mmb = hil_mmb_alloc(cfg.name, total, PAGE_SIZE, 0, "");
 	if (!p->mmb)
 		return -ENOMEM;
 	p->free_map = bitmap_alloc(cfg.blk_cnt, GFP_KERNEL);

@@ -46,6 +46,8 @@
 #include <linux/firmware.h>
 #include <linux/string.h>
 #include <linux/atomic.h>
+#include <linux/refcount.h>
+#include <linux/completion.h>
 #include <linux/unaligned.h>
 #include <linux/mmc/sdio.h>
 #include <linux/mmc/sdio_func.h>
@@ -233,6 +235,17 @@ struct artosyn_sdio_device {
 	struct mutex		io_lock;	/* serialises bulk IO (ctx "removed" gate) */
 	bool			removed;
 
+	/*
+	 * fd-lifetime vs SDIO removal. refs = probe + one per open fd; the
+	 * struct is freed on the last put, so a still-open /dev/artosyn_sdio
+	 * fd never dereferences freed memory after the func is removed.
+	 * active_ops counts fd ops currently inside the driver; remove()
+	 * drains it to zero (ops_drained) before tearing down func/ndev.
+	 */
+	refcount_t		refs;
+	atomic_t		active_ops;
+	struct completion	ops_drained;
+
 	wait_queue_head_t	cmd_wq;		/* "q" waitqueue, woken by IRQ events */
 
 	/*
@@ -325,8 +338,6 @@ MODULE_PARM_DESC(fw_name, "AR8030 baseband firmware image (SPL blob)");
 static char *cfg_name = "bb_config_gnd.json";
 module_param(cfg_name, charp, 0444);
 MODULE_PARM_DESC(cfg_name, "AR8030 merged config JSON blob");
-
-static DEFINE_MUTEX(artosyn_mutex);
 
 /* forward decls */
 static void artosyn_sdio_recv(struct artosyn_sdio_device *dev);
@@ -1509,18 +1520,59 @@ static void artosyn_sdio_net_setup(struct net_device *ndev)
 /* Char control device (/dev/artosyn_sdio), §3                               */
 /* -------------------------------------------------------------------------- */
 
+static void artosyn_dev_put(struct artosyn_sdio_device *dev)
+{
+	if (refcount_dec_and_test(&dev->refs))
+		kfree(dev);
+}
+
+/*
+ * fd-op gate vs SDIO removal. An op bracketed by op_enter/op_exit may use
+ * dev->func and dev->ndev: remove() sets removed, wakes the cmd_wq sleepers
+ * and drains active_ops to zero before tearing either down. Ops arriving
+ * after removal bail here with the device intact (freed only on last put).
+ */
+static bool artosyn_op_enter(struct artosyn_sdio_device *dev)
+{
+	atomic_inc(&dev->active_ops);
+	smp_mb__after_atomic();	/* inc visible before the removed check */
+	if (!READ_ONCE(dev->removed))
+		return true;
+	if (atomic_dec_and_test(&dev->active_ops))
+		complete(&dev->ops_drained);
+	return false;
+}
+
+static void artosyn_op_exit(struct artosyn_sdio_device *dev)
+{
+	if (atomic_dec_and_test(&dev->active_ops) && READ_ONCE(dev->removed))
+		complete(&dev->ops_drained);
+}
+
+/* Mark removed, wake blocked read/write sleepers, wait out in-flight ops. */
+static void artosyn_quiesce(struct artosyn_sdio_device *dev)
+{
+	WRITE_ONCE(dev->removed, true);
+	smp_mb();	/* removed visible before sampling active_ops */
+	wake_up_all(&dev->cmd_wq);
+	while (atomic_read(&dev->active_ops))
+		wait_for_completion_timeout(&dev->ops_drained, HZ);
+}
+
 static int artosyn_open(struct inode *inode, struct file *filp)
 {
 	struct miscdevice *m = filp->private_data;
 	struct artosyn_sdio_device *dev =
 		container_of(m, struct artosyn_sdio_device, misc);
 
+	refcount_inc(&dev->refs);
 	filp->private_data = dev;
 	return 0;
 }
 
 static int artosyn_close(struct inode *inode, struct file *filp)
 {
+	artosyn_dev_put(filp->private_data);
 	return 0;
 }
 
@@ -1566,10 +1618,9 @@ static long artosyn_ioctl_cmd(struct artosyn_sdio_device *dev,
 	return 0;
 }
 
-static long artosyn_unlocked_ioctl(struct file *filp, unsigned int cmd,
-				   unsigned long arg)
+static long artosyn_do_ioctl(struct artosyn_sdio_device *dev,
+			     unsigned int cmd, unsigned long arg)
 {
-	struct artosyn_sdio_device *dev = filp->private_data;
 	void __user *uarg = (void __user *)arg;
 	struct sdio_func *func = dev->func;
 	long ret = 0;
@@ -1693,6 +1744,19 @@ static long artosyn_unlocked_ioctl(struct file *filp, unsigned int cmd,
 	}
 }
 
+static long artosyn_unlocked_ioctl(struct file *filp, unsigned int cmd,
+				   unsigned long arg)
+{
+	struct artosyn_sdio_device *dev = filp->private_data;
+	long ret;
+
+	if (!artosyn_op_enter(dev))
+		return -ENODEV;
+	ret = artosyn_do_ioctl(dev, cmd, arg);
+	artosyn_op_exit(dev);
+	return ret;
+}
+
 /*
  * Char-device .write: the daemon's bb_socket TX. The user buffer is an opaque
  * command payload - the kernel cmd channel is a single byte pipe (slot/port
@@ -1701,14 +1765,14 @@ static long artosyn_unlocked_ioctl(struct file *filp, unsigned int cmd,
  * control: block until the previous cmd batch has drained. Returns count so the
  * daemon's "wrote == requested" success test passes.
  */
-static ssize_t artosyn_write(struct file *filp, const char __user *buf,
-			     size_t count, loff_t *ppos)
+static ssize_t artosyn_do_write(struct artosyn_sdio_device *dev,
+				struct file *filp, const char __user *buf,
+				size_t count)
 {
-	struct artosyn_sdio_device *dev = filp->private_data;
 	struct artosyn_sdio_eth *eth;
 	struct sk_buff *skb;
 
-	if (!dev || !dev->ndev || dev->removed)
+	if (!dev->ndev)
 		return -EIO;
 	if (!count)
 		return 0;
@@ -1738,20 +1802,33 @@ static ssize_t artosyn_write(struct file *filp, const char __user *buf,
 	return count;
 }
 
+static ssize_t artosyn_write(struct file *filp, const char __user *buf,
+			     size_t count, loff_t *ppos)
+{
+	struct artosyn_sdio_device *dev = filp->private_data;
+	ssize_t ret;
+
+	if (!artosyn_op_enter(dev))
+		return -EIO;
+	ret = artosyn_do_write(dev, filp, buf, count);
+	artosyn_op_exit(dev);
+	return ret;
+}
+
 /*
  * Char-device .read: the daemon's bb_socket RX. Returns one queued command
  * frame (filled by artosyn_sdio_recv on a 0xDD trailer). Blocks until one is
  * available; a short read pushes the remainder back at the queue head.
  */
-static ssize_t artosyn_read(struct file *filp, char __user *buf,
-			    size_t count, loff_t *ppos)
+static ssize_t artosyn_do_read(struct artosyn_sdio_device *dev,
+			       struct file *filp, char __user *buf,
+			       size_t count)
 {
-	struct artosyn_sdio_device *dev = filp->private_data;
 	struct artosyn_sdio_eth *eth;
 	struct sk_buff *skb;
 	size_t n;
 
-	if (!dev || !dev->ndev || dev->removed)
+	if (!dev->ndev)
 		return -EIO;
 	if (!count)
 		return 0;
@@ -1786,6 +1863,19 @@ static ssize_t artosyn_read(struct file *filp, char __user *buf,
 	return n;
 }
 
+static ssize_t artosyn_read(struct file *filp, char __user *buf,
+			    size_t count, loff_t *ppos)
+{
+	struct artosyn_sdio_device *dev = filp->private_data;
+	ssize_t ret;
+
+	if (!artosyn_op_enter(dev))
+		return -EIO;
+	ret = artosyn_do_read(dev, filp, buf, count);
+	artosyn_op_exit(dev);
+	return ret;
+}
+
 /*
  * Char-device .poll: POLLIN when a cmd frame is queued, POLLOUT when the cmd TX
  * queue has drained. The daemon's RX thread poll()s for POLLIN before each read;
@@ -1797,8 +1887,12 @@ static __poll_t artosyn_poll(struct file *filp, struct poll_table_struct *pt)
 	struct artosyn_sdio_eth *eth;
 	__poll_t mask = 0;
 
-	if (!dev || !dev->ndev || dev->removed)
+	if (!artosyn_op_enter(dev))
 		return EPOLLERR;
+	if (!dev->ndev) {
+		artosyn_op_exit(dev);
+		return EPOLLERR;
+	}
 	eth = netdev_priv(dev->ndev);
 
 	poll_wait(filp, &dev->cmd_wq, pt);
@@ -1819,6 +1913,7 @@ static __poll_t artosyn_poll(struct file *filp, struct poll_table_struct *pt)
 		artosyn_sdio_irqhandler(dev->func);
 		sdio_release_host(dev->func);
 	}
+	artosyn_op_exit(dev);
 	return mask;
 }
 
@@ -1914,6 +2009,9 @@ static int sdio_artosyn_probe(struct sdio_func *func,
 	mutex_init(&dev->io_lock);
 	init_waitqueue_head(&dev->cmd_wq);
 	atomic_set(&dev->inflight, 0);
+	refcount_set(&dev->refs, 1);	/* probe ref; dropped in remove */
+	atomic_set(&dev->active_ops, 0);
+	init_completion(&dev->ops_drained);
 	sdio_set_drvdata(func, dev);
 
 	ret = artosyn_alloc_buffers(dev);
@@ -1954,10 +2052,6 @@ static int sdio_artosyn_probe(struct sdio_func *func,
 		goto err_buf;
 	}
 	dev->misc_registered = true;
-
-	mutex_lock(&artosyn_mutex);
-	dev->removed = false;
-	mutex_unlock(&artosyn_mutex);
 
 	/* Device-ID fork: 0x8030 uploads firmware then RETURNS. The finalize frame boots the
 	 * SPL/firmware; the chip resets and re-enumerates as 0x8031, which re-probes here and
@@ -2016,11 +2110,13 @@ static int sdio_artosyn_probe(struct sdio_func *func,
 	return 0;
 
 err_netdev:
+	artosyn_quiesce(dev);	/* an fd may already sit in read/write */
 	unregister_netdev(dev->ndev);
 	destroy_workqueue(((struct artosyn_sdio_eth *)netdev_priv(dev->ndev))->workwq);
 	free_netdev(dev->ndev);
 	dev->ndev = NULL;
 err_misc:
+	artosyn_quiesce(dev);
 	misc_deregister(&dev->misc);
 	dev->misc_registered = false;
 err_buf:
@@ -2030,7 +2126,7 @@ err_buf:
 	artosyn_free_buffers(dev);
 err_free:
 	sdio_set_drvdata(func, NULL);
-	kfree(dev);
+	artosyn_dev_put(dev);
 	return ret;
 }
 
@@ -2042,9 +2138,12 @@ static void sdio_artosyn_remove(struct sdio_func *func)
 	if (!dev)
 		return;
 
-	mutex_lock(&artosyn_mutex);
-	dev->removed = true;
-	mutex_unlock(&artosyn_mutex);
+	/*
+	 * Quiesce the char-device fds before anything is torn down: after
+	 * this no fd op is inside the driver and new ones bail, so func and
+	 * ndev may go away. The fds themselves keep dev alive via refs.
+	 */
+	artosyn_quiesce(dev);
 
 	sdio_claim_host(func);
 	sdio_release_irq(func);
@@ -2069,7 +2168,7 @@ static void sdio_artosyn_remove(struct sdio_func *func)
 
 	artosyn_free_buffers(dev);
 	sdio_set_drvdata(func, NULL);
-	kfree(dev);
+	artosyn_dev_put(dev);
 
 	pr_info("removed\n");
 }

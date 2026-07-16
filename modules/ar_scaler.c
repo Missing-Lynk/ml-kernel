@@ -177,6 +177,7 @@ struct scaler_dev {
 	struct mutex		lock;
 	struct proc_dir_entry	*proc_dir;
 	bool			suspended;
+	bool			dead;		/* set under lock in remove; ops bail */
 	struct device		*dev;
 
 	/* last-submitted state, exported via /proc/arscaler/state (oracle). */
@@ -187,6 +188,8 @@ struct scaler_dev {
 };
 
 static struct scaler_dev g_scaler;
+static bool g_scaler_bound;
+static bool g_scaler_initted;
 
 static int scaler_debug_level;
 module_param(scaler_debug_level, int, 0644);
@@ -468,6 +471,31 @@ static void ar_scaler_dump_reg(struct scaler_dev *sc)
  * Lock order / sequence per the vendor driver: lock; suspended->-EAGAIN; validate; pack;
  * trigger (clear CTRL bit0, write TRIGGER=1); wait_for_completion_timeout.
  */
+static void ar_scaler_hw_init(struct scaler_dev *sc);
+
+/*
+ * Timeout recovery, called under sc->lock: the engine is still running and its
+ * late DONE IRQ would satisfy the next op's completion wait. Mask the IRQ,
+ * clock-gate reset the core (stops the transfer), clear any latched status and
+ * drop any complete() that already slipped in.
+ */
+static void ar_scaler_timeout_reset(struct scaler_dev *sc)
+{
+	writel(0, sc->regbase + SC_REG_IRQEN);
+	synchronize_irq(sc->irq);
+	ar_scaler_hw_init(sc);
+	/* hw_init re-enables the IRQ; keep it masked until any status latched
+	 * across the clock-gate reset is cleared and the completion is fresh,
+	 * or a late DONE could complete() after the reinit below.
+	 */
+	writel(0, sc->regbase + SC_REG_IRQEN);
+	writel(readl(sc->regbase + SC_REG_STATUS),
+	       sc->regbase + SC_REG_STATUS);
+	synchronize_irq(sc->irq);
+	reinit_completion(&sc->completion);
+	writel(0x80000000u, sc->regbase + SC_REG_IRQEN);
+}
+
 static long ar_scaler_run(struct scaler_dev *sc, const struct ar_scaler_op *op,
 			  u32 count)
 {
@@ -479,9 +507,10 @@ static long ar_scaler_run(struct scaler_dev *sc, const struct ar_scaler_op *op,
 	if (ret)
 		return -EINTR;
 
-	if (sc->suspended) {
+	if (sc->suspended || sc->dead) {
+		ret = sc->dead ? -ENODEV : -EAGAIN;
 		mutex_unlock(&sc->lock);
-		return -EAGAIN;
+		return ret;
 	}
 
 	ret = ar_scaler_validate(op);
@@ -502,6 +531,7 @@ static long ar_scaler_run(struct scaler_dev *sc, const struct ar_scaler_op *op,
 	left = wait_for_completion_timeout(&sc->completion, SCALER_WAIT_JIFFIES);
 	if (!left) {
 		ar_scaler_dump_reg(sc);
+		ar_scaler_timeout_reset(sc);
 		mutex_unlock(&sc->lock);
 		return -ETIMEDOUT;
 	}
@@ -552,9 +582,9 @@ static long ar_scaler_start_batch(struct scaler_dev *sc, void __user *arg)
 		ret = -EINTR;
 		goto out;
 	}
-	if (sc->suspended) {
+	if (sc->suspended || sc->dead) {
+		ret = sc->dead ? -ENODEV : -EAGAIN;
 		mutex_unlock(&sc->lock);
-		ret = -EAGAIN;
 		goto out;
 	}
 
@@ -601,6 +631,7 @@ static long ar_scaler_start_batch(struct scaler_dev *sc, void __user *arg)
 						   SCALER_WAIT_JIFFIES);
 		if (!left) {
 			ar_scaler_dump_reg(sc);
+			ar_scaler_timeout_reset(sc);
 			ret = -ETIMEDOUT;
 		} else {
 			ret = 0;
@@ -663,6 +694,10 @@ static long ar_scaler_set_frequency(struct scaler_dev *sc, void __user *arg)
 		return -EFAULT;
 
 	mutex_lock(&sc->lock);
+	if (sc->dead) {
+		mutex_unlock(&sc->lock);
+		return -ENODEV;
+	}
 	sc->frequency = (u32)freq;
 	/* ar_scaler_set_frequency @0xcb8: only programs the divider when != 0. */
 	if (freq)
@@ -939,9 +974,22 @@ static int ar_scaler_probe(struct platform_device *pdev)
 	u32 control_phys = CTRL_DEFAULT_PHYS;
 	int ret;
 
+	/* g_scaler is a singleton; a second bind would re-init a live mutex
+	 * and clobber the first instance's mappings/MMZ.
+	 */
+	if (g_scaler_bound)
+		return -EBUSY;
+
 	sc->dev = dev;
-	mutex_init(&sc->lock);
-	init_completion(&sc->completion);
+	sc->dead = false;
+	/* One-time init: a rebind must not re-init a mutex a stale fd's ioctl
+	 * may still be holding across its dead-check.
+	 */
+	if (!g_scaler_initted) {
+		mutex_init(&sc->lock);
+		init_completion(&sc->completion);
+		g_scaler_initted = true;
+	}
 
 	/* (1) scaler core registers from DT reg[0], min size 0x1000.
 	 *
@@ -1000,9 +1048,14 @@ static int ar_scaler_probe(struct platform_device *pdev)
 	/* (6) clock bring-up + LUT upload. */
 	ar_scaler_hw_init(sc);
 
-	/* (7) misc device /dev/arscaler. */
+	/* (7) misc device /dev/arscaler. Root-only: the vendor ABI passes raw
+	 * physical source/destination addresses into the DMA engine with no
+	 * range check, so whoever can open this node reads and writes
+	 * arbitrary physical memory.
+	 */
 	sc->misc.minor = MISC_DYNAMIC_MINOR;
 	sc->misc.name  = "arscaler";
+	sc->misc.mode  = 0600;
 	sc->misc.fops  = &ar_scaler_fops;
 	ret = misc_register(&sc->misc);
 	if (ret) {
@@ -1018,6 +1071,7 @@ static int ar_scaler_probe(struct platform_device *pdev)
 	}
 
 	platform_set_drvdata(pdev, sc);
+	g_scaler_bound = true;
 	dev_info(dev, "ready: regs %pa, control 0x%08x, irq %d, freq %u\n",
 		 &res->start, control_phys, sc->irq, sc->frequency);
 	return 0;
@@ -1037,8 +1091,18 @@ static void ar_scaler_remove(struct platform_device *pdev)
 		sc->proc_dir = NULL;
 	}
 	misc_deregister(&sc->misc);
+
+	/*
+	 * Teardown gate: taking the lock waits out an op in flight (ops hold it
+	 * across the completion wait); dead makes every later ioctl bail before
+	 * touching the registers devm unmaps or the MMZ freed below.
+	 */
+	mutex_lock(&sc->lock);
+	sc->dead = true;
 	ar_scaler_poweroff(sc);
 	ar_scaler_free_mmz(sc);
+	mutex_unlock(&sc->lock);
+	g_scaler_bound = false;
 }
 
 static int ar_scaler_suspend(struct device *dev)

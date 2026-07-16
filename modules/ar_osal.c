@@ -33,6 +33,8 @@
 #include <linux/list.h>
 #include <linux/mutex.h>
 #include <linux/string.h>
+#include <linux/log2.h>
+#include <linux/overflow.h>
 
 #include "ar_mmz.h"
 #include "ar_uapi.h"
@@ -171,21 +173,34 @@ static struct mmb *zone_alloc_locked(struct mmz_zone *z, const char *name,
 				     unsigned long size, unsigned long align)
 {
 	struct mmb *b, *nb;
-	phys_addr_t cur;
+	phys_addr_t cur, end;
 
 	if (!align)
 		align = PAGE_SIZE;
 	align = max_t(unsigned long, align, PAGE_SIZE);
+	/* size and align arrive from the ALLOC ioctl unchecked: bound them
+	 * before the page-align below can wrap to 0 and before a non-pow2 or
+	 * oversized align breaks the ALIGN() math in the gap walk.
+	 */
+	if (!size || size > z->size)
+		return NULL;
+	if (!is_power_of_2(align) || align > z->size)
+		return NULL;
 	size = ALIGN(size, PAGE_SIZE);
+	if (!size || size > z->size)
+		return NULL;
 	cur = ALIGN(z->base, align);
 
 	/* mmb_list is kept sorted by phys; walk gaps. */
 	list_for_each_entry(b, &z->mmb_list, node) {
-		if (cur + size <= b->phys)
+		if (check_add_overflow(cur, (phys_addr_t)size, &end))
+			return NULL;
+		if (end <= b->phys)
 			break;			/* fits before this block */
 		cur = ALIGN(b->phys + b->size, align);
 	}
-	if (cur + size > z->base + z->size)
+	if (check_add_overflow(cur, (phys_addr_t)size, &end) ||
+	    end > z->base + z->size)
 		return NULL;			/* out of room */
 
 	nb = kzalloc(sizeof(*nb), GFP_KERNEL);
@@ -653,6 +668,9 @@ static long handle_m(struct file *f, unsigned int nr, void __user *arg,
 		return -EINVAL;
 	if (copy_from_user(&mi, arg, sizeof(mi)))
 		return -EFAULT;
+	/* names arrive unterminated from userspace; strscpy over-reads. */
+	mi.mmz_name[sizeof(mi.mmz_name) - 1] = '\0';
+	mi.mmb_name[sizeof(mi.mmb_name) - 1] = '\0';
 
 	/* TODO(debug, remove after Tier-1 mmz ABI is confirmed): trace the vendor
 	 * libhal_sys requests so a struct-offset or zone mismatch shows up as garbage.

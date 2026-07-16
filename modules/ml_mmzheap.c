@@ -91,6 +91,13 @@ static int mmz_mmap(struct dma_buf *db, struct vm_area_struct *vma)
 	struct mmz_buffer *b = db->priv;
 	size_t size = vma->vm_end - vma->vm_start;
 
+	/* vm_pgoff is user-controlled; an unbounded offset would map physical
+	 * pages of other allocations in the same pool.
+	 */
+	if (vma->vm_pgoff > PHYS_PFN(b->len) ||
+	    PHYS_PFN(size) > PHYS_PFN(b->len) - vma->vm_pgoff)
+		return -EINVAL;
+
 	vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
 
 	return remap_pfn_range(vma, vma->vm_start,
