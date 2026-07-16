@@ -12,6 +12,7 @@
  * (bank 2, per-pixel alpha, topmost). Framebuffers are DMA/CMA (the VO scans physical
  * memory); the video planes take PRIME-imported wave5 decoder dmabufs.
  */
+#include <linux/atomic.h>
 #include <linux/clk.h>
 #include <linux/component.h>
 #include <linux/delay.h>
@@ -21,6 +22,7 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/interrupt.h>
+#include <linux/timer.h>
 
 #include <drm/clients/drm_client_setup.h>
 #include <drm/drm_atomic.h>
@@ -154,6 +156,17 @@ struct ar_vo {
 	struct clk			*pclk;
 	u32				cur_format;	/* DRM fourcc currently programmed on the primary layer */
 	u32				cur_cfg;	/* clean VO_MAIN_CTRL word for cur_format (no LOCK, no START) */
+
+	/* 1 Hz stall watchdog, logging only: a dead vsync IRQ is otherwise unobservable
+	 * once userspace stops committing.
+	 */
+	struct timer_list		dbg_timer;
+	atomic_t			irq_vsync;	/* handled vsync IRQs */
+	atomic_t			irq_total;	/* ISR entries */
+	atomic_t			irq_none;	/* ISR entries returning IRQ_NONE */
+	u32				last_vsync;	/* counter snapshots at the previous tick */
+	u32				last_total;
+	bool				snap_done;	/* one-shot register snapshot logged */
 };
 
 #define to_ar_vo(d) container_of(d, struct ar_vo, drm)
@@ -683,17 +696,67 @@ static irqreturn_t ar_vo_irq(int irq, void *data)
 	struct ar_vo *vo = data;
 	u32 status = readl(vo->regs + VO_INT_STATUS);
 
-	if (!(status & VO_INT_VSYNC))
+	atomic_inc(&vo->irq_total);
+	if (!(status & VO_INT_VSYNC)) {
+		atomic_inc(&vo->irq_none);
 		return IRQ_NONE;
+	}
 
 	/* Write-back clears: confirmed on device 2026-07-03 (bit forced on via /dev/mem with
 	 * this ISR live: steady 62 IRQ/s for 5 s, no level-retrigger storm, no spurious-IRQ
 	 * disable). Safe to depend on for vblank/flip signalling.
 	 */
 	writel(status, vo->regs + VO_INT_STATUS);
+	atomic_inc(&vo->irq_vsync);
 	drm_crtc_handle_vblank(&vo->pipe.crtc);
 
 	return IRQ_HANDLED;
+}
+
+/* 1 Hz stall watchdog tick: silent while vsync IRQs flow (or vblank is off), one warning
+ * per second once they stop. Reports the rates, the IRQ_NONE count, the live status and
+ * enable registers, and the DRM vblank count.
+ */
+static void ar_vo_dbg_tick(struct timer_list *t)
+{
+	struct ar_vo *vo = timer_container_of(vo, t, dbg_timer);
+	u32 vsync = atomic_read(&vo->irq_vsync);
+	u32 total = atomic_read(&vo->irq_total);
+	u32 ie = readl(vo->regs + VO_INT_ENABLE);
+
+	/* One-shot register snapshot on the first tick after the pipe is up (vblank
+	 * enabled): a boot that stays black with all software state healthy can then be
+	 * diffed against a good boot at register level from dmesg alone.
+	 */
+	if (!vo->snap_done && (ie & VO_INT_VSYNC)) {
+		vo->snap_done = true;
+		dev_info(vo->drm.dev,
+			 "VO snap: global=0x%08x main=0x%08x fb=0x%08x/0x%08x/0x%08x stride=%u size=0x%08x\n",
+			 readl(vo->regs + VO_GLOBAL), readl(vo->regs + VO_MAIN_CTRL),
+			 readl(vo->regs + VO_FB_BASE0), readl(vo->regs + VO_PLANE2_BASE),
+			 readl(vo->regs + VO_PLANE3_BASE), readl(vo->regs + VO_FB_STRIDE),
+			 readl(vo->regs + VO_FB_SIZE));
+		dev_info(vo->drm.dev,
+			 "VO snap: dpi=0x%08x/0x%08x panel=0x%08x h=0x%08x/0x%08x v=0x%08x/0x%08x fifo=0x%x/0x%x crg=0x%08x\n",
+			 readl(vo->regs + VO_DPI_CTRL), readl(vo->regs + VO_DPI_FORMAT),
+			 readl(vo->regs + VO_PANEL_CTRL),
+			 readl(vo->regs + VO_H_ACT_FP), readl(vo->regs + VO_H_SA_BP),
+			 readl(vo->regs + VO_V_ACT_FP), readl(vo->regs + VO_V_SA_BP),
+			 readl(vo->regs + VO_FIFO_THRESH0), readl(vo->regs + VO_FIFO_THRESH1),
+			 readl(vo->crg + CRG_DC));
+	}
+
+	if ((ie & VO_INT_VSYNC) && vsync == vo->last_vsync)
+		dev_warn(vo->drm.dev,
+			 "VO stall: vsync/s=%u irq/s=%u none=%u status=0x%08x ie=0x%08x vblcnt=%llu\n",
+			 vsync - vo->last_vsync, total - vo->last_total,
+			 atomic_read(&vo->irq_none),
+			 readl(vo->regs + VO_INT_STATUS), ie,
+			 drm_crtc_vblank_count(&vo->pipe.crtc));
+
+	vo->last_vsync = vsync;
+	vo->last_total = total;
+	mod_timer(&vo->dbg_timer, jiffies + HZ);
 }
 
 DEFINE_DRM_GEM_DMA_FOPS(ar_vo_fops);
@@ -848,6 +911,12 @@ static int ar_vo_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
+	/* Armed only after registration succeeds: an earlier probe failure would leave
+	 * the timer running on devm-freed memory.
+	 */
+	timer_setup(&vo->dbg_timer, ar_vo_dbg_tick, 0);
+	mod_timer(&vo->dbg_timer, jiffies + HZ);
+
 	drm_client_setup(&vo->drm, NULL);
 
 	return 0;
@@ -857,6 +926,7 @@ static void ar_vo_remove(struct platform_device *pdev)
 {
 	struct ar_vo *vo = platform_get_drvdata(pdev);
 
+	timer_delete_sync(&vo->dbg_timer);
 	drm_dev_unregister(&vo->drm);
 	drm_atomic_helper_shutdown(&vo->drm);
 }

@@ -10,3 +10,4 @@
 0010-wave5-vpu-enc.patch
 0011-dma-coherent-page-granular.patch
 0012-dwc2-gadget-buffer-dma.patch
+0013-wave5-enc-plane-data-offset.patch

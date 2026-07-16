@@ -1,0 +1,53 @@
+Why: the encoder programs each source plane's address as the bare
+vb2_dma_contig_plane_dma_addr and ignores the queued plane's data_offset.
+V4L2 defines data_offset as the offset of the plane data within the buffer;
+a DMABUF importer that queues several planes of one shared buffer (e.g.
+GStreamer's dmabuf-import of a single-allocation YUV420M frame) sets it per
+plane, and dropping it makes every plane fetch from offset 0 - the encoder
+reads luma bytes as chroma. Add data_offset to all three plane-count
+branches; MMAP buffers carry data_offset 0, so the stock path is unchanged.
+
+--- a/drivers/media/platform/chips-media/wave5/wave5-vpu-enc.c
++++ b/drivers/media/platform/chips-media/wave5/wave5-vpu-enc.c
+@@ -172,24 +172,35 @@
+ 		else
+ 			return -EAGAIN;
+ 	} else {
++		/* data_offset locates the plane data inside an imported DMABUF (several
++		 * planes can share one buffer at different offsets); MMAP buffers carry 0.
++		 */
++		struct vb2_plane *planes = src_buf->vb2_buf.planes;
++
+ 		if (inst->src_fmt.num_planes == 1) {
+ 			frame_buf.buf_y =
+-				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 0);
++				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 0) +
++				planes[0].data_offset;
+ 			frame_buf.buf_cb = frame_buf.buf_y + luma_size;
+ 			frame_buf.buf_cr = frame_buf.buf_cb + chroma_size;
+ 		} else if (inst->src_fmt.num_planes == 2) {
+ 			frame_buf.buf_y =
+-				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 0);
++				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 0) +
++				planes[0].data_offset;
+ 			frame_buf.buf_cb =
+-				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 1);
++				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 1) +
++				planes[1].data_offset;
+ 			frame_buf.buf_cr = frame_buf.buf_cb + chroma_size;
+ 		} else if (inst->src_fmt.num_planes == 3) {
+ 			frame_buf.buf_y =
+-				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 0);
++				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 0) +
++				planes[0].data_offset;
+ 			frame_buf.buf_cb =
+-				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 1);
++				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 1) +
++				planes[1].data_offset;
+ 			frame_buf.buf_cr =
+-				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 2);
++				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 2) +
++				planes[2].data_offset;
+ 		}
+ 		frame_buf.stride = stride;
+ 		pic_param.src_idx = src_buf->vb2_buf.index;
