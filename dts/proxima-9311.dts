@@ -37,7 +37,7 @@
 		 * CONFIG_MTD_PARTITIONED_MASTER=y): on a slot-B boot the SPL Falcon rewrites this
 		 * field in-place to <active-userapp GPT-ordinal + 6> = 18, and it MANGLES a
 		 * non-numeric value (userapp1 -> "18erapp1"). Keep it numeric. */
-		bootargs = "earlycon keep_bootcon ignore_loglevel console=ttyS0,1152000 mem=148m ubi.mtd=18 root=ubi:rootfs rootfstype=ubifs rw";
+		bootargs = "earlycon keep_bootcon ignore_loglevel console=ttyS0,1152000 ubi.mtd=18 root=ubi:rootfs rootfstype=ubifs rw";
 	};
 
 	cpus {
@@ -133,9 +133,13 @@
 		};
 	};
 
+	/* 256 MiB DRAM, the vendor memory map (0x20000000..0x30000000). The memory
+	 * map is declared exactly once, here: kernel RAM is bounded by the no-map
+	 * mmz carveout below (RAM above 0x29400000 is the carveout, ending exactly
+	 * at the top of DRAM), so no mem= cmdline cap is needed. */
 	memory@20000000 {
 		device_type = "memory";
-		reg = <0 0x20000000 0 0x40000000>;	/* 1 GiB; Linux capped via mem=148m */
+		reg = <0 0x20000000 0 0x10000000>;
 	};
 
 	reserved-memory {
@@ -144,7 +148,8 @@
 		ranges;
 
 		/* MMZ media pool (vendor: ar_osal mmz=anonymous,0,0x29400000,0x06c00000),
-		 * 108 MiB just above the kernel's mem=148m RAM (ends at 0x29400000). When the
+		 * 108 MiB from 0x29400000 to the top of DRAM (0x30000000); kernel-usable
+		 * RAM ends where the carveout starts (no mem= cap needed). When the
 		 * vendor MPP stack runs, the reimplemented MMZ driver manages it directly. The
 		 * wave5 codec claims it as its dma-coherent pool via the `memory-region`
 		 * phandle on video-codec@a080000 + of_reserved_mem_device_init in probe, so
@@ -349,6 +354,64 @@
 			g-rx-fifo-size = <0x300>;
 			g-tx-fifo-size = <0x300 0x200 0x200 0x20 0x10 0x10 0x10 0x10 0x10 0x10>;
 			g-use-dma;
+			status = "okay";
+		};
+
+		/* AR8030 RF host (mmc0), matching the stock mmc0@01b00000 node. Binds
+		 * dw_mci-artosyn (mainline dw_mmc core + Proxima clock glue); the AR8030
+		 * enumerates as SDIO 4152:8030 (ROM loader) / 4152:8031 (firmware running).
+		 * The chip is held in reset at boot (GPIO 23), so this host sits idle until
+		 * ml-rf-bringup releases it and rescans via unbind/bind. broken-cd: SDIO,
+		 * no card-detect line. Nodes were bring-up-proven via the ar_dtbo_sdio
+		 * runtime overlay before moving here. */
+		mmc0: mmc@1b00000 {
+			compatible = "dwmmc0", "artosyn,proxima-dw-mshc";
+			reg = <0 0x1b00000 0 0x1000>;
+			interrupts = <GIC_SPI 48 IRQ_TYPE_LEVEL_HIGH>;	/* hwirq 80 (vendor 0x30) */
+			#address-cells = <1>;
+			#size-cells = <0>;
+			clock-frequency = <100000000>;
+			clock-freq-min-max = <400000 100000000>;
+			card-detect-delay = <200>;
+			num-slots = <1>;
+			bus-width = <4>;
+			full-pwr-cycle;
+			cap-sd-highspeed;
+			cap-mmc-hw-reset;
+			disable-wp;
+			no-mmc;
+			no-sd;
+			cap-sdio-irq;
+			broken-cd;
+			status = "okay";
+		};
+
+		/* microSD controller (mmc1, stock mmc1@01c00000). Same dw_mci IP as mmc0,
+		 * different instance + clock regs (0x1080c0/0x1080c4). SD-HS 50 MHz 4-bit,
+		 * 21-22 MB/s = the bus ceiling (UHS unreachable: vqmmc is fixed 3.3 V).
+		 * Native card-detect (controller CDETECT, proven live during bring-up);
+		 * no broken-cd, so no 1 Hz poll. The SD I/O rail (vqmmc) is GPIO 100, the
+		 * SAME line as panel-power (a shared 3.3 V rail): the panel_power_hog
+		 * below holds it high from artosyn_gpio probe, so it is NOT described as
+		 * a vqmmc-supply regulator here - the hog owns the line, and the mmc core
+		 * must never power-cycle a rail the panel shares. */
+		mmc1: mmc@1c00000 {
+			compatible = "dwmmc1", "artosyn,proxima-dw-mshc";
+			reg = <0 0x1c00000 0 0x1000>;
+			interrupts = <GIC_SPI 49 IRQ_TYPE_LEVEL_HIGH>;	/* hwirq 81 (vendor 0x31) */
+			#address-cells = <1>;
+			#size-cells = <0>;
+			clock-frequency = <100000000>;
+			clock-freq-min-max = <400000 100000000>;
+			card-detect-delay = <200>;
+			num-slots = <1>;
+			bus-width = <4>;
+			full-pwr-cycle;
+			cap-sd-highspeed;
+			cap-mmc-hw-reset;
+			disable-wp;
+			no-mmc;
+			no-sdio;
 			status = "okay";
 		};
 
@@ -600,8 +663,11 @@
 				line-name = "panel-scan-v";
 			};
 
-			/* gpio-100 (bank6 line6) is a panel power rail the stock kernel drives high
-			 * at boot; left floating, the panel is unpowered. Drive it high via a hog. */
+			/* gpio-100 (bank6 line6) is a shared 3.3 V rail the stock kernel drives
+			 * high at boot: panel power AND the SD I/O rail (vqmmc for mmc1). Left
+			 * floating, the panel is unpowered and the SD bus has no I/O voltage.
+			 * Drive it high via a hog; because the hog owns the line, mmc1 does NOT
+			 * carry a vqmmc-supply regulator (see the mmc@1c00000 comment). */
 			panel_power_hog: panel-power-hog {
 				gpio-hog;
 				gpios = <100 GPIO_ACTIVE_HIGH>;

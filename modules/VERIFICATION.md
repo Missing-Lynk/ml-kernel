@@ -73,7 +73,7 @@ difference."
 | `ml-codec-probe` + the `libmpi_venc`/`libmpi_vdec` `.so` (copied from a stock dump) | Tier 1 ar_mpp_drv (codec path) | the `ml-codec-probe` harness builds + link-validates; not yet run on hardware (needs stock firmware with `ar_lowdelay` stopped) |
 | `led_test` / `button_test` / `buzzer_test` / `display_test` / `overlay_test` | Tier 0/1 peripheral drivers outside this doc's 9-module scope, listed for completeness | `../test_tools/`, ready |
 | A harness for ar_vb / ar_sysctl / ar_mpp_proc_ctrl | Tier 1 those modules | **not yet built** - none of these have a component harness yet (self-contained or `.so`-linked); see Tier 1 table |
-| AR8030 SDIO host node + driver + reset | artosyn_sdio enumerate | **DONE** - `ar_dtbo_sdio` + `dw_mci-artosyn` + `artosyn_gpio` (gpio 0xBC fix) enumerate the chip (device 0x8030, ROM mode); see `HW-BRINGUP.md` Phase 6. NOTE: `ar_dtbo_sdio` is not yet in `Kbuild`/has no tracked `.c` source - see the gap note in `KERNEL-REQUIREMENTS.md` §4. |
+| AR8030 SDIO host node + driver + reset | artosyn_sdio enumerate | **DONE** - the DTS mmc nodes + `dw_mci-artosyn` + `artosyn_gpio` (gpio 0xBC fix) enumerate the chip (device 0x8030, ROM mode); see `HW-BRINGUP.md` Phase 6 (bring-up used the since-retired `ar_dtbo_sdio` overlay). |
 | Air unit transmitting | Tier 3 RF | on demand |
 
 Missing per-module harnesses are the gating item now, not a monolithic closed-userspace
@@ -96,7 +96,6 @@ module: `insmod` (serial up) -> no panic -> `/dev` node present -> `/proc` oracl
 | ar_mpp_drv | `/dev/ar_mpp_ctl` | `/proc/interrupts` | requires `ar_mpp_overlay` loaded first (injects the `ahb_dma`/`axi_dma` IRQ-count children it probes for); probe maps hwirq table (dmesg `engine irq[N]: hwirq …`); REGISTER hwirq 100 then a real engine IRQ wakes WAIT_EVENT with `{hwirq,ktime}`; `/proc/interrupts` line increments |
 | ar_mpp_proc_ctrl | `/dev/ar_mpp_proc_ctl` | `/proc/umap/` | CREATE makes a `/proc/umap/<name>`; write to it -> MSG ioctl delivers it; CLOSE removes it |
 | ar_scaler | `/dev/arscaler` | `/proc/arscaler/state` | probe OK (core@0x08840000, ctrl@0x0A100000, irq 107 in `/proc/interrupts`); a single CropResize **completes** (no `-ETIMEDOUT`) = clock seq + IRQ correct |
-| ar_framebuffer | `/dev/fb0` | `/sys/class/graphics/fb0/*` | `virtual_size`=1920,3240; `stride`=4096; `bits_per_pixel`=16; mmap + write lands in MMZ; pan updates yoffset |
 | artosyn_sdio | `/dev/artosyn_sdio`, `sdio0` | `dmesg`, `ip link` | (needs mmc1 host) probe pokes + fw upload succeed; `sdio0` appears; idle clean. Without mmc1: driver registers, binds nothing - must not crash |
 
 Tier-0 failures to watch for specifically:
@@ -127,7 +126,6 @@ path - without pulling in `ar_lowdelay`, `mpp_service.app`, CUSE, or binder.
 | ar_scaler | `scalertest` (self-contained, completion-only today) | `'Z'` 64B descriptor + the clock/IRQ path | `AR_MPI_SCALER_CropResize`-equivalent completes (no `-ETIMEDOUT`); **pixel-correctness** needs either extending `scalertest` with a known test image, or linking `libhal_scaler`/`libmpi_scaler` directly the way `ml-codec-probe` links the codec libs (compare output to stock, §5) |
 | ar_mpp_drv | `ml-codec-probe` (links `libmpi_venc`/`libmpi_vdec` directly, sole MPP owner - `ar_lowdelay` must be stopped first) | the `'M'` IRQ-forward + WAIT/ENABLE re-arm protocol, exercised via real codec CreateChn/SendStream/GetFrame calls | the decoder's IRQ-wait loop advances frames (no stalls/timeouts) |
 | ar_mpp_proc_ctrl | **no harness yet** - TODO, self-contained (CREATE/write/MSG/CLOSE against `/dev/ar_mpp_proc_ctl` directly) | the umap CREATE/MSG/WRITE/CLOSE 144/280/24/8B structs | `/proc/umap/<name>` appears, round-trips a write, and CLOSE removes it |
-| ar_framebuffer | `display_test`/`display_bounce`/`overlay_test`/`display_demo` (self-contained, real DRM/KMS ABI) | the fbdev geometry/mmap/pan ABI, and (for scanout) the DRM plane path | the tools render + composite through the real primary + overlay planes; the still-stubbed piece is the *legacy* kernel->CUSE `ar_overlay` transport specifically, not scanout in general (see `../docs/display-backlight.md`) |
 | artosyn_sdio | the open `artosyn_sdio` driver itself + a real paired air unit (no vendor code at all) | the `'v'` ioctl, netdev, fw uploader, the on-wire `video_packet` format | `sdio0` associates with the air unit; RX frames pass CRC and reach the stack (hardware-validated) |
 
 **Quick conformance smoke (per device, before building a full harness):** `strace` a
@@ -163,7 +161,7 @@ discriminating test short of full end-to-end.
 
 Our own minimal pipeline, composed from the Tier-1-validated components, not the
 vendor's app: **RF link associates -> the codec harness decodes the downlink -> `ar_scaler`
--> `ar_framebuffer`/DRM composites to the panel -> our own RTSP mux.** Run the same
+-> DRM composites to the panel -> our own RTSP mux.** Run the same
 flying/bench session on the open slot and compare against the stock slot's behaviour
 (§7); functional parity = done. Then the usual benchmarks (boot time, `free`,
 `cyclictest`, `iperf3` over the gadget, camera-to-display latency).
@@ -213,8 +211,7 @@ TIER 0 (modules alone)
 [ ] ar_mpp_drv   REGISTER + WAIT_EVENT on real IRQ (needs a real engine completion; not exercised)
 [ ] ar_mpp_proc_ctrl  CREATE/write/MSG/CLOSE via /proc/umap (load-tested only)
 [x] ar_scaler    CropResize completes (no -ETIMEDOUT)
-[ ] ar_framebuffer  fb0 geometry + mmap + pan (geometry/stride proven; mmap+pan not recorded)
-[x] AR8030 SDIO   enumerates on open kernel (device 0x8030 ROM mode; ar_dtbo_sdio + dw_mci-artosyn + artosyn_gpio 0xBC fix)
+[x] AR8030 SDIO   enumerates on open kernel (device 0x8030 ROM mode; DTS mmc nodes + dw_mci-artosyn + artosyn_gpio 0xBC fix)
 [x] AR8030 RF     firmware upload -> device flips 0x8031 + sdio0 up + link associates + full-rate video downlink (DONE, ../STATUS.md "RF chip")
 
 PREREQ for Tier 1+ (per module, not a single monolithic milestone)
@@ -224,7 +221,6 @@ PREREQ for Tier 1+ (per module, not a single monolithic milestone)
 [ ] ar_vb harness                 not built
 [ ] ar_sysctl harness             not built
 [ ] ar_mpp_proc_ctrl harness      not built
-[ ] ar_framebuffer harness        display_test/overlay_test/display_demo, ready
 
 TIER 1 (harness vs open modules)       [ ] per module as above
 TIER 2 (A/B differential vs stock)     [ ] ioctl/state/frame diffs clean

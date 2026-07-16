@@ -83,7 +83,7 @@ To bump the kernel or toolchain, edit `scripts/pin.env` (URL + sha256) only. For
 - Artosyn modules in `modules/` (built by `modules/build.sh`):
   - Peripheral controllers: `artosyn_adc` (the `adc-keys` IIO provider), `artosyn_pwm` (PWM chip for backlight/buzzer), `artosyn_gpio`.
   - SD/SDIO: `artosyn_sdio`, `dw_mci-artosyn`, `artosyn_mmc` (diagnostic).
-  - The MPP reimplementations (`ar_osal`, `ar_vb`, `ar_sys`, `ar_sysctl`, `ar_mpp_drv`, `ar_mpp_proc_ctrl`, `ar_framebuffer`, `ar_scaler`, `ar_mpp_overlay`) are reference only: compile-checked, not staged into the rootfs or loaded at boot (`modules/README.md`).
+  - The MPP reimplementations (`ar_osal`, `ar_vb`, `ar_sys`, `ar_sysctl`, `ar_mpp_drv`, `ar_mpp_proc_ctrl`, `ar_scaler`, `ar_mpp_overlay`) are reference only: compile-checked, not staged into the rootfs or loaded at boot (`modules/README.md`).
 - The DRM/KMS stack (`drm`, `drm_kms_helper`, `dw-mipi-dsi`, and `DRM_ARTOSYN` = `artosyn_vo` CRTC + `artosyn_dsi` glue + `panel-qy45043a0`) is `=m`, in-tree from `overlay/`, built by `make modules` in the kernel tree, then loaded from the rootfs alongside the Artosyn modules.
 
 The built-in `adc-keys` and `pwm-backlight` deferred-probe: `adc-keys` binds once `artosyn_adc` registers its IIO device, `pwm-backlight` once `artosyn_pwm` registers its PWM chip.

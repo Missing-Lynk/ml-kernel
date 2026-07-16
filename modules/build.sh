@@ -143,7 +143,7 @@ cp "$BUILD_OUT"/*.ko "$MODDIR"/ 2>/dev/null || true                     # out-of
 # so they do not rot, but never shipped - nothing on the open stack loads them.
 rm -f "$MODDIR"/ar_osal.ko "$MODDIR"/ar_vb.ko "$MODDIR"/ar_sys.ko "$MODDIR"/ar_sysctl.ko \
       "$MODDIR"/ar_mpp_drv.ko "$MODDIR"/ar_mpp_proc_ctrl.ko "$MODDIR"/ar_mpp_overlay.ko \
-      "$MODDIR"/ar_scaler.ko "$MODDIR"/ar_framebuffer.ko
+      "$MODDIR"/ar_scaler.ko
 # dmatest (=m, CONFIG_DMATEST in dma.config): the bring-up validator for the dw-axi-dmac
 # copy engine (test_tools/dmatest-axi-dma.sh). The engine itself is built-in (=y);
 # this is only the test client. Drop it once the ml-dmablit path is proven on HW.

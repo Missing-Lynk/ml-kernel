@@ -24,9 +24,6 @@ insmod "$MOD/ar_scaler.ko"
 
 insmod "$MOD/ar_sysctl.ko"
 
-# OSD framebuffer (/dev/fb0) - production geometry.
-insmod "$MOD/ar_framebuffer.ko" width=1920 height=1080 format=4
-
 # RF air-link last (needs the baseband firmware blob present where the kernel
 # firmware loader looks, e.g. /lib/firmware or /usrdata/ar813x).
 insmod "$MOD/artosyn_sdio.ko" \
@@ -53,5 +50,5 @@ insmod "$MOD/artosyn_pwm.ko" 2>/dev/null || true
 
 echo "loaded. nodes:"
 ls -l /dev/mmz_userdev /dev/ar_vb /dev/ar_sys /dev/ar_sysctl \
-	/dev/ar_mpp_ctl /dev/ar_mpp_proc_ctl /dev/arscaler /dev/fb0 \
+	/dev/ar_mpp_ctl /dev/ar_mpp_proc_ctl /dev/arscaler \
 	/dev/artosyn_sdio /dev/input/event0 2>/dev/null || true

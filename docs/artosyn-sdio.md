@@ -11,18 +11,17 @@ AR8030 baseband <- SDIO -> mmc@1b00000 (mmc0, DesignWare SDIO host, IRQ GIC_SPI 
   data:  artosyn_sdio -> firmware upload, then /dev/artosyn_sdio + sdio0 (IPv4-over-SDIO netdev)
 ```
 
-Four out-of-tree modules bring it up, in load order [confirmed] (`../modules/HW-BRINGUP.md` Phase 6):
+Three out-of-tree modules bring it up, in load order [confirmed] (`../modules/HW-BRINGUP.md` Phase 6 used a runtime overlay for the DT nodes, since graduated into the DTS):
 
-1. **`ar_dtbo_sdio`** - a runtime DT overlay that adds `gpio@a10a000` + `mmc@1b00000` (this device) + `mmc@1c00000` (the SD card, `sd-card.md`) under `/soc`.
-2. **`artosyn_gpio`** - binds `gpio@a10a000`, drives the AR8030 active-low reset on GPIO23.
-3. **`dw_mci-artosyn`** - the SoC clock glue on the mainline `dw_mci` core; binds both mmc nodes. Shared with the SD card, documented in `sd-card.md`.
-4. **`artosyn_sdio`** - matches the enumerated SDIO function, uploads the baseband firmware, then exposes `/dev/artosyn_sdio` and the `sdio0` netdev.
+1. **`artosyn_gpio`** - binds `gpio@a10a000`, drives the AR8030 active-low reset on GPIO23.
+2. **`dw_mci-artosyn`** - the SoC clock glue on the mainline `dw_mci` core; binds both mmc nodes. Shared with the SD card, documented in `sd-card.md`.
+3. **`artosyn_sdio`** - matches the enumerated SDIO function, uploads the baseband firmware, then exposes `/dev/artosyn_sdio` and the `sdio0` netdev.
 
 The AR8030 enumerates in two identities: **`4152:8030`** = ROM loader (needs firmware), **`4152:8031`** = firmware running. Probe forks on `func->device`: `0x8030` uploads firmware then returns; the chip resets, re-enumerates as `0x8031`, and the second probe builds the netdev.
 
 ## Host node: `mmc@1b00000` (mmc0) [confirmed]
 
-The mmc nodes are **not** in `../dts/proxima-9311.dts` today (it carries only the `gpio@a10a000` node); they are supplied at runtime by the `ar_dtbo_sdio` overlay, with a planned permanent home in the DTS (same fold-in as the SD node, `sd-card.md`). Node properties (`../modules/ar_dtbo_sdio.dts`):
+The mmc nodes live in `../dts/proxima-9311.dts` (`mmc@1b00000` + `mmc@1c00000`, graduated from the retired `ar_dtbo_sdio` runtime overlay). Node properties:
 
 - `compatible = "dwmmc0", "artosyn,proxima-dw-mshc"`, `reg = <0 0x1b00000 0 0x1000>`, `interrupts = <0 48 4>` (GIC_SPI 48 = hwirq 80, vendor `0x30`).
 - `clock-frequency = <100000000>`, `clock-freq-min-max = <400000 100000000>`, `bus-width = <4>`, `num-slots = <1>`, `card-detect-delay = <200>`.
@@ -66,4 +65,4 @@ Two operational facts worth carrying: **do not warm-reload `artosyn_sdio`** (`rm
 
 ## Source
 
-Module sources `../modules/artosyn_sdio.c`, `../modules/dw_mci-artosyn.c`, `../modules/artosyn_gpio.c`, `../modules/ar_dtbo_sdio.c` + `ar_dtbo_sdio.dts`; the validation method `../modules/VERIFICATION.md`; the peripheral map `../PERIPHERALS.md` and board config `../modules/BOARD-CONFIG.md`. RF protocol above the driver: `../../docs/reference/rf-video-downlink.md`.
+Module sources `../modules/artosyn_sdio.c`, `../modules/dw_mci-artosyn.c`, `../modules/artosyn_gpio.c`; the DT nodes `../dts/proxima-9311.dts`; the validation method `../modules/VERIFICATION.md`; the peripheral map `../PERIPHERALS.md` and board config `../modules/BOARD-CONFIG.md`. RF protocol above the driver: `../../docs/reference/rf-video-downlink.md`.

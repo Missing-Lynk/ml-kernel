@@ -2,7 +2,7 @@
 
 Out-of-tree modules for the open 6.18.36 kernel. The RF driver and the board-peripheral glue live here; display (DRM) and the codec (wave5) are in-tree (`../overlay/`, `../patches/`).
 
-The MPP-stack reimplementations (`ar_osal`, `ar_vb`, `ar_sys`, `ar_sysctl`, `ar_mpp_drv`, `ar_mpp_proc_ctrl`, `ar_scaler`, `ar_framebuffer`, `ar_mpp_overlay`) are **reference only**: compile-checked, not shipped in the rootfs, not loaded at boot (full rationale: the pivot note in `VERIFICATION.md`; per-module detail: the "Reference" section below).
+The MPP-stack reimplementations (`ar_osal`, `ar_vb`, `ar_sys`, `ar_sysctl`, `ar_mpp_drv`, `ar_mpp_proc_ctrl`, `ar_scaler`, `ar_mpp_overlay`) are **reference only**: compile-checked, not shipped in the rootfs, not loaded at boot (full rationale: the pivot note in `VERIFICATION.md`; per-module detail: the "Reference" section below).
 
 ## Build (out-of-tree, dev iteration)
 
@@ -23,8 +23,7 @@ Companion docs:
 | module | /dev or interface | notes |
 |---|---|---|
 | artosyn_sdio | `/dev/artosyn_sdio` + `sdio0` netdev | the AR8030 RF link: firmware uploader (`fw_name=`/`cfg_name=` via request_firmware; ROM `0x8030` -> running `0x8031`), bb_ioctl passthrough (`'v'`), RX reassembly with the split-header/desync fix, TX IP-header compression. NEVER warm-reload (hangs the device). `../docs/artosyn-sdio.md` |
-| ar_dtbo_sdio | runtime DT overlay | injects the `mmc@1b00000` (AR8030) + `mmc@1c00000` (microSD) + `gpio@a10a000` nodes the boot DTS lacks; loaded before the coldplug sweep. Permanent home: the DTS. |
-| dw_mci-artosyn | mmc hosts | DesignWare MMC glue for the Proxima clock-tap/phase registers (`clk_sel`/`clk_cfg` params; the hardware-validated pair 135/2 = 0x87/0x02 is what the shipped modprobe config passes - the values originated from misread slot-A dumps, and whether to bake them in as the driver default is unsettled). `../docs/sd-card.md` |
+| dw_mci-artosyn | mmc hosts | DesignWare MMC glue for the Proxima clock-tap/phase registers; binds the DTS `mmc@1b00000`/`mmc@1c00000` nodes param-less (defaults SEL 0x80/phase 0, the stock-faithful register-diff values; `clk_sel`/`clk_cfg`/`bus_hz` are debug knobs). `../docs/sd-card.md` |
 | artosyn_gpio | gpiochips | the 7-bank GPIO controller (bank reg base `0xBC`); provides the AR8030 reset line and the panel reset (display defers without it). `../docs/artosyn-gpio.md` |
 | artosyn_adc | IIO | SAR ADC for the button ladder + battery voltage (`adc-keys` consumes it). `../docs/artosyn-adc.md` |
 | artosyn_protemp | IIO | SoC temperature sensor (shares the ADC MMIO window). `../docs/artosyn-protemp.md` |
@@ -44,7 +43,6 @@ Kept in-tree after the pivot (see `VERIFICATION.md`'s pivot note) - complete, re
 
 | module | /dev node | notes |
 |---|---|---|
-| ar_framebuffer | fb0 | fbdev ARGB4444 1920x1080 + MMZ "fb_mmz" + WC mmap + pan. ar_overlay QBuf protocol fully recovered; structs wired; the kernel->CUSE transport is a documented stub (reference only - DRM/KMS scanout is separate and working, see `../STATUS.md`). |
 | ar_scaler | arscaler | 'Z' ABI + **full register choreography recovered**: real 1024B LUT, exact Q16 ratio/delta math, descriptor-at-regbase+0x1C map, clock sequence, freq-divider table. DT node `artosyn,scaler@8840000`. Byte-pinned from the `.ko`; oracle for per-bit semantics: /proc/arscaler/state. |
 | ar_vb | ar_vb | pool bookkeeping over MMZ. Per-command nrs + field offsets + the `(pool_id<<16)\|index` handle encoding byte-exact from libhal_vb.so/ar_vb.ko. |
 | ar_mpp_proc_ctrl | ar_mpp_proc_ctl | /proc/umap shuttle. 144/280/24-byte structs pinned; the WRITE<->show data path is real. |
@@ -55,4 +53,4 @@ Kept in-tree after the pivot (see `VERIFICATION.md`'s pivot note) - complete, re
 | ar_mpp_drv | ar_mpp_ctl | engine-agnostic GIC-IRQ forwarder. DT node `artosyn,ar_mpp@8870000`. Must load `ar_mpp_overlay` first (above) so the `ahb_dma`/`axi_dma` IRQ-count children it expects exist. |
 | ar_cipher | - | DROPPED, unused at runtime/OTA (parent-project RE decision). |
 
-All 9 vendor-`.ko` reimplementations (plus the `ar_mpp_overlay` bring-up helper) compile clean (zero warnings, warnings-as-errors), link to `.ko`, all undefined symbols resolve against vmlinux + ar_osal, and the inter-module `depends=` (ar_vb/ar_sys/ar_scaler/ar_framebuffer -> ar_osal) are recorded. DTB compiles.
+All 8 vendor-`.ko` reimplementations (plus the `ar_mpp_overlay` bring-up helper) compile clean (zero warnings, warnings-as-errors), link to `.ko`, all undefined symbols resolve against vmlinux + ar_osal, and the inter-module `depends=` (ar_vb/ar_sys/ar_scaler -> ar_osal) are recorded. DTB compiles. (`ar_framebuffer`, the vendor OSD fbdev whose CUSE transport was a permanent stub, is removed: the HUD renders on the DRM overlay plane instead.)

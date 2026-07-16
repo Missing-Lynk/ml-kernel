@@ -7,6 +7,12 @@ the release path free the exact count instead of relying on the caller's
 get_order(size). wave5 and ml_mmzheap (the userspace mmz dma-heap) share the
 single rmem coherent pool on this system.
 
+Also adds a read-only debugfs view per rmem-backed pool
+(/sys/kernel/debug/dma_coherent/<rmem-name>): base, page counts used/free,
+the largest free run, and the live allocation list. The shared pool was a
+black box (only indirect tenant-side tallies existed), which made every
+ENOMEM/fragmentation question a live experiment.
+
 Caveat: this drops the DMA-API natural-alignment guarantee (smallest
 power-of-2 order >= size) for EVERY per-device coherent pool, deliberately:
 order-aligned placement is where the waste comes from, and neither pool
@@ -17,7 +23,16 @@ alignment under this patch.
 
 --- a/kernel/dma/coherent.c
 +++ b/kernel/dma/coherent.c
-@@ -16,6 +16,10 @@
+@@ -9,6 +9,8 @@
+ #include <linux/module.h>
+ #include <linux/dma-direct.h>
+ #include <linux/dma-map-ops.h>
++#include <linux/debugfs.h>
++#include <linux/seq_file.h>
+ 
+ struct dma_coherent_mem {
+ 	void		*virt_base;
+@@ -16,6 +18,12 @@
  	unsigned long	pfn_base;
  	int		size;
  	unsigned long	*bitmap;
@@ -25,10 +40,12 @@ alignment under this patch.
 +	 * are page-granular (not power-of-2 order-granular), so the release path
 +	 * cannot rely on the caller's get_order(size); it reads the count here. */
 +	unsigned int	*nr_map;
++	/* ML (Artosyn): read-only debugfs view of the pool (dma_coherent/<name>). */
++	struct dentry	*debugfs;
  	spinlock_t	spinlock;
  	bool		use_dev_dma_pfn_offset;
  };
-@@ -55,6 +59,9 @@
+@@ -55,6 +63,9 @@
  	dma_mem->bitmap = bitmap_zalloc(pages, GFP_KERNEL);
  	if (!dma_mem->bitmap)
  		goto out_free_dma_mem;
@@ -38,7 +55,7 @@ alignment under this patch.
  
  	dma_mem->virt_base = mem_base;
  	dma_mem->device_base = device_addr;
-@@ -65,6 +72,8 @@
+@@ -65,6 +76,8 @@
  
  	return dma_mem;
  
@@ -47,15 +64,92 @@ alignment under this patch.
  out_free_dma_mem:
  	kfree(dma_mem);
  out_unmap_membase:
-@@ -80,6 +89,7 @@
+@@ -79,11 +92,84 @@
+ 	if (!mem)
  		return;
  
++	debugfs_remove(mem->debugfs);
  	memunmap(mem->virt_base);
 +	kvfree(mem->nr_map);
  	bitmap_free(mem->bitmap);
  	kfree(mem);
  }
-@@ -142,9 +152,15 @@
+ 
++/* ML (Artosyn): debugfs introspection for per-device coherent pools. The pool
++ * shared by the wave5 codec and the ml_mmzheap dma-heap was a black box (only
++ * indirect tenant-side tallies existed); this prints base/size, used/free page
++ * counts, the largest free run, and the live allocation list, all under the
++ * pool spinlock so the walk is a consistent snapshot.
++ */
++static int dma_coherent_debugfs_show(struct seq_file *s, void *unused)
++{
++	struct dma_coherent_mem *mem = s->private;
++	unsigned long flags;
++	unsigned long pos = 0;
++	unsigned long used = 0;
++	unsigned long best_run = 0;
++	unsigned long allocs = 0;
++
++	spin_lock_irqsave(&mem->spinlock, flags);
++	seq_printf(s, "base: %pad\n", &mem->device_base);
++	seq_printf(s, "pages: %d (%d KiB)\n", mem->size,
++		   mem->size << (PAGE_SHIFT - 10));
++	while (pos < mem->size) {
++		if (!test_bit(pos, mem->bitmap)) {
++			unsigned long next = find_next_bit(mem->bitmap,
++							   mem->size, pos);
++
++			if (next - pos > best_run)
++				best_run = next - pos;
++			pos = next;
++			continue;
++		}
++		if (mem->nr_map[pos]) {
++			seq_printf(s, "alloc: page %lu +%u\n", pos,
++				   mem->nr_map[pos]);
++			used += mem->nr_map[pos];
++			allocs++;
++			pos += mem->nr_map[pos];
++		} else {
++			/* set bit without an allocation start: interior of a
++			 * runaway record, should not happen */
++			seq_printf(s, "orphan bit: page %lu\n", pos);
++			used++;
++			pos++;
++		}
++	}
++	seq_printf(s, "allocs: %lu\n", allocs);
++	seq_printf(s, "used: %lu pages (%lu KiB)\n", used,
++		   used << (PAGE_SHIFT - 10));
++	seq_printf(s, "free: %lu pages (%lu KiB)\n", mem->size - used,
++		   (mem->size - used) << (PAGE_SHIFT - 10));
++	seq_printf(s, "largest free run: %lu pages (%lu KiB)\n", best_run,
++		   best_run << (PAGE_SHIFT - 10));
++	spin_unlock_irqrestore(&mem->spinlock, flags);
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(dma_coherent_debugfs);
++
++static void dma_coherent_debugfs_add(struct dma_coherent_mem *mem,
++				     const char *name)
++{
++	static DEFINE_MUTEX(dir_lock);
++	static struct dentry *dir;
++
++	if (mem->debugfs)
++		return;
++	mutex_lock(&dir_lock);
++	if (!dir)
++		dir = debugfs_create_dir("dma_coherent", NULL);
++	mutex_unlock(&dir_lock);
++	mem->debugfs = debugfs_create_file(name, 0400, dir, mem,
++					   &dma_coherent_debugfs_fops);
++}
++
+ static int dma_assign_coherent_memory(struct device *dev,
+ 				      struct dma_coherent_mem *mem)
+ {
+@@ -142,9 +228,15 @@
  				       struct dma_coherent_mem *mem,
  				       ssize_t size, dma_addr_t *dma_handle)
  {
@@ -73,7 +167,7 @@ alignment under this patch.
  	void *ret;
  
  	spin_lock_irqsave(&mem->spinlock, flags);
-@@ -152,9 +168,11 @@
+@@ -152,9 +244,11 @@
  	if (unlikely(size > ((dma_addr_t)mem->size << PAGE_SHIFT)))
  		goto err;
  
@@ -87,7 +181,7 @@ alignment under this patch.
  
  	/*
  	 * Memory was found in the coherent area.
-@@ -203,9 +221,17 @@
+@@ -203,9 +297,17 @@
  		   (mem->virt_base + ((dma_addr_t)mem->size << PAGE_SHIFT))) {
  		int page = (vaddr - mem->virt_base) >> PAGE_SHIFT;
  		unsigned long flags;
@@ -106,3 +200,11 @@ alignment under this patch.
  		spin_unlock_irqrestore(&mem->spinlock, flags);
  		return 1;
  	}
+@@ -344,6 +446,7 @@
+ 		if (IS_ERR(mem))
+ 			return PTR_ERR(mem);
+ 		rmem->priv = mem;
++		dma_coherent_debugfs_add(mem, rmem->name);
+ 	}
+ 
+ 	/* Warn if the device potentially can't use the reserved memory */

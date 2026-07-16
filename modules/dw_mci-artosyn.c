@@ -10,7 +10,10 @@
  *
  * Built on the dw_mci core's exported platform API (dw_mci_pltfm_register etc.), so
  * it loads as an out-of-tree MODULE - no kernel rebuild. Bind it by giving the mmc
- * DT node compatible = "artosyn,proxima-dw-mshc" (the ar_dtbo_sdio runtime overlay provides such nodes).
+ * DT node compatible = "artosyn,proxima-dw-mshc" (dts/proxima-9311.dts provides the
+ * mmc@1b00000 + mmc@1c00000 nodes). The clk_sel/clk_cfg/bus_hz module params are
+ * debug-only knobs; the defaults (SEL 0x80, phase 0, DT bus_hz) are the values every
+ * boot runs and are hardware-proven on both controllers.
  *
  * Clock model (recovered from dw_mci_proxima_init, Proxima-9311):
  *   - AR_CLK_CFG (0x0A10808C): phase/config; init clears its low 5 bits.

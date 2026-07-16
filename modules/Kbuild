@@ -11,12 +11,6 @@ obj-m += ar_mpp_proc_ctrl.o
 # path; load before ar_mpp_drv). Embeds ar_mpp_overlay_dtbo.h from ar_mpp_overlay.dts.
 obj-m += ar_mpp_overlay.o
 
-# Runtime DT overlay adding the mmc@1b00000 (AR8030) + mmc@1c00000 (microSD) +
-# gpio@a10a000 nodes (reflash-free path; load before artosyn_gpio/dw_mci-artosyn).
-# Embeds ar_dtbo_sdio_dtbo.h from ar_dtbo_sdio.dts. Permanent home: the DTS, batched
-# with the pending codec/watchdog DT work.
-obj-m += ar_dtbo_sdio.o
-obj-m += ar_framebuffer.o
 obj-m += ar_scaler.o
 obj-m += artosyn_sdio.o
 

@@ -177,9 +177,9 @@ ssh root@192.168.3.100 /tmp/sd_rwtest restore /tmp/sd_rwtest.bak   # after a han
 ```
 Exit codes: 0 = PASS, 1 = mismatch/I/O error, 2 = a phase HUNG (power-cycle before trusting any
 further SD I/O - the mmc queue is wedged and the hung child is unkillable), 3 = usage/setup.
-Requires the SD stack up first (HW-BRINGUP.md: `ar_dtbo_sdio.ko` + `artosyn_gpio.ko` +
-`dw_mci-artosyn.ko clk_sel=135 clk_cfg=2` - the hardware-validated clock pair 0x87/0x02,
-see `../docs/sd-card.md`; the card enumerates as `mmcblk1`).
+Requires the SD stack up first (`artosyn_gpio.ko` + `dw_mci-artosyn.ko`, param-less;
+the mmc nodes are in the boot DTS - see `../docs/sd-card.md`; the card enumerates as
+`mmcblk1`).
 
 ### `gpio_pulse` / `gpio_hold` / `gpio_reset` / `gpio_verify` - artosyn_gpio
 Four small probes over the standard GPIO chardev v2 ABI (`/dev/gpiochipN`, found by label -

@@ -35,6 +35,8 @@
 #include <linux/string.h>
 #include <linux/log2.h>
 #include <linux/overflow.h>
+#include <linux/of.h>
+#include <linux/of_reserved_mem.h>
 
 #include "ar_mmz.h"
 #include "ar_uapi.h"
@@ -49,7 +51,10 @@ module_param(mmz_allocator, charp, 0444);
 module_param(map_mmz, charp, 0444);
 module_param(anony, int, 0444);
 
-/* Default zones when no mmz= param is supplied - the boot values from RE §8. */
+/* Fallback zone when no mmz= param is supplied AND the DTB has no
+ * /reserved-memory mmz node to derive it from - the boot values from RE §8,
+ * identical to the DTS mmz@29400000 region.
+ */
 #define DEF_ANON_BASE	0x29400000UL
 #define DEF_ANON_SIZE	0x06c00000UL
 #define DEF_SRAM_BASE	0x00100000UL
@@ -90,6 +95,36 @@ static struct mmz_zone *zone_find_by_name(const char *name)
 	return NULL;
 }
 
+/*
+ * The kernel's rmem coherent pool (wave5 + ml_mmzheap share one bitmap) owns
+ * every /reserved-memory region; an ar_osal zone over the same range is a
+ * second, independent first-fit allocator on identical physical memory. That
+ * aliasing is how the vendor-ABI MPP path works (it deliberately overlays the
+ * mmz carveout), but it is only safe while the two allocators never hand out
+ * memory concurrently. Warn on every overlapping zone so the constraint lives
+ * in dmesg, not in convention.
+ */
+static void zone_warn_rmem_overlap(const char *name, phys_addr_t start,
+				   size_t size)
+{
+	struct device_node *parent, *np;
+
+	parent = of_find_node_by_path("/reserved-memory");
+	if (!parent)
+		return;
+	for_each_child_of_node(parent, np) {
+		struct reserved_mem *rmem = of_reserved_mem_lookup(np);
+
+		if (!rmem || !rmem->size)
+			continue;
+		if (start < rmem->base + rmem->size &&
+		    rmem->base < start + size)
+			pr_warn("zone <%s> PHYS(%pa,+%#zx) aliases reserved region %s: the kernel coherent pool (wave5/ml_mmzheap) allocates from the same range; never run both allocators concurrently\n",
+				name, &start, size, rmem->name);
+	}
+	of_node_put(parent);
+}
+
 struct mmz_zone *hil_mmz_create(const char *name, u32 gfp,
 				phys_addr_t start, size_t size)
 {
@@ -97,6 +132,7 @@ struct mmz_zone *hil_mmz_create(const char *name, u32 gfp,
 
 	if (!size)
 		return NULL;
+	zone_warn_rmem_overlap(name ? name : "anonymous", start, size);
 	z = kzalloc(sizeof(*z), GFP_KERNEL);
 	if (!z)
 		return NULL;
@@ -939,6 +975,35 @@ static void parse_mmz_param(const char *s)
 	kfree(buf);
 }
 
+/* Create the default anonymous zone from the DTB's /reserved-memory mmz node
+ * (the same region the wave5/ml_mmzheap coherent pool binds). Returns false if
+ * no such node exists or zone creation failed.
+ */
+static bool __init anon_zone_from_dt(void)
+{
+	struct device_node *parent, *np;
+	bool created = false;
+
+	parent = of_find_node_by_path("/reserved-memory");
+	if (!parent)
+		return false;
+	for_each_child_of_node(parent, np) {
+		struct reserved_mem *rmem;
+
+		if (!of_node_name_prefix(np, "mmz"))
+			continue;
+		rmem = of_reserved_mem_lookup(np);
+		if (!rmem || !rmem->size)
+			continue;
+		created = hil_mmz_create("anonymous", 0, rmem->base,
+					 rmem->size) != NULL;
+		of_node_put(np);
+		break;
+	}
+	of_node_put(parent);
+	return created;
+}
+
 /* Tear down all zones (and any blocks/registry entries). Used by module exit and
  * by the init error path (module_exit is NOT called when init returns failure, so
  * a partial setup must unwind its own zones here).
@@ -990,8 +1055,17 @@ static int __init ar_osal_init(void)
 		 * 0x00100000 is NOT reserved here, so we do not create it - and zones
 		 * no longer memremap at init anyway, so an unbacked zone would only
 		 * fault later when a block from it is mapped. Pass mmz= to override.
+		 *
+		 * The zone geometry comes from the DTB (the mmz reserved-memory
+		 * node), so the memory map is declared exactly once; the baked
+		 * DEF_ANON_* constants are only the fallback for a DTB without
+		 * the node.
 		 */
-		hil_mmz_create("anonymous", 0, DEF_ANON_BASE, DEF_ANON_SIZE);
+		if (!anon_zone_from_dt()) {
+			pr_warn("no /reserved-memory mmz node; using the baked default zone\n");
+			hil_mmz_create("anonymous", 0, DEF_ANON_BASE,
+				       DEF_ANON_SIZE);
+		}
 	}
 
 	pr_info("init: zones ready, creating /proc/media-mem\n");

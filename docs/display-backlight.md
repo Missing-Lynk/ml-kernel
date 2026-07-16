@@ -83,7 +83,7 @@ The in-kernel display pipeline (`artosyn_vo` CRTC, `artosyn_dsi` glue, `panel-qy
 
 There is no u-boot-provided framebuffer: u-boot does not set up the panel, so nothing is on screen until the DRM driver probes during kernel init. There is no pre-kernel boot splash; the earliest the panel can show anything is once `artosyn_vo` has come up.
 
-The separate `../modules/ar_framebuffer.c` is an open reimplementation of the vendor OSD framebuffer (allocates the `fb_mmz` buffer, registers fbdev, forwards flips to the vendor `ar_overlay` CUSE compositor via the stubbed `ar_overlay_xfer()`). Because that transport is a stub, its `/dev/fb0` reaches nothing on the open stack: it has no scanout path. It is reference only - compile-checked, not shipped or loaded at boot (`../modules/README.md`).
+The vendor OSD framebuffer reimplementation (`ar_framebuffer.c`) is removed: its kernel-to-CUSE `ar_overlay` flip transport was a permanent stub, so its `/dev/fb0` never had a scanout path on the open stack, and the HUD renders on the DRM ARGB4444 overlay plane instead. The DRM fbdev emulation provides the only fb device (the boot console).
 
 ### Vsync from hardware, not a poll [confirmed]
 

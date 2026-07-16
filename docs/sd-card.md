@@ -1,6 +1,6 @@
 # microSD card (mmc1 over the DesignWare MMC host)
 
-How the microSD slot is brought up on the open kernel. The card runs on the **unmodified mainline `dw_mmc` core** plus a small Artosyn platform-glue module (`../modules/dw_mci-artosyn.c`) that programs the SoC-specific clock tap/phase and CGU gates. The same glue and the same `ar_dtbo_sdio` overlay also serve the AR8030 RF link on `mmc@1b00000`; that device is `artosyn-sdio.md`, and only the shared clock/glue facts are repeated here. Each fact is tagged **[confirmed]** (on hardware or in the disassembly), **[inferred]**, **[open]**.
+How the microSD slot is brought up on the open kernel. The card runs on the **unmodified mainline `dw_mmc` core** plus a small Artosyn platform-glue module (`../modules/dw_mci-artosyn.c`) that programs the SoC-specific clock tap/phase and CGU gates. The same glue also serves the AR8030 RF link on `mmc@1b00000`; that device is `artosyn-sdio.md`, and only the shared clock/glue facts are repeated here. Each fact is tagged **[confirmed]** (on hardware or in the disassembly), **[inferred]**, **[open]**.
 
 ## Architecture
 
@@ -13,14 +13,14 @@ microSD card <- SD 4-bit -> mmc@1c00000 (mmc1, DesignWare MMC host, IRQ GIC_SPI 
 
 The card runs on the stock `dw_mmc` core; the glue is a `dw_mci_drv_data` hook in the exact shape of mainline's own `dw_mmc-<soc>.c` glues. Throughput sits at the SD-High-Speed bus ceiling and matches stock; reads, writes, and in-kernel exFAT under a DVR-style workload are all validated.
 
-Bring-up scaffolding not yet graduated: the runtime DT overlay, the hand-driven vqmmc rail, and polled card-detect (each has its proposed disposition in its section below).
+The bring-up scaffolding is graduated: the mmc nodes live in `../dts/proxima-9311.dts` (the `ar_dtbo_sdio` runtime overlay is retired), the vqmmc rail is held by the DTS `panel_power_hog` (a shared rail, see Power below), and card-detect is native CDETECT (no `broken-cd` poll).
 
 ## Host node: `mmc@1c00000` (mmc1) [confirmed]
 
-Like the RF host, the SD node lives only in the `ar_dtbo_sdio` runtime overlay today; `../dts/proxima-9311.dts` has no mmc nodes (folding them in and retiring the overlay for this path is the planned fix). Node properties (`../modules/ar_dtbo_sdio.dts`):
+The SD node lives in `../dts/proxima-9311.dts` (`mmc@1c00000`; graduated from the retired `ar_dtbo_sdio` runtime overlay). Node properties:
 
 - `compatible = "dwmmc1", "artosyn,proxima-dw-mshc"`, `reg = <0 0x1c00000 0 0x1000>`, `interrupts = <0 49 4>` (GIC_SPI 49 = hwirq 81, vendor `0x31`).
-- Same DesignWare IP as the RF host `mmc@1b00000`, different instance and clock registers. Flags differ from the RF node: `no-mmc` + `no-sdio` (so the core enumerates an inserted SD card, not an SDIO function), no `cap-sdio-irq`. It keeps `broken-cd` (see card-detect below).
+- Same DesignWare IP as the RF host `mmc@1b00000`, different instance and clock registers. Flags differ from the RF node: `no-mmc` + `no-sdio` (so the core enumerates an inserted SD card, not an SDIO function), no `cap-sdio-irq`, no `broken-cd` (native card-detect, see below).
 
 On the open 6.18 kernel the card enumerates as `mmcblk1` (or `mmcblk0`/`mmcblk1` depending on whether the RF side is up). Note that stock (vendor 4.9) and some product docs call it `mmcblk2p1`; that is the vendor enumeration order, not the open kernel's.
 
@@ -36,15 +36,15 @@ The clock model [confirmed]:
 - **Never write `0x0A108000` or `0x0A108038`.** Forcing `0x0A108000 = 0x81` (a value from unreadable slot-A `/dev/mem` reads) corrupts the clock so the card gets commands but never frames a valid CMD8 response; leaving `0x0A108000` at 0 (its U-Boot value) is what makes the card enumerate.
 - The CGU source-clock gates `0x0A104024` (bit 22) / `0x0A104028` (bit 23) are mapped by the glue; whether it actively sets them or relies on U-Boot is **[open]** (see `artosyn-sdio.md`, same registers).
 
-Module params (all `0444`, debug knobs): `clk_sel` (-1 = use the bus_hz mapping), `clk_cfg` (-1, phase masked `& 0x1f`), `bus_hz` (0 = keep the DT value, else override the divider for sweeps). Which values to commit as the built-in default is unsettled: the `0x80`/phase 0 mapping above, or the `0x87`/`0x02` pair the validated bring-up passed explicitly (those values originated from misread slot-A dumps but are the hardware-validated working pair the shipped modprobe config passes today).
+Module params (all `0444`, debug knobs): `clk_sel` (-1 = use the bus_hz mapping), `clk_cfg` (-1, phase masked `& 0x1f`), `bus_hz` (0 = keep the DT value, else override the divider for sweeps). The committed defaults are the mapping above (`0x80`/phase 0, the stock-faithful values from the slot-A register diff); the module loads param-less. The `0x87`/`0x02` pair the early bring-up passed explicitly originated from misread slot-A dumps and is retired from the shipped modprobe config (a restore line is documented in `rootfs/skeleton/etc/modprobe.d/ml.conf` should a host fail to enumerate).
 
 ## Power: vqmmc = GPIO 100 [confirmed]
 
-The SD I/O rail (vqmmc) is GPIO 100 (port6.6, a fixed 3.3 V supply), currently driven high by hand before the card scan. It is described in no board doc or load script, so bringing up SD depends on session lore. The plan's proposed fix is to describe it as a DT `regulator-fixed` (GPIO 100, `enable-active-high`, `3300000` uV) referenced as `vqmmc-supply`, so the mmc core sequences the rail itself on scan/suspend/power-cycle and the manual GPIO step disappears. Card power (vmmc) may have its own switch GPIO or be hardwired - **[open]**, to be checked when the regulator node is added.
+The SD I/O rail (vqmmc) is GPIO 100 (port6.6, a fixed 3.3 V supply) - the SAME line as the panel power rail: one shared 3.3 V rail switch. The DTS `panel_power_hog` drives it high at `artosyn_gpio` probe, which is what powers the SD bus on every boot. It is deliberately NOT described as a `vqmmc-supply` regulator: the hog owns the line (gpiolib refuses a second claim), and the mmc core must never power-cycle a rail the panel shares. Card power (vmmc) may have its own switch GPIO or be hardwired - **[open]**.
 
 ## Card detect [confirmed]
 
-The overlay sets `broken-cd`, so the core polls at 1 Hz. The vendor DT does not; stock uses the DesignWare controller's native CDETECT, which our bring-up already proved works (CDETECT reads 0 with a card present). Dropping `broken-cd` for native detect is a proposed change (it costs a permanent 1 Hz wakeup and up to a second of insert latency); if the line turns out unreliable in the enclosure, `broken-cd` returns with a comment stating why.
+The DTS node has no `broken-cd`: the core uses the DesignWare controller's native CDETECT, like stock (bring-up proved the line: CDETECT reads 0 with a card present). The retired overlay node polled at 1 Hz via `broken-cd`; if the native line turns out unreliable in the enclosure, `broken-cd` returns with a comment stating why.
 
 ## Performance [confirmed]
 
@@ -58,4 +58,4 @@ exFAT is built in (`../configs/exfat.config`, `CONFIG_EXFAT_FS=y`); a DVR-style 
 
 ## Source
 
-Module sources `../modules/dw_mci-artosyn.c` (glue), `../modules/ar_dtbo_sdio.dts` (the `mmc@1c00000` node), `../modules/artosyn_mmc.c` (diagnostic); the validation method `../modules/VERIFICATION.md`; the peripheral map `../PERIPHERALS.md` and board config `../modules/BOARD-CONFIG.md`.
+Module sources `../modules/dw_mci-artosyn.c` (glue), `../dts/proxima-9311.dts` (the `mmc@1c00000` node), `../modules/artosyn_mmc.c` (diagnostic); the validation method `../modules/VERIFICATION.md`; the peripheral map `../PERIPHERALS.md` and board config `../modules/BOARD-CONFIG.md`.

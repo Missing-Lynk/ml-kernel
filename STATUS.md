@@ -30,7 +30,7 @@ Tags used below: **DONE** (working, hardware-validated) - **PARTIAL** (works, wi
 |---|---|---|
 | artosyn_sdio | DONE | see "RF chip" above - core link and full-rate video DONE. Instrumented (`frame_log`, `tx_window`; the `tx_window` gate defaults off). RX resync fix landed (split-header carry + header plausibility check + multi-run back-parse); mechanism in `docs/artosyn-sdio.md` |
 
-The MPP-stack vendor-`.ko` reimplementations (`ar_osal`, `ar_sys`, `ar_sysctl`, `ar_mpp_drv`, `ar_scaler`, `ar_vb`, `ar_mpp_proc_ctrl`, `ar_framebuffer`, `ar_mpp_overlay`) are **reference only** since the 2026-07-12 pivot: in-tree and compile-checked, but not shipped in the rootfs or loaded at boot. Rationale: the pivot note in `modules/VERIFICATION.md`; per-module detail: `modules/README.md`.
+The MPP-stack vendor-`.ko` reimplementations (`ar_osal`, `ar_sys`, `ar_sysctl`, `ar_mpp_drv`, `ar_scaler`, `ar_vb`, `ar_mpp_proc_ctrl`, `ar_mpp_overlay`) are **reference only** since the 2026-07-12 pivot: in-tree and compile-checked, but not shipped in the rootfs or loaded at boot. Rationale: the pivot note in `modules/VERIFICATION.md`; per-module detail: `modules/README.md`.
 
 ## Kernel-level
 
