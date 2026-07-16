@@ -36,7 +36,14 @@
 #include "ml_dmablit.h"
 
 #define ML_DMABLIT_WANT_CHANS	2	/* the sweet spot; the engine has 3 */
-#define ML_DMABLIT_TIMEOUT_MS	1000	/* a 6 MB frame copies in << 1 ms; 1 s is a fault ceiling */
+
+/* A 6 MB frame copies in << 1 ms; 1 s is a fault ceiling. Runtime-settable so the
+ * timeout/terminate path can be exercised deliberately (a value below the real copy
+ * time forces it on every round; the caller falls back to CPU blits).
+ */
+static unsigned int timeout_ms = 1000;
+module_param(timeout_ms, uint, 0644);
+MODULE_PARM_DESC(timeout_ms, "per-round completion timeout in ms (default 1000)");
 
 static struct dma_chan *g_chans[ML_DMABLIT_WANT_CHANS];
 static int g_nchan;
@@ -193,7 +200,7 @@ static int wait_chans(struct completion *done, const bool *used)
 		if (!used[ch])
 			continue;
 		if (!wait_for_completion_timeout(&done[ch],
-				msecs_to_jiffies(ML_DMABLIT_TIMEOUT_MS)))
+				msecs_to_jiffies(timeout_ms)))
 			return -ETIMEDOUT;
 	}
 	return 0;
@@ -202,6 +209,12 @@ static int wait_chans(struct completion *done, const bool *used)
 static long ml_dmablit_submit(struct ml_client *cl, struct ml_dmablit_req *req)
 {
 	struct ml_bufmap *dst;
+	/* Function scope, not per-round: on the terminate path a late descriptor
+	 * callback can still complete() these until dmaengine_terminate_sync()
+	 * returns, so they must stay live past the round block.
+	 */
+	struct completion done[ML_DMABLIT_WANT_CHANS];
+	bool used[ML_DMABLIT_WANT_CHANS];
 	int i, ch;
 	long ret;
 
@@ -249,9 +262,10 @@ static long ml_dmablit_submit(struct ml_client *cl, struct ml_dmablit_req *req)
 	 * A one-line driver fix would allow deeper queuing but we do not need it.
 	 */
 	for (i = 0; i < (int)req->n; i += g_nchan) {
-		struct completion done[ML_DMABLIT_WANT_CHANS];
-		bool used[ML_DMABLIT_WANT_CHANS] = { false };
 		int k;
+
+		for (k = 0; k < g_nchan; k++)
+			used[k] = false;
 
 		for (k = 0; k < g_nchan && (i + k) < (int)req->n; k++) {
 			struct ml_dmablit_copy *c = &req->copy[i + k];
