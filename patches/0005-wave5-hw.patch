@@ -1,11 +1,16 @@
-Why: two WAVE521C defects in upstream wave5-hw.c. (1) The sec-AXI size
+Why: three WAVE521C defects in upstream wave5-hw.c. (1) The sec-AXI size
 accounting is a mainline TODO: only WAVE515 computes the line-buffer sizes, so
 on WAVE521C the driver enables sec-AXI into the 64 KiB SRAM with zero sizes
 (USE_SEC_AXI=0x8201), corrupting the write-back; forced to 0 (what the vendor
 writes). (2) With two decode instances sharing the one VCPU, the DEC_PIC done
 interrupt can precede the result becoming readable and the query returns
 WAVE5_SYSERR_RESULT_NOT_READY; upstream fails the picture, this retries the
-query.
+query. (3) wave5_vpu_enc_register_framebuffer's error path frees its local
+vpu_buf copies while the same dma handles were already published into
+p_enc_info->vb_*; wave5_vpu_enc_close() then frees them a second time
+(observed live as 4x WARN in __dma_release_from_coherent when the vb_task
+allocation ENOMEMs). Free the p_enc_info copies instead so the free memsets
+the field close() looks at.
 
 --- a/drivers/media/platform/chips-media/wave5/wave5-hw.c
 +++ b/drivers/media/platform/chips-media/wave5/wave5-hw.c
@@ -115,7 +120,42 @@ query.
  
  	reg_val = vpu_read_reg(inst->dev, W5_RET_QUEUE_STATUS);
  
-@@ -2140,6 +2189,16 @@
+@@ -2117,16 +2166,29 @@
+ 
+ 	return ret;
+ 
++	/*
++	 * ML (Artosyn): free the p_enc_info copies, not the local vpu_bufs. The
++	 * buffers already published above (vb_mv at minimum, more the further the
++	 * function got) live on in p_enc_info with the same daddr; freeing the
++	 * local copy leaves those stale, and wave5_vpu_enc_close() then frees the
++	 * same dma handles a second time. Freeing the p_enc_info copy zeroes it
++	 * (wave5_vdi_free_dma_memory memsets its argument), making close a no-op.
++	 * Each label frees only buffers published before its goto site; a
++	 * not-yet-published field is zero and the free is a harmless -EINVAL.
++	 * vb_task may pre-exist this call (vb_task.daddr == 0 then): leave it for
++	 * close.
++	 */
+ free_vb_mem:
+-	wave5_vdi_free_dma_memory(vpu_dev, &vb_task);
++	if (vb_task.daddr)
++		wave5_vdi_free_dma_memory(vpu_dev, &p_enc_info->vb_task);
+ free_vb_task:
+-	wave5_vdi_free_dma_memory(vpu_dev, &vb_sub_sam_buf);
++	wave5_vdi_free_dma_memory(vpu_dev, &p_enc_info->vb_sub_sam_buf);
+ free_vb_sam_buf:
+-	wave5_vdi_free_dma_memory(vpu_dev, &vb_fbc_c_tbl);
++	wave5_vdi_free_dma_memory(vpu_dev, &p_enc_info->vb_fbc_c_tbl);
+ free_vb_fbc_c_tbl:
+-	wave5_vdi_free_dma_memory(vpu_dev, &vb_fbc_y_tbl);
++	wave5_vdi_free_dma_memory(vpu_dev, &p_enc_info->vb_fbc_y_tbl);
+ free_vb_fbc_y_tbl:
+-	wave5_vdi_free_dma_memory(vpu_dev, &vb_mv);
++	wave5_vdi_free_dma_memory(vpu_dev, &p_enc_info->vb_mv);
+ 	return ret;
+ }
+ 
+@@ -2140,6 +2202,16 @@
  		return 0;
  
  	/*
