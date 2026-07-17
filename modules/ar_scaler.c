@@ -25,9 +25,13 @@
  * verbatim from the binary, with the source .text/.rodata address cited at each
  * site. The descriptor field map lives at regbase+0x1C (single) / batch_kvaddr at
  * stride 0x100 (batch); clock magic 0x00ACCE55 at ctrlbase+0x6200; LUT extracted
- * from .rodata `scaler_lut_table` (offset 0, 1024 B). This is COMPILE-VALIDATED
- * only (no hardware available); /proc/arscaler/state remains the on-hardware
- * verification oracle. Remaining unknowns are noted with explicit TODOs below.
+ * from .rodata `scaler_lut_table` (offset 0, 1024 B). HARDWARE-VALIDATED: single
+ * and batch ops bit-exact, downscale within box-filter tolerance, both ABI
+ * families (see test_tools/scaler_dmabuf_test.c and modules/HW-BRINGUP.md).
+ *
+ * The internal LUT and batch-descriptor buffers come from dma_alloc_coherent
+ * (the vendor driver used its MMZ allocator); the module has no ar_osal
+ * dependency.
  */
 #define pr_fmt(fmt) "ar_scaler: " fmt
 
@@ -48,8 +52,8 @@
 #include <linux/seq_file.h>
 #include <linux/bits.h>
 #include <linux/pm.h>
+#include <linux/dma-mapping.h>
 
-#include "ar_mmz.h"
 #include "ar_scaler.h"
 #include "ml_dmabuf_map.h"
 
@@ -123,10 +127,10 @@
 #define CTRL_MAP_SIZE		0x8000
 #define SCALER_REG_MIN_SIZE	0x1000
 
-/* MMZ buffer sizes (matching the vendor driver). */
+/* Internal DMA buffer sizes (matching the vendor driver's MMZ allocations). */
 #define SCALER_LUT_SIZE		0x400		/* ar_scaler_get_lut_size() = 1024 */
-#define SCALER_LUT_MMZ_SIZE	(SCALER_LUT_SIZE + 0x200)	/* 1536 */
-#define SCALER_BATCH_MMZ_SIZE	0xff00		/* 65280 */
+#define SCALER_LUT_BUF_SIZE	(SCALER_LUT_SIZE + 0x200)	/* 1536 */
+#define SCALER_BATCH_BUF_SIZE	0xff00		/* 65280 */
 
 #define SCALER_WAIT_JIFFIES	500		/* completion timeout (jiffies) */
 
@@ -136,11 +140,9 @@ struct scaler_dev {
 	void __iomem		*ctrlbase;	/* clock/power regs (0x8000) */
 	u32			frequency;	/* DT "frequency" / setfreq */
 	void			*lut_kvaddr;
-	phys_addr_t		lut_phys;
+	dma_addr_t		lut_phys;
 	void			*batch_kvaddr;
-	phys_addr_t		batch_phys;
-	struct mmb		*lut_mmb;
-	struct mmb		*batch_mmb;
+	dma_addr_t		batch_phys;
 	struct miscdevice	misc;
 	int			irq;
 	struct completion	completion;
@@ -168,7 +170,7 @@ MODULE_PARM_DESC(scaler_debug_level, "verbosity of scaler register field dumps")
 /*
  * The real 1024-byte interpolation coefficient LUT, extracted verbatim from the
  * vendor ar_scaler.ko local symbol `scaler_lut_table` (.rodata offset 0x0, size
- * 0x400). ar_scaler_hw_init memcpy's these raw bytes into the LUT MMZ buffer and
+ * 0x400). ar_scaler_hw_init memcpy's these raw bytes into the LUT DMA buffer and
  * points the engine at it (regbase+0x70). Copied byte-for-byte (it is a u8 array
  * moved by memcpy, so there is no endianness ambiguity).
  */
@@ -573,7 +575,7 @@ static long ar_scaler_run_batch(struct scaler_dev *sc,
 	 * pack each op into a 256-byte register image at stride 0x100 with
 	 * scaler_build_image (same packer as the single-op live regs).
 	 */
-	memset(sc->batch_kvaddr, 0, SCALER_BATCH_MMZ_SIZE);
+	memset(sc->batch_kvaddr, 0, SCALER_BATCH_BUF_SIZE);
 	for (i = 0; i < count; i++) {
 		scaler_build_image((u32 *)((u8 *)sc->batch_kvaddr +
 					   i * SC_DESC_STRIDE),
@@ -878,7 +880,7 @@ static irqreturn_t ar_scaler_irq_handler(int irq, void *dev_id)
  *   - write the unlock magic 0x00ACCE55 to CTRL_CLK_MAGIC;
  *   - write CTRL_CLK_CFG = (read & ~bit19) | 0x808; msleep(5);
  *   - gate clock ON (CTRL_CLK_GATE |= 0x1900), udelay(100);
- *   - memcpy the 1024-byte LUT into the MMZ buffer;
+ *   - memcpy the 1024-byte LUT into the LUT DMA buffer;
  *   - seed the scaler core registers (defaults + LUT phys + IRQ enable).
  * Getting this wrong means the completion IRQ never fires and every op times
  * out at SCALER_WAIT_JIFFIES.
@@ -1093,60 +1095,43 @@ static int ar_scaler_state_show(struct seq_file *m, void *v)
 
 /* ------------------------------------------------------------------------- */
 
-static int ar_scaler_alloc_mmz(struct scaler_dev *sc)
+/* The LUT and the batch descriptor block are read by the engine over DMA;
+ * dma_alloc_coherent gives a CPU-uncoherent-safe mapping and a 32-bit handle
+ * (no IOMMU, handle == phys), same semantics as the vendor's WC-mapped MMZ
+ * blocks.
+ */
+static int ar_scaler_alloc_bufs(struct scaler_dev *sc)
 {
-	sc->lut_mmb = hil_mmb_alloc("scaler_lut_mmz", SCALER_LUT_MMZ_SIZE,
-				    PAGE_SIZE, 0, "");
-	if (!sc->lut_mmb)
+	sc->lut_kvaddr = dma_alloc_coherent(sc->dev, SCALER_LUT_BUF_SIZE,
+					    &sc->lut_phys, GFP_KERNEL);
+	if (!sc->lut_kvaddr)
 		return -ENOMEM;
 
-	sc->lut_kvaddr = hil_mmb_map2kern(sc->lut_mmb);
-	if (!sc->lut_kvaddr) {
-		hil_mmb_free(sc->lut_mmb);
-		sc->lut_mmb = NULL;
-
-		return -ENOMEM;
-	}
-
-	sc->lut_phys = sc->lut_mmb->phys;
-
-	sc->batch_mmb = hil_mmb_alloc("batch_mmz", SCALER_BATCH_MMZ_SIZE,
-				      PAGE_SIZE, 0, "");
-	if (!sc->batch_mmb) {
-		hil_mmb_unmap(sc->lut_mmb);
-		hil_mmb_free(sc->lut_mmb);
-		sc->lut_mmb = NULL;
-
-		return -ENOMEM;
-	}
-
-	sc->batch_kvaddr = hil_mmb_map2kern(sc->batch_mmb);
+	sc->batch_kvaddr = dma_alloc_coherent(sc->dev, SCALER_BATCH_BUF_SIZE,
+					      &sc->batch_phys, GFP_KERNEL);
 	if (!sc->batch_kvaddr) {
-		hil_mmb_free(sc->batch_mmb);
-		sc->batch_mmb = NULL;
-		hil_mmb_unmap(sc->lut_mmb);
-		hil_mmb_free(sc->lut_mmb);
-		sc->lut_mmb = NULL;
+		dma_free_coherent(sc->dev, SCALER_LUT_BUF_SIZE,
+				  sc->lut_kvaddr, sc->lut_phys);
+		sc->lut_kvaddr = NULL;
 
 		return -ENOMEM;
 	}
 
-	sc->batch_phys = sc->batch_mmb->phys;
 	return 0;
 }
 
-static void ar_scaler_free_mmz(struct scaler_dev *sc)
+static void ar_scaler_free_bufs(struct scaler_dev *sc)
 {
-	if (sc->batch_mmb) {
-		hil_mmb_unmap(sc->batch_mmb);
-		hil_mmb_free(sc->batch_mmb);
-		sc->batch_mmb = NULL;
+	if (sc->batch_kvaddr) {
+		dma_free_coherent(sc->dev, SCALER_BATCH_BUF_SIZE,
+				  sc->batch_kvaddr, sc->batch_phys);
+		sc->batch_kvaddr = NULL;
 	}
 
-	if (sc->lut_mmb) {
-		hil_mmb_unmap(sc->lut_mmb);
-		hil_mmb_free(sc->lut_mmb);
-		sc->lut_mmb = NULL;
+	if (sc->lut_kvaddr) {
+		dma_free_coherent(sc->dev, SCALER_LUT_BUF_SIZE,
+				  sc->lut_kvaddr, sc->lut_phys);
+		sc->lut_kvaddr = NULL;
 	}
 }
 
@@ -1160,7 +1145,7 @@ static int ar_scaler_probe(struct platform_device *pdev)
 	int ret;
 
 	/* g_scaler is a singleton; a second bind would re-init a live mutex
-	 * and clobber the first instance's mappings/MMZ.
+	 * and clobber the first instance's mappings/DMA buffers.
 	 */
 	if (g_scaler_bound)
 		return -EBUSY;
@@ -1224,10 +1209,16 @@ static int ar_scaler_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	/* (5) internal MMZ buffers (LUT + batch DMA block). */
-	ret = ar_scaler_alloc_mmz(sc);
+	/* (5) internal DMA buffers (LUT + batch descriptor block). The engine
+	 * takes 32-bit addresses.
+	 */
+	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
+	if (ret)
+		return ret;
+
+	ret = ar_scaler_alloc_bufs(sc);
 	if (ret) {
-		dev_err(dev, "MMZ alloc failed: %d\n", ret);
+		dev_err(dev, "DMA buffer alloc failed: %d\n", ret);
 		return ret;
 	}
 
@@ -1246,7 +1237,7 @@ static int ar_scaler_probe(struct platform_device *pdev)
 	ret = misc_register(&sc->misc);
 	if (ret) {
 		dev_err(dev, "misc_register failed: %d\n", ret);
-		ar_scaler_free_mmz(sc);
+		ar_scaler_free_bufs(sc);
 		return ret;
 	}
 
@@ -1278,12 +1269,12 @@ static void ar_scaler_remove(struct platform_device *pdev)
 	/*
 	 * Teardown gate: taking the lock waits out an op in flight (ops hold it
 	 * across the completion wait); dead makes every later ioctl bail before
-	 * touching the registers devm unmaps or the MMZ freed below.
+	 * touching the registers devm unmaps or the DMA buffers freed below.
 	 */
 	mutex_lock(&sc->lock);
 	sc->dead = true;
 	ar_scaler_poweroff(sc);
-	ar_scaler_free_mmz(sc);
+	ar_scaler_free_bufs(sc);
 	mutex_unlock(&sc->lock);
 	g_scaler_bound = false;
 }

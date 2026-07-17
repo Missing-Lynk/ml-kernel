@@ -174,8 +174,7 @@ make scaler_dmabuf_test
 ssh root@192.168.3.100 /tmp/scaler_dmabuf_test                # 256x128 quick pass
 ssh root@192.168.3.100 /tmp/scaler_dmabuf_test 1920 1080 300  # DVR shape + timing
 ```
-Requires `ar_osal.ko` (the scaler's internal LUT/batch buffers) + `ar_scaler.ko` and
-`CONFIG_DMABUF_HEAPS_CMA`. Exit codes as `scalertest`.
+Requires `ar_scaler.ko` (loads standalone; its internal LUT/batch buffers are `dma_alloc_coherent`) and `CONFIG_DMABUF_HEAPS_CMA`. Exit codes as `scalertest`.
 
 ### `sd_rwtest` - SD card block reads/writes (dw_mci-artosyn), hang-safe
 Validates SD-card block I/O through the real block layer (`/dev/mmcblk1` -> mmcblk -> mmc core ->

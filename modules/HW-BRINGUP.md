@@ -69,6 +69,8 @@ DT fix (see `../ROADMAP.md`).
 > (`rc-service ml-video stop`), then load + test; worst case is a panel glitch fixed by reboot
 > (nothing is flashed). The scaler is NOT in the open decode->display path (zero-copy DRM), so
 > validating it needs no feed.
+>
+> `ar_scaler` loads **standalone** (no ar_osal): its internal LUT/batch buffers are `dma_alloc_coherent` on its own device. Only `scalertest` (which allocates its src/dst from MMZ via `/dev/mmz_userdev`) still needs ar_osal; `scaler_dmabuf_test` (CMA dma-heap) does not.
 ```
 insmod ar_scaler.ko
 ```

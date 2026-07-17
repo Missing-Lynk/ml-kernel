@@ -25,7 +25,7 @@
  * caches the scaler's mapping per open fd, so the heap's begin/end_cpu_access
  * sync over live attachments is what keeps caches coherent after the first op.
  *
- * Run ON THE DEVICE (aarch64) after `../modules/load.sh` (ar_osal + ar_scaler);
+ * Run ON THE DEVICE (aarch64) with ar_scaler.ko loaded (standalone);
  * needs CONFIG_DMABUF_HEAPS_CMA (configs/display.config).
  *
  *   scaler_dmabuf_test               # default 256x128
