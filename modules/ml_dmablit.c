@@ -34,6 +34,7 @@
 #include <linux/scatterlist.h>
 
 #include "ml_dmablit.h"
+#include "ml_dmabuf_map.h"
 
 #define ML_DMABLIT_WANT_CHANS	2	/* the sweet spot; the engine has 3 */
 
@@ -49,134 +50,16 @@ static struct dma_chan *g_chans[ML_DMABLIT_WANT_CHANS];
 static int g_nchan;
 static DEFINE_MUTEX(g_lock);		/* one compositor thread, but serialize to be safe */
 
-/* One imported dmabuf: attached to the engine device and mapped to a single
- * contiguous DMA segment. base/size describe that segment.
+/* Per-open mapping cache (struct ml_bufcache, ml_dmabuf_map.h). The compositor
+ * recycles a small fixed set of buffers (2 decoders x ~9 capture bufs + 16
+ * composite bufs + staging), so mappings are attached once and reused; CPU
+ * access must be uncached/WC (the reserved dma-heap, DRM dumb-buffer mmap) or
+ * explicitly cleaned via ML_DMABLIT_FLUSH before the engine reads it.
  */
-struct ml_bufmap {
-	struct dma_buf *dmabuf;
-	struct dma_buf_attachment *attach;
-	struct sg_table *sgt;
-	enum dma_data_direction dir;
-	dma_addr_t base;
-	size_t size;
-};
-
-/* Per-open mapping cache. The compositor recycles a small fixed set of buffers
- * (2 decoders x ~9 capture bufs + 16 composite bufs + staging), so attach/map
- * once and reuse: a fresh map_attachment per submit costs sg-table churn plus a
- * full-buffer streaming-DMA cache clean. Keyed by the underlying struct dma_buf
- * (fd numbers can be reused); each entry holds its own dma_buf ref so pointer
- * identity is stable while cached.
- *
- * Coherency contract: reusing a mapping skips the per-submit cache sync, so
- * CPU access to these buffers must be uncached/WC (the reserved dma-heap, DRM
- * dumb-buffer mmap) or explicitly cleaned via ML_DMABLIT_FLUSH before the
- * engine reads it.
- */
-#define ML_DMABLIT_CACHE 40
-
-struct ml_client {
-	struct ml_bufmap ent[ML_DMABLIT_CACHE];	/* dmabuf == NULL -> free slot */
-	u64 stamp[ML_DMABLIT_CACHE];
-	u64 tick;
-};
-
-static int map_db(struct dma_buf *db, enum dma_data_direction dir,
-		  struct ml_bufmap *bm)
-{
-	struct device *dev = g_chans[0]->device->dev;
-	struct dma_buf_attachment *at;
-	struct sg_table *sgt;
-	int ret;
-
-	at = dma_buf_attach(db, dev);
-	if (IS_ERR(at))
-		return PTR_ERR(at);
-	sgt = dma_buf_map_attachment_unlocked(at, dir);
-	if (IS_ERR(sgt)) {
-		ret = PTR_ERR(sgt);
-		goto detach;
-	}
-	/* Contiguity is required: the copy engine takes a base+len, not a list. */
-	if (sgt->nents != 1) {
-		ret = -EOPNOTSUPP;
-		goto unmap;
-	}
-	bm->dmabuf = db;
-	bm->attach = at;
-	bm->sgt = sgt;
-	bm->dir = dir;
-	bm->base = sg_dma_address(sgt->sgl);
-	bm->size = sg_dma_len(sgt->sgl);
-	return 0;
-
-unmap:
-	dma_buf_unmap_attachment_unlocked(at, sgt, dir);
-detach:
-	dma_buf_detach(db, at);
-	return ret;
-}
-
-/* Drops the mapping AND the entry's dma_buf ref. */
-static void unmap_buf(struct ml_bufmap *bm)
-{
-	dma_buf_unmap_attachment_unlocked(bm->attach, bm->sgt, bm->dir);
-	dma_buf_detach(bm->dmabuf, bm->attach);
-	dma_buf_put(bm->dmabuf);
-	bm->dmabuf = NULL;
-}
-
-/* Look up fd in the client's cache (by underlying dma_buf identity), mapping
- * and inserting on miss (LRU eviction when full). A cached entry whose
- * direction can't serve this request is remapped BIDIRECTIONAL.
- */
-static struct ml_bufmap *map_fd_cached(struct ml_client *cl, int fd,
+static struct ml_bufmap *map_fd_cached(struct ml_bufcache *cl, int fd,
 				       enum dma_data_direction dir)
 {
-	struct dma_buf *db;
-	struct ml_bufmap *bm;
-	int i, slot = -1;
-	int ret;
-
-	db = dma_buf_get(fd);
-	if (IS_ERR(db))
-		return ERR_CAST(db);
-
-	for (i = 0; i < ML_DMABLIT_CACHE; i++) {
-		bm = &cl->ent[i];
-		if (bm->dmabuf == db) {
-			if (bm->dir != dir && bm->dir != DMA_BIDIRECTIONAL) {
-				unmap_buf(bm);	/* also dropped its ref; ours transfers below */
-				dir = DMA_BIDIRECTIONAL;
-				slot = i;
-				break;
-			}
-			dma_buf_put(db);	/* the cache entry keeps its own ref */
-			cl->stamp[i] = ++cl->tick;
-			return bm;
-		}
-		if (slot < 0 && !bm->dmabuf)
-			slot = i;
-	}
-	if (slot < 0) {
-		u64 oldest = U64_MAX;
-
-		for (i = 0; i < ML_DMABLIT_CACHE; i++) {
-			if (cl->stamp[i] < oldest) {
-				oldest = cl->stamp[i];
-				slot = i;
-			}
-		}
-		unmap_buf(&cl->ent[slot]);
-	}
-	bm = &cl->ent[slot];
-	ret = map_db(db, dir, bm);
-	if (ret) {
-		dma_buf_put(db);
-		return ERR_PTR(ret);
-	}
-	cl->stamp[slot] = ++cl->tick;
-	return bm;
+	return ml_bufcache_map_fd(cl, g_chans[0]->device->dev, fd, dir);
 }
 
 static void ml_blit_done(void *param)
@@ -196,17 +79,20 @@ static int wait_chans(struct completion *done, const bool *used)
 	for (ch = 0; ch < g_nchan; ch++)
 		if (used[ch])
 			dma_async_issue_pending(g_chans[ch]);
+
 	for (ch = 0; ch < g_nchan; ch++) {
 		if (!used[ch])
 			continue;
+
 		if (!wait_for_completion_timeout(&done[ch],
 				msecs_to_jiffies(timeout_ms)))
 			return -ETIMEDOUT;
 	}
+
 	return 0;
 }
 
-static long ml_dmablit_submit(struct ml_client *cl, struct ml_dmablit_req *req)
+static long ml_dmablit_submit(struct ml_bufcache *cl, struct ml_dmablit_req *req)
 {
 	struct ml_bufmap *dst;
 	/* Function scope, not per-round: on the terminate path a late descriptor
@@ -227,7 +113,7 @@ static long ml_dmablit_submit(struct ml_client *cl, struct ml_dmablit_req *req)
 	 * lines for the region the DMA does not touch (arrival-order-dependent garble on the CPU
 	 * tile). BIDIRECTIONAL does clean-then-invalidate, writing those dirty lines back to DDR
 	 * first - the kernel-side equivalent of the vendor's ar_hal_sys_mmz_flush_cache_pa.
-	 * NOTE: the sync only runs when the mapping is first cached (see struct ml_client) -
+	 * NOTE: the sync only runs when the mapping is first cached (see struct ml_bufcache) -
 	 * per-frame CPU writes must go through uncached/WC mappings or ML_DMABLIT_FLUSH.
 	 */
 	dst = map_fd_cached(cl, req->dst_fd, DMA_BIDIRECTIONAL);
@@ -244,8 +130,10 @@ static long ml_dmablit_submit(struct ml_client *cl, struct ml_dmablit_req *req)
 
 		if (IS_ERR(s))
 			return PTR_ERR(s);
+
 		if (c->len == 0 || (c->len & 3) || (c->src_off & 3) || (c->dst_off & 3))
 			return -EINVAL;
+
 		if ((u64)c->src_off + c->len > s->size ||
 		    (u64)c->dst_off + c->len > dst->size)
 			return -EINVAL;
@@ -276,6 +164,7 @@ static long ml_dmablit_submit(struct ml_client *cl, struct ml_dmablit_req *req)
 				ret = PTR_ERR(s);
 				goto terminate;
 			}
+
 			/* channel k gets this round's k-th copy (already validated) */
 			tx = dmaengine_prep_dma_memcpy(g_chans[k], dst->base + c->dst_off,
 						       s->base + c->src_off, c->len,
@@ -284,6 +173,7 @@ static long ml_dmablit_submit(struct ml_client *cl, struct ml_dmablit_req *req)
 				ret = -EIO;
 				goto terminate;
 			}
+
 			init_completion(&done[k]);
 			tx->callback = ml_blit_done;
 			tx->callback_param = &done[k];
@@ -291,18 +181,22 @@ static long ml_dmablit_submit(struct ml_client *cl, struct ml_dmablit_req *req)
 				ret = -EIO;
 				goto terminate;
 			}
+
 			used[k] = true;
 		}
+
 		ret = wait_chans(done, used);
 		if (ret)
 			goto terminate;
 	}
+
 	return 0;
 
 terminate:
 	/* Flush any queued work so the channels are clean for the next call. */
 	for (ch = 0; ch < g_nchan; ch++)
 		dmaengine_terminate_sync(g_chans[ch]);
+
 	return ret;
 }
 
@@ -319,36 +213,37 @@ static long ml_dmablit_flush(int fd)
 
 	if (IS_ERR(db))
 		return PTR_ERR(db);
-	ret = map_db(db, DMA_TO_DEVICE, &bm);
+
+	ret = ml_bufmap_map(g_chans[0]->device->dev, db, DMA_TO_DEVICE, &bm);
 	if (ret) {
 		dma_buf_put(db);
 		return ret;
 	}
-	unmap_buf(&bm);
+
+	ml_bufmap_unmap(&bm);
 	return 0;
 }
 
 static int ml_dmablit_open(struct inode *inode, struct file *f)
 {
-	struct ml_client *cl = kzalloc(sizeof(*cl), GFP_KERNEL);
+	struct ml_bufcache *cl = kzalloc(sizeof(*cl), GFP_KERNEL);
 
 	if (!cl)
 		return -ENOMEM;
+
 	f->private_data = cl;
 	return 0;
 }
 
 static int ml_dmablit_release(struct inode *inode, struct file *f)
 {
-	struct ml_client *cl = f->private_data;
-	int i;
+	struct ml_bufcache *cl = f->private_data;
 
 	mutex_lock(&g_lock);
-	for (i = 0; i < ML_DMABLIT_CACHE; i++)
-		if (cl->ent[i].dmabuf)
-			unmap_buf(&cl->ent[i]);
+	ml_bufcache_release(cl);
 	mutex_unlock(&g_lock);
 	kfree(cl);
+
 	return 0;
 }
 
@@ -362,24 +257,28 @@ static long ml_dmablit_ioctl(struct file *f, unsigned int cmd, unsigned long arg
 
 		if (copy_from_user(&fd, (void __user *)arg, sizeof(fd)))
 			return -EFAULT;
+
 		mutex_lock(&g_lock);
 		ret = ml_dmablit_flush(fd);
 		mutex_unlock(&g_lock);
 		return ret;
 	}
+
 	if (cmd != ML_DMABLIT_SUBMIT)
 		return -ENOTTY;
+
 	req = kmalloc(sizeof(*req), GFP_KERNEL);
 	if (!req)
 		return -ENOMEM;
+
 	if (copy_from_user(req, (void __user *)arg, sizeof(*req))) {
 		ret = -EFAULT;
-		goto out;
+	} else {
+		mutex_lock(&g_lock);
+		ret = ml_dmablit_submit(f->private_data, req);
+		mutex_unlock(&g_lock);
 	}
-	mutex_lock(&g_lock);
-	ret = ml_dmablit_submit(f->private_data, req);
-	mutex_unlock(&g_lock);
-out:
+
 	kfree(req);
 	return ret;
 }
@@ -411,24 +310,25 @@ static int __init ml_dmablit_init(void)
 
 		if (!ch)
 			break;
+
 		g_chans[i] = ch;
 		g_nchan++;
 	}
+
 	if (g_nchan == 0) {
 		pr_err("no DMA_MEMCPY channel available (is dw-axi-dmac probed?)\n");
 		return -ENODEV;
 	}
 
 	ret = misc_register(&ml_dmablit_dev);
-	if (ret)
-		goto release;
+	if (ret) {
+		while (g_nchan-- > 0)
+			dma_release_channel(g_chans[g_nchan]);
+		return ret;
+	}
+
 	pr_info("ready: /dev/ml-dmablit on %d channel(s)\n", g_nchan);
 	return 0;
-
-release:
-	while (g_nchan-- > 0)
-		dma_release_channel(g_chans[g_nchan]);
-	return ret;
 }
 
 static void __exit ml_dmablit_exit(void)

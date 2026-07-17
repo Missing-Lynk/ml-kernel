@@ -9,8 +9,14 @@
  *   0xc0405a01 _IOWR('Z',1,64)     single crop/resize  -> ar_scaler_start_single
  *   0xffc45a00 _IOWR('Z',0,16324)  batch {u32 count; op[255]} -> ar_scaler_start_batch
  *   0xc0045a02 _IOWR('Z',2,4)      set frequency (int)
- * No mmap, no compat_ioctl, no per-fd state. Userspace passes physical addresses
- * by value inside a 64-byte op descriptor; no shared-buffer ABI.
+ * No mmap, no compat_ioctl. Userspace passes physical addresses by value inside
+ * a 64-byte op descriptor; no shared-buffer ABI.
+ *
+ * On top of the vendor family, this open port adds a dmabuf-fd family
+ * ('Z' nr 3/4, ar_scaler.h): the same op geometry addressed by dmabuf fd +
+ * offset, resolved in-kernel via the shared ml_dmabuf_map.h resolver (per-open
+ * mapping cache, single-segment contiguity gate). The vendor commands and
+ * their register choreography are untouched.
  *
  * HARDWARE STATUS: the ABI front-end AND the in-kernel register choreography are
  * now recovered 1:1 from the vendor ar_scaler.ko (unstripped AArch64, symbols
@@ -44,15 +50,8 @@
 #include <linux/pm.h>
 
 #include "ar_mmz.h"
-
-#define SCALER_MAGIC		'Z'		/* 0x5a */
-
-/* ioctl command numbers (byte-exact from the vendor .ko). */
-#define SCALER_IOC_BATCH	_IOWR(SCALER_MAGIC, 0, struct ar_scaler_batch)
-#define SCALER_IOC_SINGLE	_IOWR(SCALER_MAGIC, 1, struct ar_scaler_op)
-#define SCALER_IOC_SETFREQ	_IOWR(SCALER_MAGIC, 2, int)
-
-#define SCALER_BATCH_MAX	255
+#include "ar_scaler.h"
+#include "ml_dmabuf_map.h"
 
 /* --- scaler core registers (regbase, 0x1000 window) ----------------------- *
  * RECOVERED EXACTLY from ar_scaler.ko (.text addresses cited per field).
@@ -130,35 +129,6 @@
 #define SCALER_BATCH_MMZ_SIZE	0xff00		/* 65280 */
 
 #define SCALER_WAIT_JIFFIES	500		/* completion timeout (jiffies) */
-
-/*
- * 64-byte op descriptor (single = one element; batch = {u32 count; op[255]}).
- * Field offsets recovered from the vendor driver. All addresses are PHYSICAL, passed by value.
- */
-struct ar_scaler_op {
-	__u32	srcphy;		/* 0x00 != 0 */
-	__u32	srcw;		/* 0x04 != 0 */
-	__u32	srch;		/* 0x08 != 0 */
-	__u32	srcstride;	/* 0x0c multiple of 16 */
-	__u32	crop_x;		/* 0x10 */
-	__u32	crop_y;		/* 0x14 */
-	__u32	cropw;		/* 0x18 != 0 */
-	__u32	croph;		/* 0x1c != 0 */
-	__u32	dstphy;		/* 0x20 != 0 */
-	__u32	dstw;		/* 0x24 != 0 */
-	__u32	dsth;		/* 0x28 != 0 */
-	__u32	dststride;	/* 0x2c multiple of 16 */
-	__u32	channels;	/* 0x30 != 0 */
-	__u32	control;	/* 0x34 */
-	__u32	interp;		/* 0x38 */
-	__u32	ctrl3c;		/* 0x3c (read by the batch-register packer) */
-};
-
-/* 4 + 255*64 = 16324 bytes (=0x3fc4). */
-struct ar_scaler_batch {
-	__u32			count;
-	struct ar_scaler_op	ops[SCALER_BATCH_MAX];
-};
 
 /* Recovered scaler_dev (248 B) layout (fields relevant to the open port). */
 struct scaler_dev {
@@ -302,18 +272,24 @@ static int ar_scaler_validate(const struct ar_scaler_op *op)
 {
 	if (!op->srcphy || !op->srcw || !op->srch)
 		return -EINVAL;
-	if (op->srcstride & 0xf) {		/* multiple of 16 */
+
+	/* multiple of 16 */
+	if (op->srcstride & 0xf)
 		return -EINVAL;
-	}
+
 	if (!op->cropw || !op->croph)
 		return -EINVAL;
+
 	if (!op->dstphy || !op->dstw || !op->dsth)
 		return -EINVAL;
-	if (op->dststride & 0xf) {		/* multiple of 16 */
+
+	/* multiple of 16 */
+	if (op->dststride & 0xf)
 		return -EINVAL;
-	}
+
 	if (!op->channels)
 		return -EINVAL;
+
 	return 0;
 }
 
@@ -343,6 +319,7 @@ static u32 coordinate_convert(u32 src, u32 dst, u32 *delta_hi, u32 *delta_lo)
 
 	*delta_hi = (u32)((delta >> 32) & 0x1f);		/* ubfx #32,#5 */
 	*delta_lo = (u32)delta;
+
 	return (u32)ratio;
 }
 
@@ -484,6 +461,7 @@ static void ar_scaler_timeout_reset(struct scaler_dev *sc)
 	writel(0, sc->regbase + SC_REG_IRQEN);
 	synchronize_irq(sc->irq);
 	ar_scaler_hw_init(sc);
+
 	/* hw_init re-enables the IRQ; keep it masked until any status latched
 	 * across the clock-gate reset is cleared and the completion is fresh,
 	 * or a late DONE could complete() after the reinit below.
@@ -520,12 +498,22 @@ static long ar_scaler_run(struct scaler_dev *sc, const struct ar_scaler_op *op,
 	}
 
 	reinit_completion(&sc->completion);
-	scaler_set_batch_registers(sc, op, count);
 
-	/* trigger: reg[0] &= ~1; reg[24] = 1 */
+	/* Single mode (CTRL bit0 = 0) must be selected BEFORE packing the live
+	 * descriptor image: with bit0 still set from a previous batch op the
+	 * engine ignores writes to the regbase+0x1C descriptor registers, and
+	 * the trigger runs a stale op that completes (IRQ fires) without
+	 * writing the destination (HW-observed 2026-07-17). The vendor driver
+	 * packs first and clears bit0 only at trigger time; its userspace
+	 * never mixes modes, so it never hits this.
+	 */
 	ctrl = readl(sc->regbase + SC_REG_CTRL);
 	ctrl &= ~1u;
 	writel(ctrl, sc->regbase + SC_REG_CTRL);
+
+	scaler_set_batch_registers(sc, op, count);
+
+	/* trigger: reg[24] = 1 */
 	writel(1, sc->regbase + SC_REG_TRIGGER);
 
 	left = wait_for_completion_timeout(&sc->completion, SCALER_WAIT_JIFFIES);
@@ -550,42 +538,34 @@ static long ar_scaler_start_single(struct scaler_dev *sc, void __user *arg)
 	return ar_scaler_run(sc, &op, 1);
 }
 
-static long ar_scaler_start_batch(struct scaler_dev *sc, void __user *arg)
+/*
+ * Validate, stage and run `count` ops through batch mode; blocks on completion.
+ * Shared by the vendor SCALER_IOC_BATCH and the dmabuf batch (which resolves
+ * its fds into ops[] before calling).
+ */
+static long ar_scaler_run_batch(struct scaler_dev *sc,
+				const struct ar_scaler_op *ops, u32 count)
 {
-	struct ar_scaler_batch *b;
 	long ret;
 	u32 i;
 
-	/* The batch arg is 16324 B. The vendor uses kmalloc_order;
-	 * plain kmalloc is fine on this kernel.
-	 */
-	b = kmalloc(sizeof(*b), GFP_KERNEL);
-	if (!b)
-		return -ENOMEM;
+	if (count == 0 || count > SCALER_BATCH_MAX)
+		return -EINVAL;
 
-	if (copy_from_user(b, arg, sizeof(*b))) {
-		ret = -EFAULT;
-		goto out;
-	}
-	if (b->count == 0 || b->count > SCALER_BATCH_MAX) {
-		ret = -EINVAL;
-		goto out;
-	}
-	for (i = 0; i < b->count; i++) {
-		ret = ar_scaler_validate(&b->ops[i]);
+	for (i = 0; i < count; i++) {
+		ret = ar_scaler_validate(&ops[i]);
 		if (ret)
-			goto out;
+			return ret;
 	}
 
-	ret = mutex_lock_interruptible(&g_scaler.lock);
-	if (ret) {
-		ret = -EINTR;
-		goto out;
-	}
+	ret = mutex_lock_interruptible(&sc->lock);
+	if (ret)
+		return -EINTR;
+
 	if (sc->suspended || sc->dead) {
 		ret = sc->dead ? -ENODEV : -EAGAIN;
 		mutex_unlock(&sc->lock);
-		goto out;
+		return ret;
 	}
 
 	/* Stage the descriptor block the HW walks in batch mode. Recovered from
@@ -594,18 +574,18 @@ static long ar_scaler_start_batch(struct scaler_dev *sc, void __user *arg)
 	 * scaler_build_image (same packer as the single-op live regs).
 	 */
 	memset(sc->batch_kvaddr, 0, SCALER_BATCH_MMZ_SIZE);
-	for (i = 0; i < b->count; i++) {
+	for (i = 0; i < count; i++) {
 		scaler_build_image((u32 *)((u8 *)sc->batch_kvaddr +
 					   i * SC_DESC_STRIDE),
-				   &b->ops[i], lower_32_bits(sc->lut_phys));
+				   &ops[i], lower_32_bits(sc->lut_phys));
 	}
 
 	/* /proc oracle book-keeping (no live single-op regs are written in
 	 * batch mode; the HW DMAs the staged block instead).
 	 */
-	sc->last_op = b->ops[0];
+	sc->last_op = ops[0];
 	sc->last_batch = true;
-	sc->last_batch_cnt = b->count;
+	sc->last_batch_cnt = count;
 
 	reinit_completion(&sc->completion);
 
@@ -623,7 +603,7 @@ static long ar_scaler_start_batch(struct scaler_dev *sc, void __user *arg)
 		writel(lower_32_bits(sc->batch_phys),
 		       sc->regbase + SC_REG_BATCHADDR);
 		cfg = readl(sc->regbase + SC_REG_BATCHCFG) & 0xffff;
-		cfg |= b->count << 16;
+		cfg |= count << 16;
 		writel(cfg, sc->regbase + SC_REG_BATCHCFG);
 		writel(1, sc->regbase + SC_REG_TRIGGER);
 
@@ -637,9 +617,28 @@ static long ar_scaler_start_batch(struct scaler_dev *sc, void __user *arg)
 			ret = 0;
 		}
 	}
-	mutex_unlock(&sc->lock);
 
-out:
+	mutex_unlock(&sc->lock);
+	return ret;
+}
+
+static long ar_scaler_start_batch(struct scaler_dev *sc, void __user *arg)
+{
+	struct ar_scaler_batch *b;
+	long ret;
+
+	/* The batch arg is 16324 B. The vendor uses kmalloc_order;
+	 * plain kmalloc is fine on this kernel.
+	 */
+	b = kmalloc(sizeof(*b), GFP_KERNEL);
+	if (!b)
+		return -ENOMEM;
+
+	if (copy_from_user(b, arg, sizeof(*b)))
+		ret = -EFAULT;
+	else
+		ret = ar_scaler_run_batch(sc, b->ops, b->count);
+
 	kfree(b);
 	return ret;
 }
@@ -651,31 +650,40 @@ out:
  */
 static u32 scaler_freq_to_div(u32 freq)
 {
-	if (freq > 599) {		/* > 0x257 */
+	/* > 0x257 */
+	if (freq > 599)
 		return 0x1400;
-	}
-	if (freq > 499) {		/* 0x1f4..0x257 */
+
+	/* 0x1f4..0x257 */
+	if (freq > 499)
 		return 0x1100;
-	}
-	if (freq > 399) {		/* 0x190..0x1f3 */
+
+	/* 0x190..0x1f3 */
+	if (freq > 399)
 		return 0x1200;
-	}
-	if (freq > 332) {		/* 0x14d..0x18f */
+
+	/* 0x14d..0x18f */
+	if (freq > 332)
 		return 0x1300;
-	}
-	if (freq > 299) {		/* 0x12c..0x14c */
+
+	/* 0x12c..0x14c */
+	if (freq > 299)
 		return 0x1401;
-	}
-	if (freq > 199) {		/* 0xc8..0x12b */
+
+	/* 0xc8..0x12b */
+	if (freq > 199)
 		return 0x1402;
-	}
-	if (freq > 149) {		/* 0x96..0xc7 */
+
+	/* 0x96..0xc7 */
+	if (freq > 149)
 		return 0x1403;
-	}
-	if (freq > 99) {		/* 0x64..0x95 */
+
+	/* 0x64..0x95 */
+	if (freq > 99)
 		return 0x1405;
-	}
-	return 0x1207;		/* <= 0x63 */
+
+	/* <= 0x63 */
+	return 0x1207;
 }
 
 static void ar_scaler_set_freq_div(struct scaler_dev *sc, u32 freq)
@@ -689,7 +697,6 @@ static void ar_scaler_set_freq_div(struct scaler_dev *sc, u32 freq)
 static long ar_scaler_set_frequency(struct scaler_dev *sc, void __user *arg)
 {
 	int freq;
-
 	if (copy_from_user(&freq, arg, sizeof(freq)))
 		return -EFAULT;
 
@@ -698,12 +705,150 @@ static long ar_scaler_set_frequency(struct scaler_dev *sc, void __user *arg)
 		mutex_unlock(&sc->lock);
 		return -ENODEV;
 	}
-	sc->frequency = (u32)freq;
+
 	/* ar_scaler_set_frequency @0xcb8: only programs the divider when != 0. */
+	sc->frequency = (u32)freq;
 	if (freq)
 		ar_scaler_set_freq_div(sc, (u32)freq);
 	mutex_unlock(&sc->lock);
+
 	return 0;
+}
+
+/* ------------------------------------------------------------------------- */
+
+/* Per-open state for the dmabuf ABI family (SCALER_IOC_*_DMABUF): the fd ->
+ * contiguous-phys mapping cache plus its lock. The vendor phys-by-value
+ * ioctls never touch it.
+ */
+struct scaler_client {
+	struct mutex		lock;
+	struct ml_bufcache	cache;
+};
+
+/* A batch pins up to 2 mappings per op; they must all fit in the cache with
+ * this batch's stamps newest, or the LRU could evict an earlier op's mapping
+ * before the HW runs.
+ */
+static_assert(2 * SCALER_DMABUF_BATCH_MAX < ML_BUFCACHE_ENTRIES);
+
+/*
+ * Resolve one dmabuf op into a phys-addressed vendor op. Called under
+ * cl->lock, which the caller holds across the HW run too: the resolved phys
+ * stay pinned while cached, and an LRU eviction (only possible under cl->lock)
+ * can never unpin a segment the engine is still using.
+ */
+static long ar_scaler_resolve_dmabuf_op(struct scaler_dev *sc,
+					struct scaler_client *cl,
+					const struct ar_scaler_dmabuf_op *dop,
+					struct ar_scaler_op *op)
+{
+	struct ml_bufmap *src, *dst;
+	u64 phys;
+
+	*op = dop->op;
+
+	/* the fds are the address source; a stray phys is a caller bug */
+	if (op->srcphy || op->dstphy)
+		return -EINVAL;
+
+	if ((dop->src_off | dop->dst_off) & 0xf)
+		return -EINVAL;
+
+	/* geometry the bounds math below depends on (ar_scaler_validate runs
+	 * later, but only after these fields have already been multiplied)
+	 */
+	if (!op->srch || !op->srcstride || !op->dsth || !op->dststride ||
+	    !op->channels)
+		return -EINVAL;
+
+	if ((u64)op->srcw * op->channels > op->srcstride ||
+	    (u64)op->dstw * op->channels > op->dststride)
+		return -EINVAL;
+
+	if ((u64)op->crop_x + op->cropw > op->srcw ||
+	    (u64)op->crop_y + op->croph > op->srch)
+		return -EINVAL;
+
+	src = ml_bufcache_map_fd(&cl->cache, sc->dev, dop->src_fd,
+				 DMA_TO_DEVICE);
+	if (IS_ERR(src))
+		return PTR_ERR(src);
+
+	/* src_fd == dst_fd remaps the SAME cache slot BIDIRECTIONAL, so src's
+	 * base/size are only valid read after this call: keep every use of
+	 * src below the dst map.
+	 */
+	dst = ml_bufcache_map_fd(&cl->cache, sc->dev, dop->dst_fd,
+				 DMA_FROM_DEVICE);
+	if (IS_ERR(dst))
+		return PTR_ERR(dst);
+
+	/* whole declared images inside their mapped segments */
+	if ((u64)dop->src_off + (u64)op->srch * op->srcstride > src->size)
+		return -EINVAL;
+
+	if ((u64)dop->dst_off + (u64)op->dsth * op->dststride > dst->size)
+		return -EINVAL;
+
+	/* the descriptor takes 32-bit phys */
+	phys = (u64)src->base + dop->src_off;
+	if (upper_32_bits(phys))
+		return -ERANGE;
+
+	op->srcphy = lower_32_bits(phys);
+	phys = (u64)dst->base + dop->dst_off;
+	if (upper_32_bits(phys))
+		return -ERANGE;
+
+	op->dstphy = lower_32_bits(phys);
+	return 0;
+}
+
+static long ar_scaler_start_single_dmabuf(struct scaler_dev *sc,
+					  struct scaler_client *cl,
+					  void __user *arg)
+{
+	struct ar_scaler_dmabuf_op dop;
+	struct ar_scaler_op op;
+	long ret;
+
+	if (copy_from_user(&dop, arg, sizeof(dop)))
+		return -EFAULT;
+
+	mutex_lock(&cl->lock);
+	ret = ar_scaler_resolve_dmabuf_op(sc, cl, &dop, &op);
+	if (!ret)
+		ret = ar_scaler_run(sc, &op, 1);
+	mutex_unlock(&cl->lock);
+
+	return ret;
+}
+
+static long ar_scaler_start_batch_dmabuf(struct scaler_dev *sc,
+					 struct scaler_client *cl,
+					 void __user *arg)
+{
+	struct ar_scaler_dmabuf_batch b;
+	struct ar_scaler_op ops[SCALER_DMABUF_BATCH_MAX];
+	long ret;
+	u32 i;
+
+	if (copy_from_user(&b, arg, sizeof(b)))
+		return -EFAULT;
+
+	if (b.count == 0 || b.count > SCALER_DMABUF_BATCH_MAX || b.reserved)
+		return -EINVAL;
+
+	mutex_lock(&cl->lock);
+	ret = 0;
+	for (i = 0; i < b.count && !ret; i++)
+		ret = ar_scaler_resolve_dmabuf_op(sc, cl, &b.ops[i], &ops[i]);
+	if (!ret)
+		ret = ar_scaler_run_batch(sc, ops, b.count);
+	mutex_unlock(&cl->lock);
+
+	return ret;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -825,11 +970,23 @@ static void ar_scaler_poweroff(struct scaler_dev *sc)
 
 static int ar_scaler_open(struct inode *ino, struct file *f)
 {
+	struct scaler_client *cl = kzalloc(sizeof(*cl), GFP_KERNEL);
+
+	if (!cl)
+		return -ENOMEM;
+
+	mutex_init(&cl->lock);
+	f->private_data = cl;
+
 	return 0;
 }
 
 static int ar_scaler_release(struct inode *ino, struct file *f)
 {
+	struct scaler_client *cl = f->private_data;
+
+	ml_bufcache_release(&cl->cache);
+	kfree(cl);
 	return 0;
 }
 
@@ -858,18 +1015,38 @@ static long ar_scaler_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 	case SCALER_IOC_SINGLE: {
 		if (sz != sizeof(struct ar_scaler_op))
 			return -EINVAL;
+
 		return ar_scaler_start_single(sc, uarg);
 	}
+
 	case SCALER_IOC_BATCH: {
 		if (sz != sizeof(struct ar_scaler_batch))
 			return -EINVAL;
+
 		return ar_scaler_start_batch(sc, uarg);
 	}
+
 	case SCALER_IOC_SETFREQ: {
 		if (sz != sizeof(int))
 			return -EINVAL;
+
 		return ar_scaler_set_frequency(sc, uarg);
 	}
+
+	case SCALER_IOC_SINGLE_DMABUF: {
+		if (sz != sizeof(struct ar_scaler_dmabuf_op))
+			return -EINVAL;
+
+		return ar_scaler_start_single_dmabuf(sc, f->private_data, uarg);
+	}
+
+	case SCALER_IOC_BATCH_DMABUF: {
+		if (sz != sizeof(struct ar_scaler_dmabuf_batch))
+			return -EINVAL;
+
+		return ar_scaler_start_batch_dmabuf(sc, f->private_data, uarg);
+	}
+
 	default: {
 		return -EINVAL;
 	}
@@ -922,12 +1099,15 @@ static int ar_scaler_alloc_mmz(struct scaler_dev *sc)
 				    PAGE_SIZE, 0, "");
 	if (!sc->lut_mmb)
 		return -ENOMEM;
+
 	sc->lut_kvaddr = hil_mmb_map2kern(sc->lut_mmb);
 	if (!sc->lut_kvaddr) {
 		hil_mmb_free(sc->lut_mmb);
 		sc->lut_mmb = NULL;
+
 		return -ENOMEM;
 	}
+
 	sc->lut_phys = sc->lut_mmb->phys;
 
 	sc->batch_mmb = hil_mmb_alloc("batch_mmz", SCALER_BATCH_MMZ_SIZE,
@@ -936,8 +1116,10 @@ static int ar_scaler_alloc_mmz(struct scaler_dev *sc)
 		hil_mmb_unmap(sc->lut_mmb);
 		hil_mmb_free(sc->lut_mmb);
 		sc->lut_mmb = NULL;
+
 		return -ENOMEM;
 	}
+
 	sc->batch_kvaddr = hil_mmb_map2kern(sc->batch_mmb);
 	if (!sc->batch_kvaddr) {
 		hil_mmb_free(sc->batch_mmb);
@@ -945,8 +1127,10 @@ static int ar_scaler_alloc_mmz(struct scaler_dev *sc)
 		hil_mmb_unmap(sc->lut_mmb);
 		hil_mmb_free(sc->lut_mmb);
 		sc->lut_mmb = NULL;
+
 		return -ENOMEM;
 	}
+
 	sc->batch_phys = sc->batch_mmb->phys;
 	return 0;
 }
@@ -958,6 +1142,7 @@ static void ar_scaler_free_mmz(struct scaler_dev *sc)
 		hil_mmb_free(sc->batch_mmb);
 		sc->batch_mmb = NULL;
 	}
+
 	if (sc->lut_mmb) {
 		hil_mmb_unmap(sc->lut_mmb);
 		hil_mmb_free(sc->lut_mmb);
@@ -1003,10 +1188,12 @@ static int ar_scaler_probe(struct platform_device *pdev)
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res)
 		return -ENODEV;
+
 	if (resource_size(res) < SCALER_REG_MIN_SIZE) {
 		dev_err(dev, "scaler reg window too small (%pa)\n", &res->start);
 		return -EINVAL;
 	}
+
 	sc->regbase = devm_ioremap(dev, res->start, resource_size(res));
 	if (!sc->regbase)
 		return -ENOMEM;
@@ -1016,6 +1203,7 @@ static int ar_scaler_probe(struct platform_device *pdev)
 	 */
 	if (of_property_read_u32(np, "control", &control_phys))
 		control_phys = CTRL_DEFAULT_PHYS;
+
 	sc->ctrlbase = devm_ioremap(dev, control_phys, CTRL_MAP_SIZE);
 	if (!sc->ctrlbase)
 		return -ENOMEM;
@@ -1028,6 +1216,7 @@ static int ar_scaler_probe(struct platform_device *pdev)
 	sc->irq = platform_get_irq(pdev, 0);
 	if (sc->irq < 0)
 		return sc->irq;
+
 	ret = devm_request_threaded_irq(dev, sc->irq, ar_scaler_irq_handler,
 					NULL, 0, "arscaler", sc);
 	if (ret) {
@@ -1057,7 +1246,8 @@ static int ar_scaler_probe(struct platform_device *pdev)
 	ret = misc_register(&sc->misc);
 	if (ret) {
 		dev_err(dev, "misc_register failed: %d\n", ret);
-		goto err_mmz;
+		ar_scaler_free_mmz(sc);
+		return ret;
 	}
 
 	/* (8) /proc/arscaler/state oracle. */
@@ -1072,10 +1262,6 @@ static int ar_scaler_probe(struct platform_device *pdev)
 	dev_info(dev, "ready: regs %pa, control 0x%08x, irq %d, freq %u\n",
 		 &res->start, control_phys, sc->irq, sc->frequency);
 	return 0;
-
-err_mmz:
-	ar_scaler_free_mmz(sc);
-	return ret;
 }
 
 static void ar_scaler_remove(struct platform_device *pdev)
@@ -1111,6 +1297,7 @@ static int ar_scaler_suspend(struct device *dev)
 	sc->suspended = true;
 	mutex_unlock(&sc->lock);
 	dev_info(dev, "Scaler suspended.\n");
+
 	return 0;
 }
 
@@ -1123,6 +1310,7 @@ static int ar_scaler_resume(struct device *dev)
 	sc->suspended = false;
 	mutex_unlock(&sc->lock);
 	dev_info(dev, "Scaler resumed.\n");
+
 	return 0;
 }
 
@@ -1145,6 +1333,9 @@ static struct platform_driver ar_scaler_driver = {
 	},
 };
 module_platform_driver(ar_scaler_driver);
+
+/* dma_buf_* (the SCALER_IOC_*_DMABUF resolver) live in the DMA_BUF namespace. */
+MODULE_IMPORT_NS("DMA_BUF");
 
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("missinglynk (open reimpl)");

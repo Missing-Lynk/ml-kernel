@@ -157,6 +157,26 @@ ssh root@192.168.3.100 /tmp/scalertest          # or: scalertest W H  (override 
 Requires `ar_osal.ko` and `ar_scaler.ko` loaded first. On any failure the tool dumps
 `/proc/arscaler/state` (the on-device oracle) so the programmed registers are in the log.
 
+### `scaler_dmabuf_test` - ar_scaler dmabuf ABI (SCALER_IOC_*_DMABUF)
+Same pixel-correctness discipline as `scalertest`, but for the open dmabuf-fd family
+(`'Z'` nr 3/4, `../modules/ar_scaler.h`) on CMA dma-buf-heap buffers - the pipeline's
+world. Buffers are one contiguous I420 image per fd; ops address planes by fd + byte
+offset. Ladder: **T1** single-op Y identity (bit-exact), **T2** 3-plane batch identity
+(bit-exact, proves per-plane offset addressing + the batch descriptor block on CMA),
+**T3** 3-plane 2:1 downscale vs the 2x2 box reference, **T4** (optional, iters arg)
+3-plane 2:3-downscale timing - the DVR 1080p -> 720p shape - printing ms/frame and the
+fps ceiling. CPU access is bracketed with `DMA_BUF_IOCTL_SYNC` (the kernel caches the
+scaler's mapping per open fd; the heap's begin/end_cpu_access sync covers live
+attachments).
+
+```sh
+make scaler_dmabuf_test
+ssh root@192.168.3.100 /tmp/scaler_dmabuf_test                # 256x128 quick pass
+ssh root@192.168.3.100 /tmp/scaler_dmabuf_test 1920 1080 300  # DVR shape + timing
+```
+Requires `ar_osal.ko` (the scaler's internal LUT/batch buffers) + `ar_scaler.ko` and
+`CONFIG_DMABUF_HEAPS_CMA`. Exit codes as `scalertest`.
+
 ### `sd_rwtest` - SD card block reads/writes (dw_mci-artosyn), hang-safe
 Validates SD-card block I/O through the real block layer (`/dev/mmcblk1` -> mmcblk -> mmc core ->
 `dw_mci-artosyn`), designed around the historical `mmc_blk_rw_wait` write hang: every I/O phase runs in a forked child under a timeout, so a D-state hang is
