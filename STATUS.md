@@ -53,7 +53,7 @@ Everything the goggle exercises is at parity or better on the open kernel. Hardw
 | Block | State | Consequence |
 |---|---|---|
 | Scaler (crop/resize engine) | not driven (reference driver `modules/ar_scaler.c`) | no 720p->1080p upscale or digital zoom; unneeded at the native-1080p link mode (compositing runs on the DMA engine) |
-| JPEG codec (Chips&Media CODA9/JPU, `0x08830000`, SPI 69) | not driven | no snapshot/MJPEG; open path would be the mainline `coda` driver |
+| JPEG codec (Chips&Media JPU, `0x08830000`, SPI 69) | not driven, scoped | standalone single-instance JPU, register-driven, no firmware; no mainline driver fits, open path = small custom driver from the open `jpuapi` choreography (ml-kernel#1) |
 | USB gadget MTP function | not configured (open gadget is CDC-ECM only; vendor is rndis+mtp+uart) | DVR files not pullable over USB; SD card removal or scp instead |
 | Audio codec (`artosyn,audio_codec`, GIC 79) | not driven | none - disabled in this unit's stock config (`AudioEnable:0`) |
 
