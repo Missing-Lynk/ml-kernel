@@ -437,15 +437,23 @@
 		 * one of the two modules may be loaded (both are =m; the second
 		 * request_irq on the line fails).
 		 *
-		 * reg = the single Wave5 host-IF window (index 0). The 128 KiB aux window
+		 * reg = the single Wave5 host-IF window (index 0). The aux window
 		 * 0x001f0000 is the VCPU reference SRAM, handed to the driver via the
-		 * `sram` phandle (of_gen_pool_get), NOT a second reg entry. */
+		 * `sram` phandle (of_gen_pool_get), NOT a second reg entry.
+		 *
+		 * Size is 64 KiB, NOT the vendor map's 128 KiB claim: the GIC-400
+		 * windows start at 0x201000, inside a 128 KiB span, and mmio-sram
+		 * maps its whole reg as pooled Normal memory - a 0x20000 window
+		 * hands out live GIC registers as scratch and permits speculative
+		 * GICC reads (GICC_IAR read = interrupt acknowledge). The wave5 TI
+		 * match-data draws exactly 64 KiB (sram_size 64K), so nothing is
+		 * lost. */
 		vpu_sram: sram@1f0000 {
 			compatible = "mmio-sram";
-			reg = <0 0x001f0000 0 0x20000>;	/* 128 KiB codec SRAM */
+			reg = <0 0x001f0000 0 0x10000>;	/* 64 KiB codec SRAM */
 			#address-cells = <2>;
 			#size-cells = <2>;
-			ranges = <0 0 0 0x001f0000 0 0x20000>;
+			ranges = <0 0 0 0x001f0000 0 0x10000>;
 			status = "okay";
 		};
 

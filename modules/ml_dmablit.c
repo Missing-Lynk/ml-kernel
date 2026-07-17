@@ -95,6 +95,16 @@ static int wait_chans(struct completion *done, const bool *used)
 static long ml_dmablit_submit(struct ml_bufcache *cl, struct ml_dmablit_req *req)
 {
 	struct ml_bufmap *dst;
+
+	/* Resolved once in the validation pass and reused for submit: re-resolving
+	 * the fd there would re-run dma_buf_get on a table another thread can
+	 * retarget (dup2) between the passes, bypassing the bounds check below.
+	 * The pointers stay valid across the ioctl: at most n+1 <= 9 fresh-stamped
+	 * cache entries vs ML_BUFCACHE_ENTRIES slots, so LRU eviction cannot reach
+	 * them (same argument as ar_scaler's static_assert).
+	 */
+	struct ml_bufmap *srcs[ML_DMABLIT_MAX_COPIES];
+
 	/* Function scope, not per-round: on the terminate path a late descriptor
 	 * callback can still complete() these until dmaengine_terminate_sync()
 	 * returns, so they must stay live past the round block.
@@ -137,6 +147,8 @@ static long ml_dmablit_submit(struct ml_bufcache *cl, struct ml_dmablit_req *req
 		if ((u64)c->src_off + c->len > s->size ||
 		    (u64)c->dst_off + c->len > dst->size)
 			return -EINVAL;
+
+		srcs[i] = s;
 	}
 
 	/* Submit in ROUNDS: at most one descriptor per channel per round, issued and
@@ -157,13 +169,8 @@ static long ml_dmablit_submit(struct ml_bufcache *cl, struct ml_dmablit_req *req
 
 		for (k = 0; k < g_nchan && (i + k) < (int)req->n; k++) {
 			struct ml_dmablit_copy *c = &req->copy[i + k];
-			struct ml_bufmap *s = map_fd_cached(cl, c->src_fd, DMA_TO_DEVICE);
+			struct ml_bufmap *s = srcs[i + k];
 			struct dma_async_tx_descriptor *tx;
-
-			if (IS_ERR(s)) {
-				ret = PTR_ERR(s);
-				goto terminate;
-			}
 
 			/* channel k gets this round's k-th copy (already validated) */
 			tx = dmaengine_prep_dma_memcpy(g_chans[k], dst->base + c->dst_off,

@@ -450,6 +450,12 @@ static void ar_vo_pipe_disable(struct drm_simple_display_pipe *pipe)
 
 	drm_crtc_vblank_off(&pipe->crtc);
 	writel(0, vo->regs + VO_MAIN_CTRL);
+
+	/* Drop START from the shadow config: every later LOCK/unlock bracket
+	 * rewrites VO_MAIN_CTRL with cur_cfg, and a stale START would restart
+	 * scanout into the disabled DSI. pipe_enable re-adds it.
+	 */
+	vo->cur_cfg &= ~VO_MAIN_START;
 }
 
 static void ar_vo_pipe_update(struct drm_simple_display_pipe *pipe,
@@ -594,7 +600,12 @@ static void ar_vo_hud_update(struct drm_plane *plane, struct drm_atomic_state *s
 	u32 bank = to_ar_vo_plane(plane)->bank;
 	u32 addr;
 
-	if (!ns->fb || !ns->crtc)
+	/* Skip bank writes while the CRTC is off: pipe_enable's SRESET would
+	 * clobber them anyway, and the commit's LOCK bracket must not touch
+	 * VO_MAIN_CTRL on a stopped pipe. The bank is reprogrammed by the
+	 * plane's next atomic update after enable (ml-hud commits every frame).
+	 */
+	if (!ns->fb || !ns->crtc || !ns->crtc->state->active)
 		return;
 
 	addr = lower_32_bits(drm_fb_dma_get_gem_addr(ns->fb, ns, 0));
@@ -616,7 +627,8 @@ static void ar_vo_vid_update(struct drm_plane *plane, struct drm_atomic_state *s
 	bool yuv;
 	u32 fmt, y, u, v, us, vs;
 
-	if (!ns->fb || !ns->crtc)
+	/* Same CRTC-off skip as ar_vo_hud_update. */
+	if (!ns->fb || !ns->crtc || !ns->crtc->state->active)
 		return;
 
 	fmt = ar_vo_surface_enum(ns->fb->format->format, &yuv);

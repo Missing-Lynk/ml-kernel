@@ -1237,6 +1237,12 @@ static int ar_scaler_probe(struct platform_device *pdev)
 	ret = misc_register(&sc->misc);
 	if (ret) {
 		dev_err(dev, "misc_register failed: %d\n", ret);
+
+		/* hw_init already clocked the engine, enabled the IRQ, and wrote
+		 * lut_phys into SC_REG_LUTADDR; power off before freeing so the
+		 * block is not left live with a dangling LUT pointer.
+		 */
+		ar_scaler_poweroff(sc);
 		ar_scaler_free_bufs(sc);
 		return ret;
 	}

@@ -1126,6 +1126,12 @@ static void artosyn_sdio_send_data(struct artosyn_sdio_device *dev)
 			used = 0;
 		}
 		if (clen + LINK_TRAILER_LEN > ARSDIO_STAGING) {
+			/* Unreachable while MTU-sized frames fit ARSDIO_STAGING, but
+			 * this consume path must dec inflight like every other one or
+			 * a future STAGING/MTU change stalls TX forever (see the drop
+			 * paths above).
+			 */
+			atomic_dec_if_positive(&dev->inflight);
 			kfree_skb(skb);			/* single frame too big */
 			continue;
 		}
@@ -1190,6 +1196,12 @@ static void artosyn_sdio_send_cmd(struct artosyn_sdio_device *dev)
 						    (unsigned int)ALIGN(len + LINK_TRAILER_LEN, ARSDIO_BLOCK),
 						    dev->tx_write_acc);
 			kfree_skb(skb);
+
+			/* The drop may have emptied the queue with used == 0, in which
+			 * case neither wake below fires and a writer blocked on the
+			 * queue-empty wait in artosyn_do_write would miss its wakeup.
+			 */
+			wake_up(&dev->cmd_wq);
 			continue;
 		}
 		if (used && used + len + LINK_TRAILER_LEN > ARSDIO_STAGING) {
@@ -1199,6 +1211,7 @@ static void artosyn_sdio_send_cmd(struct artosyn_sdio_device *dev)
 		}
 		if (len + LINK_TRAILER_LEN > ARSDIO_STAGING) {
 			kfree_skb(skb);
+			wake_up(&dev->cmd_wq);	/* same missed-wakeup case as the drop above */
 			continue;
 		}
 		memcpy(buf + used, skb->data, len);
