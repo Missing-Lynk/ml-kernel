@@ -6,7 +6,8 @@
  * @0x442830 + the init table at rodata 0x4c7a10). See ../../../../../docs/display-backlight.md.
  *
  * The init table (panel-qy45043a0.h) ends with Sleep-Out + Display-On, so the whole panel
- * power-up runs in .prepare(); .enable() only ungates the backlight via drm_panel.
+ * power-up runs in .prepare(). The backlight is not attached to the panel; it is driven
+ * entirely by userspace through /sys/class/backlight.
  */
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
@@ -186,10 +187,12 @@ static int qy45043a0_probe(struct mipi_dsi_device *dsi)
 	 */
 	ctx->panel.prepare_prev_first = true;
 
-	ret = drm_panel_of_backlight(&ctx->panel);
-	if (ret)
-		return ret;
-
+	/*
+	 * The backlight is deliberately NOT attached to the panel (no drm_panel_of_backlight):
+	 * the DT phandle from the panel node keeps pwm-backlight probing in the OFF state, and
+	 * userspace alone controls it via /sys/class/backlight. Attaching it here would make
+	 * the DRM core light the backlight at the first modeset, before any image is painted.
+	 */
 	drm_panel_add(&ctx->panel);
 
 	ret = mipi_dsi_attach(dsi);
