@@ -64,4 +64,4 @@ Working on hardware. There is no standalone GPIO status row, but every periphera
 
 ## Source
 
-`../modules/artosyn_gpio.c`; the DT nodes in `../dts/proxima-9311.dts` (the `gpio@a10a000` node plus the panel hogs and `reset-gpios`/`enable-gpios`); cross-refs `../modules/BOARD-CONFIG.md`, `display-backlight.md`, `sd-card.md`, `artosyn-sdio.md`.
+`../modules/artosyn_gpio.c`; the DT nodes in `../devices/betafpv-vr04-goggle/proxima-9311.dts` (the `gpio@a10a000` node plus the panel hogs and `reset-gpios`/`enable-gpios`); cross-refs `../modules/BOARD-CONFIG.md`, `display-backlight.md`, `sd-card.md`, `artosyn-sdio.md`.

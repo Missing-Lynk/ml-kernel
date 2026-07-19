@@ -13,11 +13,11 @@ microSD card <- SD 4-bit -> mmc@1c00000 (mmc1, DesignWare MMC host, IRQ GIC_SPI 
 
 The card runs on the stock `dw_mmc` core; the glue is a `dw_mci_drv_data` hook in the exact shape of mainline's own `dw_mmc-<soc>.c` glues. Throughput sits at the SD-High-Speed bus ceiling and matches stock; reads, writes, and in-kernel exFAT under a DVR-style workload are all validated.
 
-The bring-up scaffolding is graduated: the mmc nodes live in `../dts/proxima-9311.dts` (the `ar_dtbo_sdio` runtime overlay is retired), the vqmmc rail is held by the DTS `panel_power_hog` (a shared rail, see Power below), and card-detect is native CDETECT (no `broken-cd` poll).
+The bring-up scaffolding is graduated: the mmc nodes live in `../devices/betafpv-vr04-goggle/proxima-9311.dts` (the `ar_dtbo_sdio` runtime overlay is retired), the vqmmc rail is held by the DTS `panel_power_hog` (a shared rail, see Power below), and card-detect is native CDETECT (no `broken-cd` poll).
 
 ## Host node: `mmc@1c00000` (mmc1) [confirmed]
 
-The SD node lives in `../dts/proxima-9311.dts` (`mmc@1c00000`; graduated from the retired `ar_dtbo_sdio` runtime overlay). Node properties:
+The SD node lives in `../devices/betafpv-vr04-goggle/proxima-9311.dts` (`mmc@1c00000`; graduated from the retired `ar_dtbo_sdio` runtime overlay). Node properties:
 
 - `compatible = "dwmmc1", "artosyn,proxima-dw-mshc"`, `reg = <0 0x1c00000 0 0x1000>`, `interrupts = <0 49 4>` (GIC_SPI 49 = hwirq 81, vendor `0x31`).
 - Same DesignWare IP as the RF host `mmc@1b00000`, different instance and clock registers. Flags differ from the RF node: `no-mmc` + `no-sdio` (so the core enumerates an inserted SD card, not an SDIO function), no `cap-sdio-irq`, no `broken-cd` (native card-detect, see below).
@@ -58,4 +58,4 @@ exFAT is built in (`../configs/exfat.config`, `CONFIG_EXFAT_FS=y`); a DVR-style 
 
 ## Source
 
-Module sources `../modules/dw_mci-artosyn.c` (glue), `../dts/proxima-9311.dts` (the `mmc@1c00000` node), `../modules/artosyn_mmc.c` (diagnostic); the validation method `../modules/VERIFICATION.md`; the peripheral map `../PERIPHERALS.md` and board config `../modules/BOARD-CONFIG.md`.
+Module sources `../modules/dw_mci-artosyn.c` (glue), `../devices/betafpv-vr04-goggle/proxima-9311.dts` (the `mmc@1c00000` node), `../modules/artosyn_mmc.c` (diagnostic); the validation method `../modules/VERIFICATION.md`; the peripheral map `../PERIPHERALS.md` and board config `../modules/BOARD-CONFIG.md`.

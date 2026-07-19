@@ -10,8 +10,9 @@
 #
 # Override BUILD_DIR=/path to relocate the (large) build tree. Default lives outside
 # the repo so it never pollutes git. FAST=1 reuses the tree for an incremental make
-# (dev loop; NOT reproducible - clean-build before flashing a slot). BOARDS="name ..."
-# restricts which board DTBs to build (dts basenames from dts/; default: all).
+# (dev loop; NOT reproducible - clean-build before flashing a slot). BOARD=<name> selects
+# the device (devices/<name>/: its DTS + config-fragment list); default betafpv-vr04-goggle,
+# so a bare build.sh is the goggle exactly as before.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,6 +33,7 @@ set -- "${args[@]+"${args[@]}"}"
 
 BUILD_DIR="${BUILD_DIR:-$KERNEL_BUILD_DEFAULT}"
 JOBS="${JOBS:-$(nproc)}"
+BOARD="${BOARD:-betafpv-vr04-goggle}"   # device to build (devices/<name>/); see header
 
 # Everything except the final Image sha256 goes to stderr, so `verify` can capture
 # do_build's stdout (the hash line) cleanly.
@@ -118,7 +120,7 @@ do_build(){  # tree-dir
     -e MINIMAL="${MINIMAL:-}" \
     -e NOTRIM="${NOTRIM:-}" \
     -e DEBUGSDIO="${DEBUGSDIO:-}" \
-    -e BOARDS="${BOARDS:-}" \
+    -e BOARD="$BOARD" \
     -e JOBS="$JOBS" \
     -e VERBOSE="$VERBOSE" \
     -e KBUILD_BUILD_TIMESTAMP="$(date -u -d "@$SOURCE_DATE_EPOCH")" \

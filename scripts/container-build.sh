@@ -6,8 +6,12 @@
 #
 # All inputs arrive via the environment that build.sh sets on the `docker run`:
 #   ARCH CROSS_COMPILE JOBS MINIMAL NOTRIM DEBUGSDIO KBUILD_BUILD_USER KBUILD_BUILD_HOST
-#   KBUILD_BUILD_TIMESTAMP SOURCE_DATE_EPOCH VERBOSE
+#   KBUILD_BUILD_TIMESTAMP SOURCE_DATE_EPOCH VERBOSE BOARD
 set -eu
+
+# Which device we are building for: selects devices/$BOARD/ (its DTS + its config-fragment
+# list). Default = the goggle, so a bare `build.sh` is unchanged. build.sh passes this through.
+BOARD="${BOARD:-betafpv-vr04-goggle}"
 
 # build_step <label> <cmd...>: quiet by default (log to a temp file, print "label OK" or the
 # last 60 lines on failure); VERBOSE=1 streams the command's output live instead.
@@ -74,8 +78,10 @@ fi
 
 # Merge our config fragments onto defconfig, IN ORDER (MINIMAL=1 skips this -> pure defconfig).
 # Order matters: start from the platform config, then trim.config disables a lot to shrink the
-# Image, then the later fragments re-enable the specific drivers we need - because they merge
-# after trim, they override its disables.
+# Image, then the per-board fragments re-enable the specific drivers that board needs - because
+# they merge after trim, they override its disables. The per-board list lives in
+# devices/$BOARD/fragments (kernel config stays in kernel land); the fragment FILES stay shared
+# in configs/. Universal base (artosyn + trim) is applied here; DEBUGSDIO is appended last.
 if [ -z "$MINIMAL" ] && [ -f /repo/configs/artosyn.config ]; then
   # Platform base: Artosyn Proxima SoC support (UART, USB gadget, SD, SPI-NAND, binder, ...).
   frags=/repo/configs/artosyn.config
@@ -85,45 +91,20 @@ if [ -z "$MINIMAL" ] && [ -f /repo/configs/artosyn.config ]; then
   # Skip the trimming with NOTRIM=1.
   [ -z "$NOTRIM" ] && [ -f /repo/configs/trim.config ] && frags="$frags /repo/configs/trim.config"
 
-  # Re-enable what the out-of-tree media (MPP) + RF modules need but trim turned off: the
-  # framebuffer, MMC/SDIO, and IKCONFIG. Merged after trim so these win. See
-  # modules/KERNEL-REQUIREMENTS.md.
-  [ -f /repo/configs/modules.config ] && frags="$frags /repo/configs/modules.config"
-
-  # Buttons: IIO + adc-keys + evdev; after trim to win over its input/IIO disables.
-  # See configs/input.config + docs/artosyn-adc.md.
-  [ -f /repo/configs/input.config ] && frags="$frags /repo/configs/input.config"
-
-  # Status LED: DesignWare SPI master + spidev. See configs/spi.config + docs/status-led.md.
-  [ -f /repo/configs/spi.config ] && frags="$frags /repo/configs/spi.config"
-
-  # Display: PWM backlight + DRM/KMS (VO + dw-mipi-dsi + panel, as modules). See configs/display.config.
-  [ -f /repo/configs/display.config ] && frags="$frags /repo/configs/display.config"
-
-  # Open V4L2 codec (Goal B): re-enables MEDIA_SUPPORT (trim disables it) + builds the
-  # Chips&Media wave5 driver as a module. Merged after trim so it wins. See configs/codec.config.
-  [ -f /repo/configs/codec.config ] && frags="$frags /repo/configs/codec.config"
-
-  # SD-card exFAT, built in (=y: it selects bool-only BUFFER_HEAD, so no module option).
-  # See configs/exfat.config.
-  [ -f /repo/configs/exfat.config ] && frags="$frags /repo/configs/exfat.config"
-
-  # MTP over USB (FunctionFS f_fs) for the DVR-recordings gadget. Merged after trim
-  # (which disables f_fs) so it wins. See configs/usb-mtp.config.
-  [ -f /repo/configs/usb-mtp.config ] && frags="$frags /repo/configs/usb-mtp.config"
-
-  # DesignWare AXI DMA (dw-axi-dmac, =y): the phys-to-phys copy engine for the
-  # GStreamer two-tile compositor. See configs/dma.config + the axidma@8800000
-  # DT node.
-  [ -f /repo/configs/dma.config ] && frags="$frags /repo/configs/dma.config"
-
-  # cpufreq/DVFS: cpufreq-dt + governors for the CGU CPU clock; default
-  # governor performance = vendor parity. See configs/cpufreq.config.
-  [ -f /repo/configs/cpufreq.config ] && frags="$frags /repo/configs/cpufreq.config"
-
-  # I2C (DesignWare i2c0) + the board's DS1307 RTC, the vendor's actual RTC path.
-  # See configs/i2c-rtc.config.
-  [ -f /repo/configs/i2c-rtc.config ] && frags="$frags /repo/configs/i2c-rtc.config"
+  # Per-board re-enables: devices/$BOARD/fragments lists fragment basenames, one per line, in
+  # order (inline '# ...' comments and blank lines ignored). Each resolves to configs/<name>.config.
+  bfrags="/repo/devices/$BOARD/fragments"
+  if [ -f "$bfrags" ]; then
+    while read -r name _rest; do
+      case "$name" in ''|\#*) continue ;; esac
+      f="/repo/configs/$name.config"
+      [ -f "$f" ] || { echo "board $BOARD: fragments lists '$name' but configs/$name.config is missing" >&2; exit 1; }
+      frags="$frags $f"
+    done < "$bfrags"
+  else
+    echo "board $BOARD: no devices/$BOARD/fragments (device dir missing?)" >&2
+    exit 1
+  fi
 
   # Throwaway SDIO/MMC diagnostic fragment, opt-in via DEBUGSDIO=1, merged LAST.
   [ -n "$DEBUGSDIO" ] && [ -f /repo/configs/debug-sdio.config ] && frags="$frags /repo/configs/debug-sdio.config"
@@ -136,15 +117,12 @@ fi
 
 build_step "Image+dtbs" make -j"$JOBS" Image dtbs
 
-# Build our out-of-tree Artosyn board DTs standalone (cpp for the dt-bindings includes, then
-# the freshly-built host dtc). One .dtb per board .dts in dts/, output beside Image.
-# The Image is board-neutral; only the DTB differs per board. BOARDS (space-separated dts
-# basenames, no .dts) restricts which boards to build; empty = all.
-for dts in /repo/dts/*.dts; do
+# Build the selected board's DT standalone (cpp for the dt-bindings includes, then the
+# freshly-built host dtc), output beside Image. The board's DTS lives in devices/$BOARD/;
+# its basename sets the .dtb name (e.g. proxima-9311.dts -> proxima-9311.dtb).
+for dts in /repo/devices/"$BOARD"/*.dts; do
+  [ -e "$dts" ] || continue
   name="$(basename "$dts" .dts)"
-  if [ -n "${BOARDS:-}" ]; then
-    printf '%s\n' $BOARDS | grep -qx "$name" || continue
-  fi
   build_step "dtb $name (cpp)" cpp -nostdinc -undef -D__DTS__ -x assembler-with-cpp -I include "$dts" -o "$name.dts.i"
   build_step "dtb $name (dtc)" scripts/dtc/dtc -I dts -O dtb -o "arch/arm64/boot/$name.dtb" "$name.dts.i"
 done

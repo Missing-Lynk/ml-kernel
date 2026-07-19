@@ -39,8 +39,8 @@ To bump the kernel or toolchain, edit `scripts/pin.env` (URL + sha256) only. For
   - `../glue/dev/kdev.sh`: chains build + RAM-boot into one command (see "Build and test pipeline" below).
   - `../glue/flash/flash-kernel-b.sh`: writes a RAM-boot-proven `Image`+dtb to slot B only (see Flash below).
   - `../glue/dev/push.sh`: copy a file/dir to the device's slot-B tmpfs over SSH (no scp/sftp on-device).
-- `configs/`: config fragments merged in order onto `arm64 defconfig` (see Configuration fragments below).
-- `dts/`: the Artosyn `proxima-9311` device tree for mainline.
+- `configs/`: the shared config-fragment **files** merged onto `arm64 defconfig` (see Configuration fragments below). Which fragments a given board merges is listed per-board in `devices/<name>/fragments`, not here.
+- `devices/`: one dir per supported device (e.g. `betafpv-vr04-goggle/`), holding that board's device tree (`*.dts`) and its config-fragment list (`fragments`). `BOARD=<name>` (default `betafpv-vr04-goggle`) selects the dir; the DTS basename sets the `.dtb` name.
 - `overlay/`: complete driver sources we own (no mainline counterpart), copied into the kernel tree at build time. Currently `drivers/clk/clk-ar9311-cgu.c`, `drivers/spi/spi-ar9301.c` (QSPI-NAND controller), and the `drivers/gpu/drm/artosyn/` display driver. See `overlay/README.md`.
 - `patches/`: unified diffs (`*.patch` + `series`) against pinned mainline `6.18.36` files we only tweak, applied with `patch -p1`. Currently the `ar-spin-table` SMP enable-method (`0001`/`0002`), the wave5 codec fixes (`0003`..`0010`), and the page-granular per-device coherent-pool allocator (`0011`, required for the concurrent decode+encode fit). A patch that stops applying on a kernel bump flags an upstream change. See `patches/README.md`.
 - `modules/`: out-of-tree Artosyn kernel modules, built separately by `modules/build.sh`.
@@ -53,25 +53,34 @@ To bump the kernel or toolchain, edit `scripts/pin.env` (URL + sha256) only. For
 
 ## Configuration fragments
 
-`build.sh` merges config fragments in the order below, then runs `make olddefconfig`. Fragments later in the list override earlier ones (so trim disables broadly, then the feature fragments re-enable what we need).
+The merge is a **universal base** followed by a **per-board list**, then `make olddefconfig`. Fragments later in the list override earlier ones (so trim disables broadly, then the feature fragments re-enable what that board needs). The universal base (`defconfig` -> `artosyn.config` -> `trim.config`) is applied by `container-build.sh`; the re-enables after trim come from `devices/$BOARD/fragments` (one fragment basename per line, in order), so the config composition is per-board and lives with the board. `DEBUGSDIO=1` appends `debug-sdio.config` last.
+
+Universal base (every board):
 
 | Order | Fragment | Purpose |
 |---|---|---|
 | 1 | arm64 `defconfig` | upstream baseline |
 | 2 | `configs/artosyn.config` | platform base: UART console, devmem, FUSE/CUSE/binder, USB ECM/RNDIS gadget (dwc2), MTD/UBI/squashfs (rootfs + NAND), dw_mmc (SD), crash-recovery detectors |
 | 3 | `configs/trim.config` | size trim: removes components we do not use (other vendors' SoC/board support, unused subsystems and drivers) so the LZ4-packed Image fits the 6 MiB kernel slot. Skip with `NOTRIM=1` |
-| 4 | `configs/modules.config` | re-enables `CONFIG_FB` (backs the DRM fbdev console), `CONFIG_MMC` (SD + RF SDIO), `CONFIG_IKCONFIG` (self-describing running config) |
-| 5 | `configs/input.config` | IIO core + `adc-keys` + evdev (front-panel buttons), built-in |
-| 6 | `configs/spi.config` | DesignWare SPI master + spidev (status LED), built-in |
-| 7 | `configs/display.config` | PWM core + `pwm-backlight` + fbdev (built-in), plus the DRM/KMS path (`DRM`, `dw-mipi-dsi`, the `DRM_ARTOSYN` driver) built as **modules** to keep the DRM mass out of the Image |
-| 8 | `configs/codec.config` | the open codec: `MEDIA_SUPPORT` + V4L2 M2M + `VIDEO_WAVE_VPU=m` (needs `patches/0003` to lift the arch gate) |
-| 9 | `configs/exfat.config` | exFAT (the SD card / DVR filesystem), built-in |
-| 10 | `configs/dma.config` | the dw-axi DMA engine (built-in; the `ml_dmablit` compositor path) + `DMATEST=m` |
-| 11 | `configs/cpufreq.config` | cpufreq-dt + governors for DVFS on `cgu_cpu_clk` (vendor OPP table in the DT) |
-| 12 | `configs/i2c-rtc.config` | DesignWare I2C + `rtc-ds1307` (external DS1307 @0x68) |
-| 13 | `configs/debug-sdio.config` | `DYNAMIC_DEBUG` + `MMC_DEBUG` for SDIO bring-up diagnostics. Only when `DEBUGSDIO=1`. Throwaway: enlarges the Image, may violate slot-fit |
 
-`MINIMAL=1` skips the fragment merge and produces a pure `arm64 defconfig` kernel.
+Then the board's `devices/<name>/fragments` list. For `betafpv-vr04-goggle` that is, in order:
+
+| Fragment | Purpose |
+|---|---|
+| `configs/modules.config` | re-enables `CONFIG_FB` (backs the DRM fbdev console), `CONFIG_MMC` (SD + RF SDIO), `CONFIG_IKCONFIG` (self-describing running config) |
+| `configs/input.config` | IIO core + `adc-keys` + evdev (front-panel buttons), built-in |
+| `configs/spi.config` | DesignWare SPI master + spidev (status LED), built-in |
+| `configs/display.config` | PWM core + `pwm-backlight` + fbdev (built-in), plus the DRM/KMS path (`DRM`, `dw-mipi-dsi`, the `DRM_ARTOSYN` driver) built as **modules** to keep the DRM mass out of the Image |
+| `configs/codec.config` | the open codec: `MEDIA_SUPPORT` + V4L2 M2M + `VIDEO_WAVE_VPU=m` (needs `patches/0003` to lift the arch gate) |
+| `configs/exfat.config` | exFAT (the SD card / DVR filesystem), built-in |
+| `configs/usb-mtp.config` | MTP over USB (FunctionFS) for the DVR-recordings gadget |
+| `configs/dma.config` | the dw-axi DMA engine (built-in; the `ml_dmablit` compositor path) + `DMATEST=m` |
+| `configs/cpufreq.config` | cpufreq-dt + governors for DVFS on `cgu_cpu_clk` (vendor OPP table in the DT) |
+| `configs/i2c-rtc.config` | DesignWare I2C + `rtc-ds1307` (external DS1307 @0x68) |
+
+Opt-in, appended last: `configs/debug-sdio.config` (`DYNAMIC_DEBUG` + `MMC_DEBUG` for SDIO bring-up diagnostics; only when `DEBUGSDIO=1`; throwaway, enlarges the Image, may violate slot-fit).
+
+`MINIMAL=1` skips the fragment merge entirely and produces a pure `arm64 defconfig` kernel.
 
 ## Built-in vs out-of-tree modules
 

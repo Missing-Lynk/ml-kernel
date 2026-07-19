@@ -68,7 +68,7 @@ The vendor codec is a **Chips&Media WAVE521C** (H.264/H.265 encode+decode) plus 
 | Codec IP identification | DONE | Chips&Media WAVE521C / CODA9, byte-proven from `libmpp_service.so` |
 | Firmware blob extraction (VCPU ucode) | DONE | it's `/usr/bin/chagall.bin` (the codec fw, NOT RF - RF is `bb_demo_gnd_d.img`), 999616 B; the wave5 driver loads it from `/lib/firmware/` |
 | Config fragment (`MEDIA_SUPPORT`+`V4L2_MEM2MEM`+`VIDEO_WAVE_VPU`) | DONE | `configs/codec.config`: media core `=y`, `VIDEO_WAVE_VPU=m` (module, so the Image fits the 6 MiB slot); registered in `container-build.sh` after `trim` |
-| DT node for wave5 (`0x0a080000`+SRAM, SPI 68) | DONE | `dts/proxima-9311.dts`: `video-codec@a080000` (`ti,j721s2-wave521c`) + `mmio-sram@1f0000` |
+| DT node for wave5 (`0x0a080000`+SRAM, SPI 68) | DONE | `devices/betafpv-vr04-goggle/proxima-9311.dts`: `video-codec@a080000` (`ti,j721s2-wave521c`) + `mmio-sram@1f0000` |
 | Dedicated codec memory pool (108 MiB `mmz@29400000`) | DONE | `memory-region` on the codec node + `of_reserved_mem_device_init` in probe, so codec buffers stop fragmenting the 64 MiB CMA (the display shares it) |
 | Artosyn power-on glue (venc power domain + clocks) in `probe()` | DONE | Recovered and validated: CRG `0x0a106000` (gate/PMU) + isolation `0x0a102000`; the sequence lives in `patches/0008` |
 | Reset-path fix (backbone bus-idle `0x3f` for this WAVE521C) | DONE | `wave5-hw.c` overlay; mainline `0x00ff1f3f` hung reset on this silicon |

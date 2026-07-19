@@ -19,7 +19,7 @@ The vendor kernel's own clk driver is minimal: it registers the fixed source PLL
 
 ## The provider [confirmed]
 
-`compatible = "artosyn,ar9311-cgu"`, node `clock-controller@a100000` (DT label `pixclk`, kept for phandle stability), `clocks = <&clk24m>`, `#clock-cells = <1>` (`../dts/proxima-9311.dts`). Three reg windows, each mapped with `devm_ioremap` (non-exclusive, because the ADC and protemp drivers own parts of `0x0A108000`):
+`compatible = "artosyn,ar9311-cgu"`, node `clock-controller@a100000` (DT label `pixclk`, kept for phandle stability), `clocks = <&clk24m>`, `#clock-cells = <1>` (`../devices/betafpv-vr04-goggle/proxima-9311.dts`). Three reg windows, each mapped with `devm_ioremap` (non-exclusive, because the ADC and protemp drivers own parts of `0x0A108000`):
 
 | Bank | Base | Size | Holds |
 |------|------|------|-------|
@@ -60,4 +60,4 @@ The pixel leaf itself is a mux+gate registered with `clk_mux_ro_ops` (read-only)
 
 ## Source
 
-`../overlay/drivers/clk/clk-ar9311-cgu.c` (the whole tree, CPU and pixel write paths), the DT node in `../dts/proxima-9311.dts`. The register map was recovered from the vendor `libmpp_service.so`.
+`../overlay/drivers/clk/clk-ar9311-cgu.c` (the whole tree, CPU and pixel write paths), the DT node in `../devices/betafpv-vr04-goggle/proxima-9311.dts`. The register map was recovered from the vendor `libmpp_service.so`.

@@ -4,7 +4,7 @@ How the addressable status LED is driven, recovered so the open kernel can repro
 
 ## Summary
 
-The SPI master is a DesignWare APB SSI (`snps,dw-apb-ssi`) at MMIO `0x1102000` - mainline `dw_spi_mmio` binds it, no custom driver needed, only a DT node and a `spidev` child (see `dts/proxima-9311.dts`). This is a fixed property of the SoC's SPI block, the same on every Proxima-9311 device.
+The SPI master is a DesignWare APB SSI (`snps,dw-apb-ssi`) at MMIO `0x1102000` - mainline `dw_spi_mmio` binds it, no custom driver needed, only a DT node and a `spidev` child (see `devices/betafpv-vr04-goggle/proxima-9311.dts`). This is a fixed property of the SoC's SPI block, the same on every Proxima-9311 device.
 
 The vendor drives the LED entirely from userspace: `ar_lowdelay` opens the spidev, configures mode / 8 bits per word / 6.25 MHz, then a worker thread sends ~72-byte SPI frames with `SPI_IOC_MESSAGE` and does the blink in software - there is no in-kernel LED driver on the vendor side either, so the open stack's equivalent (`test_tools/led_test.c`) is also a userspace program, not a kernel module.
 
@@ -90,7 +90,7 @@ This is a passive cross-check of the frame decode too: the observed idle colour 
 
 ## Implications for the open kernel
 
-The LED needs an SPI path, not a GPIO or PWM path. This is done for this device (see `dts/proxima-9311.dts` and `test_tools/led_test.c`):
+The LED needs an SPI path, not a GPIO or PWM path. This is done for this device (see `devices/betafpv-vr04-goggle/proxima-9311.dts` and `test_tools/led_test.c`):
 
 1. Enable the DesignWare SPI master + spidev: `CONFIG_SPI=y`, `CONFIG_SPI_DW`, `CONFIG_SPI_DW_MMIO`, `CONFIG_SPI_SPIDEV`.
 2. A `spi@1102000` controller node (`snps,dw-apb-ssi`, IRQ GIC 71, its clock) with a `spidev` child at CS0, so `/dev/spidevB.0` appears.

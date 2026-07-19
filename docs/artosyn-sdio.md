@@ -21,7 +21,7 @@ The AR8030 enumerates in two identities: **`4152:8030`** = ROM loader (needs fir
 
 ## Host node: `mmc@1b00000` (mmc0) [confirmed]
 
-The mmc nodes live in `../dts/proxima-9311.dts` (`mmc@1b00000` + `mmc@1c00000`, graduated from the retired `ar_dtbo_sdio` runtime overlay). Node properties:
+The mmc nodes live in `../devices/betafpv-vr04-goggle/proxima-9311.dts` (`mmc@1b00000` + `mmc@1c00000`, graduated from the retired `ar_dtbo_sdio` runtime overlay). Node properties:
 
 - `compatible = "dwmmc0", "artosyn,proxima-dw-mshc"`, `reg = <0 0x1b00000 0 0x1000>`, `interrupts = <0 48 4>` (GIC_SPI 48 = hwirq 80, vendor `0x30`).
 - `clock-frequency = <100000000>`, `clock-freq-min-max = <400000 100000000>`, `bus-width = <4>`, `num-slots = <1>`, `card-detect-delay = <200>`.
@@ -65,4 +65,4 @@ Two operational facts worth carrying: **do not warm-reload `artosyn_sdio`** (`rm
 
 ## Source
 
-Module sources `../modules/artosyn_sdio.c`, `../modules/dw_mci-artosyn.c`, `../modules/artosyn_gpio.c`; the DT nodes `../dts/proxima-9311.dts`; the validation method `../modules/VERIFICATION.md`; the peripheral map `../PERIPHERALS.md` and board config `../modules/BOARD-CONFIG.md`. RF protocol above the driver: `../../docs/reference/rf-video-downlink.md`.
+Module sources `../modules/artosyn_sdio.c`, `../modules/dw_mci-artosyn.c`, `../modules/artosyn_gpio.c`; the DT nodes `../devices/betafpv-vr04-goggle/proxima-9311.dts`; the validation method `../modules/VERIFICATION.md`; the peripheral map `../PERIPHERALS.md` and board config `../modules/BOARD-CONFIG.md`. RF protocol above the driver: `../../docs/reference/rf-video-downlink.md`.

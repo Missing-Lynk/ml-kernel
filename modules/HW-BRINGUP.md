@@ -105,7 +105,7 @@ blocker (a gpio register off-by-one, `artosyn_gpio.c` `AR_BANK_REG_BASE` 0xC0 ->
 > both: the bring-up overlay source `mmc-sdio-overlay.dts`). The
 > overlay remains the reflash-free
 > delivery path; the permanent home for the `mmc@1b00000`/`mmc@1c00000` nodes is
-> `dts/proxima-9311.dts`, to be batched with the pending codec/watchdog DT work.
+> `devices/betafpv-vr04-goggle/proxima-9311.dts`, to be batched with the pending codec/watchdog DT work.
 
 ### Reproducible bring-up recipe (open 6.18 kernel; modules in `/run/ml`; `gpio_pulse` from `../test_tools/`)
 ```

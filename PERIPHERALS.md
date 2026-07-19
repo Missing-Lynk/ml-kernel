@@ -27,6 +27,6 @@ Which hardware blocks on the Proxima-9311 SoC + AR8030 RF chip work with mainlin
 
 ## Reading this table alongside the code
 
-- "Custom" modules live in `modules/*.c` (built out-of-tree, loaded from the rootfs) except the display stack, which is baked in via `overlay/drivers/gpu/drm/artosyn/` and `dts/proxima-9311.dts` (see `README.md` "Built-in vs out-of-tree modules").
+- "Custom" modules live in `modules/*.c` (built out-of-tree, loaded from the rootfs) except the display stack, which is baked in via `overlay/drivers/gpu/drm/artosyn/` and `devices/betafpv-vr04-goggle/proxima-9311.dts` (see `README.md` "Built-in vs out-of-tree modules").
 - "Stock" pieces are enabled purely through `configs/*.config` fragments (e.g. `spi.config`, `input.config`, `display.config`) - no source was written for them, only Kconfig symbols + DT nodes.
 - The one recurring lesson across every custom driver: register maps recovered from disassembly must be confirmed bit-for-bit against a live vendor system (slot A) before trusting them - two of the hardest bugs found this way (`artosyn_gpio`'s bank-register off-by-one, and a clock-block register that should never have been touched) were single-register mistakes that looked plausible but silently broke a downstream peripheral.

@@ -13,7 +13,7 @@ The buzzer and the LCD backlight are the two consumers of the `artosyn_pwm` driv
 
 ## The buzzer channel [confirmed]
 
-DT node `pwm@1002000` (vendor `pwm@08040000`, reg `0x1002000`), `compatible = "artosyn,ar9301-pwm"`, 8 channels, functional clock `host_ref` 150 MHz (`../dts/proxima-9311.dts`). The buzzer is channel 0. The per-channel register model (OFF/CTRL/ON counts, the enable mask, the `count = round(time_ns * clk / 1e9)` math) is the shared `artosyn_pwm` map in `display-backlight.md`.
+DT node `pwm@1002000` (vendor `pwm@08040000`, reg `0x1002000`), `compatible = "artosyn,ar9301-pwm"`, 8 channels, functional clock `host_ref` 150 MHz (`../devices/betafpv-vr04-goggle/proxima-9311.dts`). The buzzer is channel 0. The per-channel register model (OFF/CTRL/ON counts, the enable mask, the `count = round(time_ns * clk / 1e9)` math) is the shared `artosyn_pwm` map in `display-backlight.md`.
 
 ### Tone and volume [confirmed]
 
@@ -40,4 +40,4 @@ Working on hardware: `pwmchip1/pwm0` enumerates, `apply`/`get_state` round-trip 
 
 ## Source
 
-`../modules/artosyn_pwm.c` (the shared provider; register map in `display-backlight.md`), the `pwm@1002000` node in `../dts/proxima-9311.dts`, `../test_tools/buzzer_test.c`.
+`../modules/artosyn_pwm.c` (the shared provider; register map in `display-backlight.md`), the `pwm@1002000` node in `../devices/betafpv-vr04-goggle/proxima-9311.dts`, `../test_tools/buzzer_test.c`.

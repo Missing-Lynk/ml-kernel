@@ -1,0 +1,20 @@
+# fragments - the config fragments merged for this board, in order, AFTER the universal
+# base (configs/artosyn.config then configs/trim.config, applied by container-build.sh).
+# One fragment basename per line (resolves to configs/<name>.config); '#' comments, blanks
+# ignored. Order matters: every fragment here merges after trim.config, so it re-enables
+# what trim turned off. This list is the per-board config composition (kernel config stays
+# in kernel land); the DEVICE/BOARD selector picks the board dir, nothing else changes.
+#
+# BetaFPV VR04 goggle (P1_GND): display + keypad + status LED + codec + SD/exFAT + MTP + the
+# shared DMA/cpufreq/i2c-rtc. (The air unit's list drops display/input/spi and adds camera.)
+
+modules      # re-enable fb + MMC/SDIO + IKCONFIG that trim turned off (MPP/RF modules need them)
+input        # IIO + adc-keys + evdev for the front-panel button ladder
+spi          # DesignWare SPI master + spidev for the status LED
+display      # PWM backlight + DRM/KMS (VO + dw-mipi-dsi + panel), as modules
+codec        # open V4L2 wave5 codec (re-enables MEDIA_SUPPORT), as a module
+exfat        # SD-card exFAT, built in
+usb-mtp      # MTP over USB (FunctionFS) for the DVR-recordings gadget
+dma          # DesignWare AXI DMA (dw-axi-dmac) for the GStreamer two-tile compositor
+cpufreq      # cpufreq-dt + governors for the CGU CPU clock (performance = vendor parity)
+i2c-rtc      # DesignWare i2c0 + the board's DS1307 RTC

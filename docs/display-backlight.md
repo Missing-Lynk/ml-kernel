@@ -52,7 +52,7 @@ count = `round(time_ns * clk_rate / 1e9)`; period = OFF+ON. Open driver: `module
 
 ### Panel orientation (180 flip) [confirmed]
 
-The panel comes up rotated 180 unless two power-on straps are driven low: **gpio 42** (horizontal/source scan) and **gpio 107** (vertical/gate scan), sampled when panel-power (gpio 100) rises. It is not a DCS command or a DC register, and the DC does not rotate (stock's scanout path is pure identity). Stock drives both straps low; the open kernel left them floating, so both axes came up reversed = the full 180. Fix: two `output-low` gpio-hogs (`panel-scan-h-hog` gpio 42, `panel-scan-v-hog` gpio 107) placed before `panel-power-hog` in `dts/proxima-9311.dts`. Proven on hardware.
+The panel comes up rotated 180 unless two power-on straps are driven low: **gpio 42** (horizontal/source scan) and **gpio 107** (vertical/gate scan), sampled when panel-power (gpio 100) rises. It is not a DCS command or a DC register, and the DC does not rotate (stock's scanout path is pure identity). Stock drives both straps low; the open kernel left them floating, so both axes came up reversed = the full 180. Fix: two `output-low` gpio-hogs (`panel-scan-h-hog` gpio 42, `panel-scan-v-hog` gpio 107) placed before `panel-power-hog` in `devices/betafpv-vr04-goggle/proxima-9311.dts`. Proven on hardware.
 
 ## DSI host = DesignWare [confirmed]
 
