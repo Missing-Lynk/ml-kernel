@@ -934,6 +934,55 @@ static int ar_vo_probe(struct platform_device *pdev)
 	return 0;
 }
 
+/*
+ * Pixel-clock trim. The fixed VO timings scan an effective 2091 x 1144 total, so the stock
+ * 148.5 MHz pixel clock refreshes at 62.08 Hz, ~1.8 Hz above the ~60.3 Hz RF source; each
+ * beat period the display repeats a frame (measured 135 repeats/min). The vendor trims the
+ * pixel PLL at runtime for this (libmpp display_fre_adjust_proc); this attribute is the
+ * open equivalent: writing a rate in Hz calls clk_set_rate on the pixel leaf (the CGU
+ * driver propagates it into the PLL feedback word), reading returns the live rate.
+ * Userspace slaves the panel period to the measured source period. 141.1-155 MHz spans
+ * 59.0-64.8 Hz at these timings; the low bound matches the CGU's own +/-5 % clamp (a
+ * lower request would silently land at 141.075 MHz), the DSI link and panel stay in range.
+ */
+static ssize_t pclk_hz_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct ar_vo *vo = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%lu\n", clk_get_rate(vo->pclk));
+}
+
+static ssize_t pclk_hz_store(struct device *dev, struct device_attribute *attr,
+			     const char *buf, size_t len)
+{
+	struct ar_vo *vo = dev_get_drvdata(dev);
+	unsigned long hz;
+	int ret;
+
+	if (!vo->pclk)
+		return -ENODEV;
+
+	ret = kstrtoul(buf, 0, &hz);
+	if (ret)
+		return ret;
+
+	if (hz < 141100000 || hz > 155000000)
+		return -ERANGE;
+
+	ret = clk_set_rate(vo->pclk, hz);
+	if (ret)
+		return ret;
+
+	return len;
+}
+static DEVICE_ATTR_RW(pclk_hz);
+
+static struct attribute *ar_vo_attrs[] = {
+	&dev_attr_pclk_hz.attr,
+	NULL
+};
+ATTRIBUTE_GROUPS(ar_vo);
+
 static void ar_vo_remove(struct platform_device *pdev)
 {
 	struct ar_vo *vo = platform_get_drvdata(pdev);
@@ -955,6 +1004,7 @@ static struct platform_driver ar_vo_driver = {
 	.driver = {
 		.name		= "artosyn-vo",
 		.of_match_table	= ar_vo_match,
+		.dev_groups	= ar_vo_groups,
 	},
 };
 module_platform_driver(ar_vo_driver);
