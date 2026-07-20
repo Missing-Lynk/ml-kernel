@@ -1,0 +1,17 @@
+# fragments - config fragments for the air unit (P1_SKY), merged after the universal base
+# (configs/artosyn.config then configs/trim.config). One basename per line, in order; each
+# resolves to configs/<name>.config. See kernel/README.md "Configuration fragments".
+#
+# Air unit (TX: camera -> encode -> RF): the shared SoC + codec + storage + DMA + clocks + RTC,
+# MINUS the goggle's display/keypad/LED (no panel, no button ladder, no status LED confirmed).
+# NOTE: no camera fragment yet - the MIPI-CSI/VIF/ISP + NT99235 drivers are greenfield
+# (plans/air-unit-open-stack.md); the DTS carries the capture nodes but nothing binds them until
+# those drivers land, at which point a configs/camera.config gets added here.
+
+modules      # re-enable MMC/SDIO (SD + RF) + IKCONFIG that trim turned off (FB is unused here)
+codec        # open V4L2 wave5 codec - the encoder is the air unit's whole point
+exfat        # SD-card exFAT (onboard DVR)
+usb-mtp      # MTP over USB (FunctionFS) for pulling DVR recordings
+dma          # DesignWare AXI DMA (dw-axi-dmac)
+cpufreq      # cpufreq-dt + governors for the CGU CPU clock
+i2c-rtc      # DesignWare i2c - also the bus the NT99235 sensor sits on (i2c0 @ 0x1a)
