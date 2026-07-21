@@ -85,7 +85,13 @@ static struct mmz_zone *zone_find_by_name(const char *name)
 	struct mmz_zone *z;
 
 	if (!name || !name[0]) {
-		/* empty name => the anonymous (first) zone */
+		/* empty name => the anonymous zone (independent of creation
+		 * order; falls back to the first zone if none is named so)
+		 */
+		list_for_each_entry(z, &g_zone_list, node)
+			if (!strncmp(z->name, "anonymous", MMZ_NAME_LEN))
+				return z;
+
 		return list_first_entry_or_null(&g_zone_list, struct mmz_zone, node);
 	}
 	list_for_each_entry(z, &g_zone_list, node)
