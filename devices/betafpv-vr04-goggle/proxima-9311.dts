@@ -135,7 +135,7 @@
 
 	/* 256 MiB DRAM, the vendor memory map (0x20000000..0x30000000). The memory
 	 * map is declared exactly once, here: kernel RAM is bounded by the no-map
-	 * mmz carveout below (RAM above 0x29400000 is the carveout, ending exactly
+	 * mmz carveout below (RAM above 0x29200000 is the carveout, ending exactly
 	 * at the top of DRAM), so no mem= cmdline cap is needed. */
 	memory@20000000 {
 		device_type = "memory";
@@ -147,9 +147,13 @@
 		#size-cells = <2>;
 		ranges;
 
-		/* MMZ media pool (vendor: ar_osal mmz=anonymous,0,0x29400000,0x06c00000),
-		 * 108 MiB from 0x29400000 to the top of DRAM (0x30000000); kernel-usable
-		 * RAM ends where the carveout starts (no mem= cap needed). When the
+		/* MMZ media pool, 110 MiB from 0x29200000 to the top of DRAM (0x30000000);
+		 * kernel-usable RAM ends where the carveout starts (no mem= cap needed).
+		 * This node is the single declaration of the carveout: ar_osal and the
+		 * wave5/ml_mmzheap coherent pool all derive their geometry from it.
+		 * 2 MiB larger than the vendor's 108 MiB region: 1080p60 HEVC encode
+		 * concurrent with the live decode needs ~143 KiB more than 108 MiB (the
+		 * encoder FBC offset-table alloc ENOMEMs at register_frame_buffer). When the
 		 * vendor MPP stack runs, the reimplemented MMZ driver manages it directly. The
 		 * wave5 codec claims it as its dma-coherent pool via the `memory-region`
 		 * phandle on video-codec@a080000 + of_reserved_mem_device_init in probe, so
@@ -157,9 +161,9 @@
 		 * (which fragments and fails the ~4.8 MiB vb_task alloc). `no-map`: the region
 		 * is outside the kernel linear map, so it is a coherent (uncached) carveout,
 		 * not a reusable CMA (CMA needs struct pages). */
-		mmz_pool: mmz@29400000 {
+		mmz_pool: mmz@29200000 {
 			compatible = "shared-dma-pool";
-			reg = <0 0x29400000 0 0x06c00000>;
+			reg = <0 0x29200000 0 0x06e00000>;
 			no-map;
 		};
 	};
@@ -468,7 +472,7 @@
 			reg = <0 0x0a080000 0 0x10000>;	/* Wave5 host IF, 64 KiB */
 			interrupts = <GIC_SPI 68 IRQ_TYPE_LEVEL_HIGH>;	/* h26x GIC 100 */
 			sram = <&vpu_sram>;
-			/* Allocate codec DPB/display/task buffers from the dedicated 108 MiB
+			/* Allocate codec DPB/display/task buffers from the dedicated MMZ
 			 * media pool instead of the display-fragmented global CMA. Wired up by
 			 * of_reserved_mem_device_init() in the wave5 probe overlay. */
 			memory-region = <&mmz_pool>;

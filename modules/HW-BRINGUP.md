@@ -21,13 +21,14 @@ before loading the next. Each module exposes an oracle (`/proc`, `/dev`, dmesg).
 
 ## Phase 1 - ar_osal (the keystone; everything allocates here)
 ```
-insmod ar_osal.ko mmz=anonymous,0,0x29400000,0x06c00000:sram,0,0x00100000,0x00100000 mmz_allocator=hisi anony=1
+insmod ar_osal.ko mmz=sram,0,0x00100000,0x00100000 mmz_allocator=hisi anony=1
 ```
+The anonymous zone derives from the DTB's reserved-memory mmz node; `mmz=` only adds the on-chip sram zone (an explicit `mmz=anonymous,...` tuple overrides the DTB for bench work).
 Check:
-- `dmesg` shows `MMZ new zone <anonymous> PHYS(0x29400000,+0x6c00000)` and `<sram>`. **No `memremap ... failed`** - if it failed, the no-map reserved region isn't mappable WC; that's the #1 thing to confirm on HW (the whole design assumes `memremap(MEMREMAP_WC)` works on the `mmz@29400000` no-map carveout).
+- `dmesg` shows `MMZ new zone <anonymous>` with the DTS carveout geometry and `<sram>`. **No `memremap ... failed`** - if it failed, the no-map reserved region isn't mappable WC; that's the #1 thing to confirm on HW (the whole design assumes `memremap(MEMREMAP_WC)` works on the no-map carveout).
 - `ls -l /dev/mmz_userdev` exists (misc, major 10).
 - `cat /proc/media-mem` lists both zones, used=0.
-- Smoke test alloc/mmap from userspace (write a tiny C tool, or reuse `libhal_sys`): open `/dev/mmz_userdev`, `IOC_MMB_ALLOC` a 1 MiB block -> returns a phys in 0x294xxxxx; `mmap(offset=phys)` -> non-NULL; write+read back a pattern (WC: reads must see writes after a barrier); `IOC_MMB_FREE`. Re-check `/proc/media-mem` returns to used=0 (no leak).
+- Smoke test alloc/mmap from userspace (write a tiny C tool, or reuse `libhal_sys`): open `/dev/mmz_userdev`, `IOC_MMB_ALLOC` a 1 MiB block -> returns a phys inside the mmz reserved-memory carveout; `mmap(offset=phys)` -> non-NULL; write+read back a pattern (WC: reads must see writes after a barrier); `IOC_MMB_FREE`. Re-check `/proc/media-mem` returns to used=0 (no leak).
 - **Cache-coherency reality check** (the documented risk): allocate a block, have an engine (later phases) DMA into it, confirm the CPU sees correct data via the WC mapping. If frames are corrupt, the WC assumption is wrong and we need the cached path (kernel patch exporting `arch_sync_dma_for_*`).
 
 ## Phase 2 - ar_vb / ar_sys / ar_sysctl

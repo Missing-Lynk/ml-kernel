@@ -11,7 +11,7 @@
  * names purely for fidelity with the vendor driver.
  *
  * Memory model: each "zone" (struct mmz_zone) owns a fixed physical range carved
- * out of RAM (the DTS reserved-memory mmz@29400000 / sram regions, no-map). The
+ * out of RAM (the DTS reserved-memory mmz@29200000 / sram regions, no-map). The
  * driver sub-allocates "blocks" (struct mmb) from a zone with first-fit. Mappings
  * are write-combine (kernel: memremap MEMREMAP_WC; user: pgprot_writecombine over
  * remap_pfn_range) so the carveout is DMA-coherent with the codec/scaler engines

@@ -11,7 +11,7 @@ of_reserved_mem, keeping the codec working set out of general CMA.
  #include <linux/kernel.h>
  #include <linux/module.h>
  #include <linux/platform_device.h>
-+#include <linux/of_reserved_mem.h>	/* ML: dedicated codec memory pool (mmz@29400000) */
++#include <linux/of_reserved_mem.h>	/* ML: dedicated codec memory pool (the DTS mmz node) */
  #include <linux/clk.h>
  #include <linux/firmware.h>
  #include <linux/interrupt.h>
@@ -49,7 +49,7 @@ of_reserved_mem, keeping the codec working set out of general CMA.
  
 +	/*
 +	 * ML (Artosyn): route all codec DMA (DPB, WTL/display, vb_task) to the dedicated
-+	 * 108 MiB media pool (mmz@29400000, `memory-region` on our DT node) instead of the
++	 * MMZ media pool (`memory-region` on our DT node) instead of the
 +	 * global CMA, which the codec shares with the display and which fragments so the
 +	 * ~4.8 MiB vb_task alloc fails (-ENOMEM). Non-fatal if absent: without a memory-region
 +	 * this is a no-op and the driver falls back to the default CMA (upstream behaviour).

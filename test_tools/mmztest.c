@@ -22,11 +22,64 @@
 
 #define MB(x) ((unsigned long)(x) << 20)
 
+/*
+ * Read the anonymous-zone bounds from the DTB's reserved-memory mmz node
+ * (reg = <hi lo hi lo>, big-endian), the same node ar_osal derives the zone
+ * from. Returns 0 and leaves base/end untouched if no node is found; the
+ * range check is then skipped rather than judged against a stale constant.
+ */
+static int mmz_zone_from_dt(unsigned long long *base, unsigned long long *end)
+{
+	char path[128];
+	unsigned char reg[16];
+	FILE *fp;
+	unsigned long long b = 0, s = 0;
+	int i;
+
+	fp = popen("ls -d /proc/device-tree/reserved-memory/mmz@*/reg 2>/dev/null",
+		   "r");
+	if (!fp)
+		return 0;
+
+	if (!fgets(path, sizeof(path), fp)) {
+		pclose(fp);
+		return 0;
+	}
+
+	pclose(fp);
+	path[strcspn(path, "\n")] = '\0';
+
+	fp = fopen(path, "rb");
+	if (!fp)
+		return 0;
+
+	if (fread(reg, 1, sizeof(reg), fp) != sizeof(reg)) {
+		fclose(fp);
+		return 0;
+	}
+
+	fclose(fp);
+
+	for (i = 0; i < 8; i++)
+		b = (b << 8) | reg[i];
+
+	for (i = 8; i < 16; i++)
+		s = (s << 8) | reg[i];
+
+	if (!s)
+		return 0;
+
+	*base = b;
+	*end = b + s;
+	return 1;
+}
+
 static int test_mmz(void)
 {
 	struct mmb_info mi;
 	int fd, rc, fail = 0;
 	void *p;
+	unsigned long long zbase = 0, zend = 0;
 	const unsigned long sz = MB(1);
 
 	fd = open("/dev/mmz_userdev", O_RDWR);
@@ -49,9 +102,14 @@ static int test_mmz(void)
 
 	printf("alloc: phys=0x%llx size=0x%llx\n",
 	       (unsigned long long)mi.phys_addr, (unsigned long long)mi.size);
-	if (mi.phys_addr < 0x29400000ULL || mi.phys_addr >= 0x30000000ULL) {
-		printf("  WARN: phys outside the anonymous zone\n");
-		fail++;
+	if (mmz_zone_from_dt(&zbase, &zend)) {
+		if (mi.phys_addr < zbase || mi.phys_addr >= zend) {
+			printf("  WARN: phys outside the anonymous zone [0x%llx, 0x%llx)\n",
+			       zbase, zend);
+			fail++;
+		}
+	} else {
+		printf("  (no reserved-memory mmz node; zone range not checked)\n");
 	}
 
 	/* mmap at offset = phys, write/read a pattern (WC: barrier via volatile) */

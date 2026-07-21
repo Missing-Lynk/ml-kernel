@@ -3,7 +3,7 @@
  * ml_mmzheap.ko - dma-heap "mmz" (/dev/dma_heap/mmz) over the shared MMZ
  * carveout.
  *
- * The platform device binds the mmz@29400000 reserved-memory pool via its
+ * The platform device binds the mmz@29200000 reserved-memory pool via its
  * memory-region phandle, which assigns it the pool's per-device coherent
  * allocator (kernel/dma/coherent.c). rmem_dma_device_init caches one
  * dma_coherent_mem per reserved-memory node, so this device and the wave5

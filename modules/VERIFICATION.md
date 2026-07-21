@@ -89,7 +89,7 @@ module: `insmod` (serial up) -> no panic -> `/dev` node present -> `/proc` oracl
 
 | module | /dev | /proc or sysfs oracle | Tier-0 pass criterion |
 |---|---|---|---|
-| ar_osal | `/dev/mmz_userdev` | `/proc/media-mem` | zone(s) listed at `0x29400000`, used=0; **no `memremap … failed` in dmesg** (the open question - WC map of the nomap carveout); `mmztest` MMZ test passes (alloc in-zone, mmap, 1 MiB write/read-back matches, free, no leak) |
+| ar_osal | `/dev/mmz_userdev` | `/proc/media-mem` | zone(s) listed at `0x29200000`, used=0; **no `memremap … failed` in dmesg** (the open question - WC map of the nomap carveout); `mmztest` MMZ test passes (alloc in-zone, mmap, 1 MiB write/read-back matches, free, no leak) |
 | ar_sys | `/dev/ar_sys` | - | `mmztest` PTS: `GET_CUR_PTS` monotonic & µs-scale; tz set/get round-trips; GPS blob set/get round-trips |
 | ar_sysctl | `/dev/ar_sysctl` | - | register->query_status round-trips; status transitions RUNNING<->SUSPEND |
 | ar_vb | `/dev/ar_vb` | `cat /dev/ar_vb` (pool table) | a self-test or hand-driven CRTPL->GETBLK->RLSBLK->DESTPL leaves the pool table + `/proc/media-mem` consistent (no leaked mmb) |

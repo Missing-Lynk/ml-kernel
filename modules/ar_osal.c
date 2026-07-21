@@ -51,12 +51,11 @@ module_param(mmz_allocator, charp, 0444);
 module_param(map_mmz, charp, 0444);
 module_param(anony, int, 0444);
 
-/* Fallback zone when no mmz= param is supplied AND the DTB has no
- * /reserved-memory mmz node to derive it from - the boot values from RE §8,
- * identical to the DTS mmz@29400000 region.
+/* Fallback anonymous zone for a DTB without a /reserved-memory mmz node;
+ * must match the device DTS carveout.
  */
-#define DEF_ANON_BASE	0x29400000UL
-#define DEF_ANON_SIZE	0x06c00000UL
+#define DEF_ANON_BASE	0x29200000UL
+#define DEF_ANON_SIZE	0x06e00000UL
 #define DEF_SRAM_BASE	0x00100000UL
 #define DEF_SRAM_SIZE	0x00100000UL
 
@@ -307,7 +306,7 @@ EXPORT_SYMBOL(hil_mmb_free);
  *
  * memremap() can sleep (vmalloc + page-table alloc); ar_mmz_lock is a mutex and is
  * never taken from atomic context, so holding it across the map is fine. Blocks are
- * mapped lazily, on demand; never map the whole 108 MiB carveout at init.
+ * mapped lazily, on demand; never map the whole carveout at init.
  */
 static void *__map_block_locked(struct mmb *b)
 {
@@ -1046,18 +1045,17 @@ static int __init ar_osal_init(void)
 	}
 
 	pr_info("init: creating zones (allocator=%s)\n", mmz_allocator);
-	if (mmz) {
+	if (mmz)
 		parse_mmz_param(mmz);
-	} else if (anony) {
+
+	if (anony && !zone_find_by_name("anonymous")) {
 		/*
-		 * Only the anonymous pool is backed by reserved-memory on this board
-		 * (DTS mmz@29400000, nomap). The vendor's on-chip "sram" zone at
-		 * 0x00100000 is NOT reserved here, so we do not create it - and zones
-		 * no longer memremap at init anyway, so an unbacked zone would only
-		 * fault later when a block from it is mapped. Pass mmz= to override.
-		 *
-		 * The zone geometry comes from the DTB (the mmz reserved-memory
-		 * node), so the memory map is declared exactly once; the baked
+		 * The anonymous zone's geometry comes from the DTB (the mmz
+		 * reserved-memory node, the same region the wave5/ml_mmzheap
+		 * coherent pool binds), so the memory map is declared exactly
+		 * once. mmz= adds further zones on top (e.g. the vendor's
+		 * on-chip "sram" zone, which has no reserved-memory node); an
+		 * explicit mmz= "anonymous" tuple overrides the DTB. The baked
 		 * DEF_ANON_* constants are only the fallback for a DTB without
 		 * the node.
 		 */

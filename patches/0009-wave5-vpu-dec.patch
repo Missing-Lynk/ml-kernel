@@ -14,7 +14,7 @@ stream's fbc_buf_count starves the firmware's display rotation.
  }
  
 +/* ML (Artosyn): cap the LINEAR (display) CAPTURE buffer count independently of the FBC/DPB.
-+ * The FBC reconstruction/reference buffers live in the 108 MiB mmz pool; the linear CAPTURE
++ * The FBC reconstruction/reference buffers live in the MMZ pool; the linear CAPTURE
 + * buffers are vb2-dma-contig from the 64 MiB CMA. Stock wave5 floors the capture count at
 + * fbc_buf_count (DPB-sized), which for two concurrent tile decoders + the DVR encoder overruns
 + * the 64 MiB CMA. A consumer that returns each decoded frame immediately needs only a
@@ -59,12 +59,12 @@ stream's fbc_buf_count starves the firmware's display rotation.
 +	/*
 +	 * Artosyn: clamp the bitstream sizeimage. wave5_update_pix_fmt() takes the max of the
 +	 * caller's sizeimage and DEFAULT_BS_SIZE, and the ring buffer is 4x sizeimage on top of
-+	 * the vb2 OUTPUT buffers, all from the dedicated 108 MiB mmz pool. GStreamer asks for a
++	 * the vb2 OUTPUT buffers, all from the dedicated MMZ pool. GStreamer asks for a
 +	 * 4096x2160-sized 17.7 MiB bitstream buffer at 1080p, which alone turns into ~106 MiB
 +	 * and ENOMEMs STREAMON. 1 MiB comfortably holds any AU this class of device produces
 +	 * (a 50 Mbit/s 60 fps stream averages ~104 KiB/frame; FPV tile IDRs are a few
 +	 * hundred KiB) and keeps two concurrent tile decoders plus the encoder inside the
-+	 * 108 MiB pool.
++	 * MMZ pool.
 +	 */
 +	f->fmt.pix_mp.plane_fmt[0].sizeimage = min(f->fmt.pix_mp.plane_fmt[0].sizeimage,
 +						   1U * 1024 * 1024);
@@ -93,7 +93,7 @@ stream's fbc_buf_count starves the firmware's display rotation.
  	non_linear_num = inst->fbc_buf_count;
  
 +	/*
-+	 * Artosyn: everything here comes from the fixed 108 MiB mmz pool and failure shows up
++	 * Artosyn: everything here comes from the fixed MMZ pool and failure shows up
 +	 * as a bare -12; log the demand once per stream so ENOMEM is diagnosable post-hoc.
 +	 */
 +	dev_info(inst->dev->dev, "prepare_fb: %d FBC + %d linear CAPTURE bufs at %ux%u (+ ring %zu)\n",
@@ -122,10 +122,10 @@ stream's fbc_buf_count starves the firmware's display rotation.
  		frame->stride = fb_stride;
  		frame->map_type = LINEAR_FRAME_MAP;
  		frame->update_fb_info = true;
-+		if (i == 0)   /* ML: attribute the CAPTURE pool - MMZ (0x294xxxxx) or CMA? */
++		if (i == 0)   /* ML: attribute the CAPTURE pool - MMZ (0x292xxxxx) or CMA? */
 +			dev_info(inst->dev->dev, "CAPTURE[0] %pad size %u %s (x%d)\n",
 +				 &buf_addr_y, buf_size,
-+				 (buf_addr_y >= 0x29400000 && buf_addr_y < 0x30000000) ? "MMZ" : "CMA",
++				 (buf_addr_y >= 0x29200000 && buf_addr_y < 0x30000000) ? "MMZ" : "CMA",
 +				 linear_num);
  	}
  
@@ -138,7 +138,7 @@ stream's fbc_buf_count starves the firmware's display rotation.
 +	/* ML (Artosyn): fixed ring size, decoupled from the negotiated sizeimage. The upstream
 +	 * ALIGN(sizeimage)*4 ballooned to 8 MiB per instance (GStreamer negotiates a 2 MiB
 +	 * encoded-buffer sizeimage regardless of our try_fmt clamp), and two concurrent tile
-+	 * decoders then overrun the 108 MiB mmz pool. 2 MiB holds ~80 average tile AUs and
++	 * decoders then overrun the MMZ pool. 2 MiB holds ~80 average tile AUs and
 +	 * 4-5 worst-case IDR bursts for this device class. */
 +	ring_buffer->size = 2 * 1024 * 1024;
  	ret = wave5_vdi_allocate_dma_memory(inst->dev, ring_buffer);

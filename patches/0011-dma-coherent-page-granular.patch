@@ -158,7 +158,7 @@ alignment under this patch.
 +	 * bitmap_find_free_region rounds every request up to 2^order pages AND places it
 +	 * order-aligned, wasting 25-30% of the pool on codec-sized buffers (1.6 MiB -> 2 MiB,
 +	 * 3.06 MiB -> 4 MiB, 4.8 MiB -> 8 MiB): two wave5 tile decoders + the 1080p DVR
-+	 * encoder then overrun the 108 MiB pool. Page-granular first-fit matches the vendor's
++	 * encoder then overrun the MMZ pool. Page-granular first-fit matches the vendor's
 +	 * MMZ allocator, under which the same working set fits with ~20 MiB headroom. */
 +	unsigned long nr = PAGE_ALIGN(size) >> PAGE_SHIFT;
 +	unsigned long pageno;

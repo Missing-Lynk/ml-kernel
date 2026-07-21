@@ -9,10 +9,12 @@
 set -e
 MOD="${MOD:-/mod}"
 
-# Foundation: MMZ allocator + the carveout (must match the DTS reserved-memory
-# mmz@29400000 no-map region). Then the VB pool, sys/PTS, and SW arbiter.
+# Foundation: MMZ allocator. The anonymous zone comes from the DTB's
+# reserved-memory mmz node (single declaration of the carveout); mmz= only
+# adds the on-chip sram zone, which has no reserved-memory node.
+# Then the VB pool, sys/PTS, and SW arbiter.
 insmod "$MOD/ar_osal.ko" \
-	mmz=anonymous,0,0x29400000,0x06c00000:sram,0,0x00100000,0x00100000 \
+	mmz=sram,0,0x00100000,0x00100000 \
 	mmz_allocator=hisi anony=1
 insmod "$MOD/ar_vb.ko"
 insmod "$MOD/ar_sys.ko"

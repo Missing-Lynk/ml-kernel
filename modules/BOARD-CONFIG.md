@@ -11,7 +11,7 @@ These modules and their bring-up tools target the **BetaFPV VR04 HD** goggle (Ar
 
 | Setting | VR04 / Proxima-9311 value | Production home (DT) | Notes |
 |---|---|---|---|
-| MMZ media carveout | phys `0x29400000`, size `0x06C00000` | reserved-memory `mmz@29400000` (nomap) | the wave5 codec pool (bound per-device via of_reserved_mem, page-granular allocator) |
+| MMZ media carveout | phys `0x29200000`, size `0x06E00000` | reserved-memory `mmz@29200000` (nomap) | the wave5 codec pool (bound per-device via of_reserved_mem, page-granular allocator) |
 | GPIO controller | `artosyn,gpio` @`0x0A10A000`, 7 banks (sizes 23/22/26/6/6/11/16) | gpio node `artosyn,gpio` + `arto,gpio-port` children | per-bank reg block at base+`0xBC`+N*`0xC`; SET@`+0` / DIRIN@`+4` (1=input) / DAT@`+8`. The bank base is `0xBC`, not `0xC0`; see `../docs/artosyn-gpio.md`. |
 | **AR8030 reset** | **GPIO23 = bank1 line0**, active-low (drive output low->high to release) | `reset-gpios` driven before the SDIO scan | **most board-variable**; if not driven, the chip stays held in reset and never answers on SDIO |
 | SDIO host (AR8030) | `dw_mmc` @`0x01B00000`, IRQ GIC-SPI 48 | mmc node `dwmmc0` / `artosyn,proxima-dw-mshc`, `cap-sdio-irq`, `broken-cd` | the RF bus; SDIO id `4152:8030` (ROM) / `4152:8031` (firmware running) |

@@ -487,7 +487,7 @@
 			reg = <0 0x0a080000 0 0x10000>;	/* Wave5 host IF, 64 KiB */
 			interrupts = <GIC_SPI 68 IRQ_TYPE_LEVEL_HIGH>;	/* h26x GIC 100 */
 			sram = <&vpu_sram>;
-			/* Allocate codec DPB/display/task buffers from the dedicated 108 MiB
+			/* Allocate codec DPB/display/task buffers from the dedicated MMZ
 			 * media pool instead of the display-fragmented global CMA. Wired up by
 			 * of_reserved_mem_device_init() in the wave5 probe overlay. */
 			memory-region = <&mmz_pool>;

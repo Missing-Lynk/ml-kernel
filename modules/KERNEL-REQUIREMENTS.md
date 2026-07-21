@@ -65,7 +65,7 @@ Check the resulting Image size against the partition before flashing.
 
 - **Already present + confirmed on the running device:** `scaler@8840000`
   (`artosyn,scaler`), `ar_mpp@8870000` (`artosyn,ar_mpp`), `ar_mpp_proc`, and the MMZ
-  `reserved-memory` carveout `mmz@29400000` (nomap). `ar_mpp_drv`/`ar_scaler` probe fine.
+  `reserved-memory` carveout `mmz@29200000` (nomap). `ar_mpp_drv`/`ar_scaler` probe fine.
 - **DONE (AR8030 host-controller + reset):** the `mmc@1b00000` node (now in
   `../devices/betafpv-vr04-goggle/proxima-9311.dts`; bring-up used the since-retired `ar_dtbo_sdio`
   overlay) provides the host (`cap-sdio-irq`), the open
@@ -92,8 +92,8 @@ With IKCONFIG on, build-matching is self-serve:
 
 ## 6. ar_osal MMZ mapping
 
-`ar_osal` maps MMZ blocks **on demand** (init does not ioremap the whole 108 MiB
-carveout). `memremap(MEMREMAP_WC)` on the nomap `mmz@29400000` region is
+`ar_osal` maps MMZ blocks **on demand** (init does not ioremap the whole
+carveout). `memremap(MEMREMAP_WC)` on the nomap `mmz@29200000` region is
 hardware-validated (Tier 0).
 
 ## 7. SDIO CMD tracing (diagnostic build)
