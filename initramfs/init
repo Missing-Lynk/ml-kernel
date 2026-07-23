@@ -16,7 +16,7 @@ echo -n "CPUs online: "; /bin/busybox grep -c ^processor /proc/cpuinfo
 /bin/busybox head -1 /proc/meminfo
 echo "----------------------------------------------------------------"
 echo "Interactive root shell on the UART. To return to STOCK:"
-echo "  * power-cycle the goggle  (sure thing; the U-Boot trigger is one-shot)"
+echo "  * power-cycle the device  (sure thing; the U-Boot trigger is one-shot)"
 echo "  * or run  /recover        (best-effort watchdog auto-reset)"
 echo "================================================================"
 echo

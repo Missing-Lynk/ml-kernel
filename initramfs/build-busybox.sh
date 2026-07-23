@@ -30,7 +30,11 @@ make defconfig >/dev/null
 sed -i 's/# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config
 sed -i 's/CONFIG_TC=y/# CONFIG_TC is not set/' .config
 sed -i 's/CONFIG_FEATURE_WTMP=y/# CONFIG_FEATURE_WTMP is not set/' .config
+# `yes` is killed by SIGPIPE once oldconfig stops reading; shield the pipeline from pipefail
+# so that expected 141 does not abort the script (busybox kconfig has no olddefconfig target).
+set +o pipefail
 yes "" | make oldconfig >/dev/null 2>&1
+set -o pipefail
 echo "[busybox] build (CROSS_COMPILE=$CROSS_COMPILE)"
 
 make CROSS_COMPILE="$CROSS_COMPILE" -j"$(nproc)" >/dev/null

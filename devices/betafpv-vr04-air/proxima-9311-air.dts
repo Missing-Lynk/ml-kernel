@@ -135,13 +135,13 @@
 		};
 	};
 
-	/* 128 MiB DRAM (0x20000000..0x28000000) - HALF the goggle (stock cmdline caps with
-	 * mem=128m; the vendor DTB's 1 GB memory node is a bring-up template, ignored).
-	 * Declared once here: kernel RAM is bounded by the no-map mmz carveout below (ending
-	 * at the top of DRAM), so no mem= cmdline cap is needed. */
+	/* 256 MiB DRAM (0x20000000..0x30000000). The stock kernel caps itself to 128 MiB via
+	 * the vendor `mem=128m` cmdline (reserving the upper half for the MPP codec carveout);
+	 * the silicon has 256 MiB. No mem= cap here: the kernel uses all RAM minus the no-map
+	 * mmz carveout. */
 	memory@20000000 {
 		device_type = "memory";
-		reg = <0 0x20000000 0 0x08000000>;
+		reg = <0 0x20000000 0 0x10000000>;
 	};
 
 	reserved-memory {
@@ -150,12 +150,13 @@
 		ranges;
 
 		/* MMZ media pool for the wave5 encoder + camera capture buffers. 48 MiB
-		 * (0x25000000..0x28000000, the top of the 128 MiB DRAM), leaving ~80 MiB of
-		 * kernel-usable RAM below it (no mem= cap needed). SIZE IS A FIRST-CUT ESTIMATE
-		 * for the encode-only path (one 1080p capture ring + the encoder DPB/bitstream
-		 * pool); TUNE ON HW - the vendor keeps its MMZ as a runtime ar_osal mmz= param,
-		 * not in the DTB, so there is no vendor number to copy. Too small -> the wave5
-		 * firmware spins; too large -> starves the OS on 128 MiB. The wave5 codec claims
+		 * (0x25000000..0x28000000), a no-map hole in the 256 MiB DRAM that splits kernel
+		 * RAM into 0x20000000..0x25000000 (80 MiB) + 0x28000000..0x30000000 (128 MiB) =
+		 * 208 MiB usable. SIZE IS A FIRST-CUT ESTIMATE for the encode-only path (one 1080p
+		 * capture ring + the encoder DPB/bitstream pool); TUNE ON HW - the vendor keeps its
+		 * MMZ as a runtime ar_osal mmz= param, not in the DTB, so there is no vendor number
+		 * to copy. Too small -> the wave5 firmware spins. There is room to grow or relocate
+		 * this pool within the 256 MiB DRAM. The wave5 codec claims
 		 * it via the `memory-region` phandle on video-codec@a080000. `no-map`: coherent
 		 * uncached carveout outside the kernel linear map. */
 		mmz_pool: mmz@25000000 {
@@ -240,13 +241,13 @@
 			status = "okay";
 		};
 
-		/* i2c0 (DesignWare, mainline driver) carrying the board's DS1307 RTC at
-		 * 0x68 - the vendor's actual RTC path (its kernel drives the DS1307 with
-		 * the same mainline rtc-ds1307 driver and binds nothing to the SoC-internal
-		 * rtc@0a10c000). Timing/frequency properties are verbatim from the vendor
-		 * DTS. The vendor node also has resets = <&artosyn_reset 0x10>; dropped
-		 * here (no open reset-controller driver) - the block is already out of
-		 * reset when we boot, and the driver treats resets as optional. */
+		/* i2c0 (DesignWare, mainline driver) - the bus the NT99235 camera sensor sits
+		 * on (7-bit 0x1a). Timing/frequency properties are verbatim from the vendor DTS.
+		 * The vendor node also has resets = <&artosyn_reset 0x10>; dropped here (no open
+		 * reset-controller driver) - the block is already out of reset when we boot, and
+		 * the driver treats resets as optional. NOTE: the goggle board file this was forked
+		 * from carries a DS1307 RTC at 0x68; the AU has no RTC populated (0x68 does not ACK),
+		 * so that node is removed here. */
 		i2c0: i2c@1200000 {
 			compatible = "snps,designware-i2c";
 			#address-cells = <1>;
@@ -259,11 +260,6 @@
 			i2c-scl-falling-time-ns = <300>;
 			clocks = <&clk150m>;	/* vendor i2c_clk = 150 MHz host_ref */
 			status = "okay";
-
-			rtc@68 {
-				compatible = "dallas,ds1307";
-				reg = <0x68>;
-			};
 
 			/* NT99235 camera sensor (P1_SKY): I2C 7-bit 0x1a, MIPI CSI-2, 12-bit
 			 * linear, modes 1080p60 / 720p90 / 540p120 (from libsns_nt99235.so). Reset
