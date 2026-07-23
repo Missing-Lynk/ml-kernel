@@ -9,7 +9,9 @@
 # those drivers land, at which point a configs/camera.config gets added here.
 
 modules      # re-enable MMC/SDIO (SD + RF) + IKCONFIG that trim turned off (FB is unused here)
+iio          # IIO core - SAR ADC (battery voltage ch1) + protemp (SoC temp) telemetry; no adc-keys
 codec        # open V4L2 wave5 codec - the encoder is the air unit's whole point
+dma-heap     # DMA-BUF heaps core - ml_mmzheap's /dev/dma_heap/mmz encoder pool (goggle gets it via display)
 exfat        # SD-card exFAT (onboard DVR)
 usb-mtp      # MTP over USB (FunctionFS) for pulling DVR recordings
 dma          # DesignWare AXI DMA (dw-axi-dmac)
