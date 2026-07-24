@@ -8,6 +8,11 @@ Each `.c` is independent. Build all with `make` (binaries land in `build/`, whic
 git-ignored; see the `Makefile` for the toolchain override), copy the one you need to the
 goggle, and run it over SSH.
 
+The examples below use `192.168.3.101`, the open goggle's address. Each device has its own
+address (from its `board.conf`): the air unit is `192.168.3.102`, and a stock/unflashed unit
+is `192.168.3.100` (root password `artosyn` there, `libre` on the open slot). Substitute the
+address for the device you are targeting.
+
 ## Tools
 
 ### `buzzer_test` - artosyn_pwm buzzer
@@ -17,10 +22,10 @@ matching the `1002000.pwm` platform device), then sweeps or plays a tone.
 
 ```sh
 make buzzer_test
-scp build/buzzer_test root@192.168.3.100:/tmp/
-ssh root@192.168.3.100 /tmp/buzzer_test        # sweep volume 1..10 (hear the steps)
-ssh root@192.168.3.100 /tmp/buzzer_test 7      # single volume 0..10 for ~1s
-ssh root@192.168.3.100 /tmp/buzzer_test /sys/class/pwm/pwmchip1 5   # explicit chip
+scp build/buzzer_test root@192.168.3.101:/tmp/
+ssh root@192.168.3.101 /tmp/buzzer_test        # sweep volume 1..10 (hear the steps)
+ssh root@192.168.3.101 /tmp/buzzer_test 7      # single volume 0..10 for ~1s
+ssh root@192.168.3.101 /tmp/buzzer_test /sys/class/pwm/pwmchip1 5   # explicit chip
 ```
 
 What it confirms:
@@ -37,9 +42,9 @@ format/stride, scanout, DPI, MIPI-DSI, panel.
 
 ```sh
 make display_test
-scp build/display_test root@192.168.3.100:/tmp/
-ssh root@192.168.3.100 /tmp/display_test bars         # 8 colour bars (the "rainbow")
-ssh root@192.168.3.100 /tmp/display_test 0x00ff0000   # solid colour 0x00RRGGBB
+scp build/display_test root@192.168.3.101:/tmp/
+ssh root@192.168.3.101 /tmp/display_test bars         # 8 colour bars (the "rainbow")
+ssh root@192.168.3.101 /tmp/display_test 0x00ff0000   # solid colour 0x00RRGGBB
 ```
 Confirms the primary plane fetches a coherent CPU-written framebuffer from DDR and scans it
 to the panel (the reason the CRG `0x0a106018` fetch-master enable matters).
@@ -59,9 +64,9 @@ until killed (`pkill display_bounce`).
 
 ```sh
 make overlay_test display_demo
-scp build/overlay_test build/display_demo root@192.168.3.100:/tmp/
-ssh root@192.168.3.100 /tmp/overlay_test 0x8fff 490 100   # semi-transparent box, y=490 h=100
-ssh root@192.168.3.100 /tmp/display_demo                   # bouncing square + frame counter
+scp build/overlay_test build/display_demo root@192.168.3.101:/tmp/
+ssh root@192.168.3.101 /tmp/overlay_test 0x8fff 490 100   # semi-transparent box, y=490 h=100
+ssh root@192.168.3.101 /tmp/display_demo                   # bouncing square + frame counter
 ```
 
 > All of these use `/dev/fb0` = the DRM fbdev, and fbcon auto-binds to it and draws a console cursor
@@ -76,11 +81,11 @@ Drives the 3-pixel WS2812 status LED on the DesignWare SPI master via `spidev` (
 
 ```sh
 make led_test
-scp build/led_test root@192.168.3.100:/tmp/
-ssh root@192.168.3.100 /tmp/led_test              # rainbow cycle (40 ms/step) until Ctrl-C
-ssh root@192.168.3.100 /tmp/led_test rainbow 20   # rainbow with a custom step delay (ms)
-ssh root@192.168.3.100 /tmp/led_test ff8000       # solid colour 0xRRGGBB
-ssh root@192.168.3.100 /tmp/led_test off          # all pixels off
+scp build/led_test root@192.168.3.101:/tmp/
+ssh root@192.168.3.101 /tmp/led_test              # rainbow cycle (40 ms/step) until Ctrl-C
+ssh root@192.168.3.101 /tmp/led_test rainbow 20   # rainbow with a custom step delay (ms)
+ssh root@192.168.3.101 /tmp/led_test ff8000       # solid colour 0xRRGGBB
+ssh root@192.168.3.101 /tmp/led_test off          # all pixels off
 ```
 Confirms the `spi@1102000` controller + `spidev` child are in the DT and bound, and that
 userspace can drive the LED (the frame encoding is byte-identical to the vendor's). The
@@ -93,9 +98,9 @@ provider) into evdev events on `/dev/input/event0`. See `../docs/artosyn-adc.md`
 
 ```sh
 make button_test
-scp build/button_test root@192.168.3.100:/tmp/
-ssh root@192.168.3.100 /tmp/button_test              # auto-detects the adc-keys device
-ssh root@192.168.3.100 /tmp/button_test /dev/input/event0   # explicit node
+scp build/button_test root@192.168.3.101:/tmp/
+ssh root@192.168.3.101 /tmp/button_test              # auto-detects the adc-keys device
+ssh root@192.168.3.101 /tmp/button_test /dev/input/event0   # explicit node
 ```
 Prints e.g. `up       code=87 (0x57)  press`. Keymap: bind/back/record/up/down/left/right/enter.
 Requires `artosyn_adc` loaded, otherwise `adc-keys` stays in deferred-probe and no input node
@@ -108,9 +113,9 @@ window). It finds the IIO device by its `name` (`temperature`), since the sysfs 
 `iio:deviceN`. See `../docs/artosyn-protemp.md`.
 
 ```sh
-scp temp_read.sh root@192.168.3.100:/tmp/
-ssh root@192.168.3.100 sh /tmp/temp_read.sh        # ~1 s interval, until Ctrl-C
-ssh root@192.168.3.100 sh /tmp/temp_read.sh 0.2    # custom interval (seconds)
+scp temp_read.sh root@192.168.3.101:/tmp/
+ssh root@192.168.3.101 sh /tmp/temp_read.sh        # ~1 s interval, until Ctrl-C
+ssh root@192.168.3.101 sh /tmp/temp_read.sh 0.2    # custom interval (seconds)
 ```
 Prints e.g. `raw=342  in_temp_scale=44 C  (derived=44 C)`. Note the driver's non-standard IIO
 semantics: `in_temp_scale` carries the whole temperature in degrees C (not a scale factor) and
@@ -127,8 +132,8 @@ ABI in `../modules/ar_uapi.h`.
 
 ```sh
 make mmztest
-scp build/mmztest root@192.168.3.100:/tmp/
-ssh root@192.168.3.100 /tmp/mmztest
+scp build/mmztest root@192.168.3.101:/tmp/
+ssh root@192.168.3.101 /tmp/mmztest
 ```
 Requires `ar_osal.ko` and `ar_sys.ko` loaded first (see `../modules/load.sh`). Does not
 exercise the codec/scaler engines - only the foundation ioctl/mmap contracts.
@@ -151,8 +156,8 @@ never fired. Exit 0 = PASS, 1 = setup/ioctl error, 2 = pixel mismatch.
 
 ```sh
 make scalertest
-scp build/scalertest root@192.168.3.100:/tmp/
-ssh root@192.168.3.100 /tmp/scalertest          # or: scalertest W H  (override src dims)
+scp build/scalertest root@192.168.3.101:/tmp/
+ssh root@192.168.3.101 /tmp/scalertest          # or: scalertest W H  (override src dims)
 ```
 Requires `ar_osal.ko` and `ar_scaler.ko` loaded first. On any failure the tool dumps
 `/proc/arscaler/state` (the on-device oracle) so the programmed registers are in the log.
@@ -171,8 +176,8 @@ attachments).
 
 ```sh
 make scaler_dmabuf_test
-ssh root@192.168.3.100 /tmp/scaler_dmabuf_test                # 256x128 quick pass
-ssh root@192.168.3.100 /tmp/scaler_dmabuf_test 1920 1080 300  # DVR shape + timing
+ssh root@192.168.3.101 /tmp/scaler_dmabuf_test                # 256x128 quick pass
+ssh root@192.168.3.101 /tmp/scaler_dmabuf_test 1920 1080 300  # DVR shape + timing
 ```
 Requires `ar_scaler.ko` (loads standalone; its internal LUT/batch buffers are `dma_alloc_coherent`) and `CONFIG_DMABUF_HEAPS_CMA`. Exit codes as `scalertest`.
 
@@ -188,11 +193,11 @@ re-verifies the original bytes. If a phase hangs, the backup file survives for a
 
 ```sh
 make sd_rwtest
-scp build/sd_rwtest root@192.168.3.100:/tmp/   # or push the binary over SSH however you prefer
-ssh root@192.168.3.100 /tmp/sd_rwtest read              # non-destructive read check only
-ssh root@192.168.3.100 /tmp/sd_rwtest all               # read + 64 KiB O_DIRECT write test
-ssh root@192.168.3.100 /tmp/sd_rwtest -n $((4<<20)) -B write   # 4 MiB buffered+fsync (dd path)
-ssh root@192.168.3.100 /tmp/sd_rwtest restore /tmp/sd_rwtest.bak   # after a hang + power cycle
+scp build/sd_rwtest root@192.168.3.101:/tmp/   # or push the binary over SSH however you prefer
+ssh root@192.168.3.101 /tmp/sd_rwtest read              # non-destructive read check only
+ssh root@192.168.3.101 /tmp/sd_rwtest all               # read + 64 KiB O_DIRECT write test
+ssh root@192.168.3.101 /tmp/sd_rwtest -n $((4<<20)) -B write   # 4 MiB buffered+fsync (dd path)
+ssh root@192.168.3.101 /tmp/sd_rwtest restore /tmp/sd_rwtest.bak   # after a hang + power cycle
 ```
 Exit codes: 0 = PASS, 1 = mismatch/I/O error, 2 = a phase HUNG (power-cycle before trusting any
 further SD I/O - the mmc queue is wedged and the hung child is unkillable), 3 = usage/setup.
@@ -218,8 +223,8 @@ AR8030 reset line they were written for:
 
 ```sh
 make gpio_pulse gpio_hold gpio_reset gpio_verify
-scp build/gpio_pulse build/gpio_hold build/gpio_reset build/gpio_verify root@192.168.3.100:/tmp/
-ssh root@192.168.3.100 /tmp/gpio_pulse ar-gpio1 0
-ssh root@192.168.3.100 /tmp/gpio_verify ar-gpio1 0 0x0A10A0D4 0
+scp build/gpio_pulse build/gpio_hold build/gpio_reset build/gpio_verify root@192.168.3.101:/tmp/
+ssh root@192.168.3.101 /tmp/gpio_pulse ar-gpio1 0
+ssh root@192.168.3.101 /tmp/gpio_verify ar-gpio1 0 0x0A10A0D4 0
 ```
 Requires `artosyn_gpio.ko` loaded (registers the labelled gpiochips the tools search for).
