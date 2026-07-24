@@ -161,7 +161,12 @@ cp "$KTREE/modules.builtin" "$KTREE/modules.builtin.modinfo" "$STAGE/lib/modules
 # Resolve the real path. Any residual modules.order warning is harmless (we ship a subset).
 # Fail loudly if the critical in-tree modules did not make it: an image staged without the
 # codec or the display stack boots to a black screen with no video and the cause is invisible.
-for critical in wave5.ko artosyn_vo.ko; do
+# wave5 (codec) is required on every device; artosyn_vo (the DRM display controller) only when the
+# kernel was configured with a display (CONFIG_DRM_ARTOSYN) - the air unit has no panel, so it does
+# not build artosyn_vo and must not fatal on its absence.
+CRITICAL="wave5.ko"
+grep -q '^CONFIG_DRM_ARTOSYN=' "$KTREE/.config" && CRITICAL="$CRITICAL artosyn_vo.ko"
+for critical in $CRITICAL; do
 	[ -f "$MODDIR/$critical" ] || { echo "FATAL: $critical missing from stage (in-tree modules build incomplete)"; exit 1; }
 done
 DEPMOD="$(command -v depmod || echo /sbin/depmod)"; [ -x "$DEPMOD" ] || DEPMOD=/usr/sbin/depmod
