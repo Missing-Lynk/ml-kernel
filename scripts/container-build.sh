@@ -126,3 +126,15 @@ for dts in /repo/devices/"$BOARD"/*.dts; do
   build_step "dtb $name (cpp)" cpp -nostdinc -undef -D__DTS__ -x assembler-with-cpp -I include "$dts" -o "$name.dts.i"
   build_step "dtb $name (dtc)" scripts/dtc/dtc -I dts -O dtb -o "arch/arm64/boot/$name.dtb" "$name.dts.i"
 done
+
+# Build and stage the shipped kernel modules in the same hermetic container as the Image, so the
+# .ko are as reproducible as the Image and carry its exact toolchain + vermagic. Output goes to
+# /out (bind-mounted by build.sh to $BUILD_DIR/ml-modules); rootfs/build.sh stages it from there.
+# Skipped for MINIMAL (pure defconfig registers no out-of-tree drivers, so there is no display
+# stack to build). Skipped if /out is not mounted, so an older `docker run` without the mount
+# still produces the Image. CROSS_COMPILE arrives in the environment from build.sh.
+if [ -z "$MINIMAL" ] && [ -d /out ]; then
+  build_step "modules+stage" \
+    env KTREE="$PWD" CROSS="$CROSS_COMPILE" MODSRC=/repo/modules OUT=/out JOBS="$JOBS" \
+    bash /repo/modules/stage.sh
+fi

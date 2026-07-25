@@ -105,6 +105,14 @@ do_build(){  # tree-dir
   fi
 
   prepare_image
+
+  # Module staging output: container-build.sh builds + stages the shipped modules here (bind
+  # -mounted at /out), so the .ko come from the same hermetic container as the Image and
+  # rootfs/build.sh picks them up from $BUILD_DIR/ml-modules/rootfs. Created rw on the host so
+  # the container (running as the invoking user) can write into it.
+  local mod_out="$BUILD_DIR/ml-modules"
+  mkdir -p "$mod_out"
+
   log "configure + build (container, -j$JOBS)"
   docker run --rm --network none \
     --user "$(id -u):$(id -g)" \
@@ -112,6 +120,7 @@ do_build(){  # tree-dir
     -v "$tree":/src \
     -v "$tc_root":/tc:ro \
     -v "$REPO":/repo:ro \
+    -v "$mod_out":/out \
     -e ARCH=arm64 \
     -e CROSS_COMPILE="/tc/bin/${CROSS_COMPILE_PREFIX}" \
     -e KBUILD_BUILD_USER="$KBUILD_BUILD_USER" \
