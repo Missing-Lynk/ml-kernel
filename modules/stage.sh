@@ -48,8 +48,8 @@ cp "$MODSRC"/*.c "$MODSRC"/*.h "$MODSRC"/Kbuild "$BUILD_OUT"/
 make -C "$KTREE" M="$BUILD_OUT" ARCH=arm64 CROSS_COMPILE="$CROSS" -j"$JOBS" modules
 
 # Stage ONLY the modules we ship and load: the in-tree DRM stack (drm core + helpers +
-# dw-mipi-dsi + DRM_ARTOSYN), the wave5 codec + its v4l2/videobuf2 deps, the out-of-tree
-# Artosyn modules, and the dmatest bring-up client.
+# dw-mipi-dsi + DRM_ARTOSYN), the wave5 codec + its v4l2/videobuf2 deps, the Artosyn camera
+# capture drivers, the out-of-tree Artosyn modules, and the dmatest bring-up client.
 STAGE="$OUT/rootfs"
 MODDIR="$STAGE/lib/modules/$KVER/kernel"
 rm -rf "$STAGE"
@@ -58,6 +58,7 @@ mkdir -p "$MODDIR"
 find "$KTREE/drivers/gpu/drm" -name '*.ko' -exec cp -t "$MODDIR" {} +
 find "$KTREE/drivers/media/v4l2-core" "$KTREE/drivers/media/common/videobuf2" \
      "$KTREE/drivers/media/platform/chips-media/wave5" \
+     "$KTREE/drivers/media/artosyn" \
      -name '*.ko' -exec cp -t "$MODDIR" {} + 2>/dev/null || true
 cp "$BUILD_OUT"/*.ko "$MODDIR"/ 2>/dev/null || true
 
@@ -83,9 +84,39 @@ for critical in $CRITICAL; do
   [ -f "$MODDIR/$critical" ] || { echo "FATAL: $critical missing from stage (in-tree modules build incomplete)"; exit 1; }
 done
 
-DEPMOD="$(command -v depmod || echo /sbin/depmod)"
-[ -x "$DEPMOD" ] || DEPMOD=/usr/sbin/depmod
-"$DEPMOD" -b "$STAGE" "$KVER" 2>&1 | grep -v 'WARNING: could not open modules\.' || true
-[ -f "$STAGE/lib/modules/$KVER/modules.dep" ] || echo "  WARN: depmod produced no modules.dep (modprobe deps will fail)"
+# depmod, hard-failed at every step: a stage whose modules.dep is missing, truncated, or stale
+# still looks like a successful build, and the breakage only appears on the device as a module
+# that will not load. depmod is not always on PATH (it lives in sbin), so probe the usual paths.
+DEPMOD="$(command -v depmod || true)"
+if [ -z "$DEPMOD" ]; then
+  for candidate in /sbin/depmod /usr/sbin/depmod; do
+    if [ -x "$candidate" ]; then
+      DEPMOD="$candidate"
+      break
+    fi
+  done
+fi
+[ -n "$DEPMOD" ] || { echo "FATAL: no depmod found on PATH, /sbin, or /usr/sbin (install kmod)"; exit 1; }
+
+# The output is captured rather than piped so depmod's own exit status survives (a pipeline
+# reports only its last command, which is what used to swallow the failure). Only the
+# modules.order/modules.builtin warning is filtered - that file is deliberately not staged.
+DEPMOD_LOG="$(mktemp)"
+trap 'rm -f "$DEPMOD_LOG"' EXIT
+if ! "$DEPMOD" -b "$STAGE" "$KVER" >"$DEPMOD_LOG" 2>&1; then
+  grep -v 'WARNING: could not open modules\.' "$DEPMOD_LOG" >&2 || true
+  echo "FATAL: depmod failed for $KVER (stage at $STAGE)"
+  exit 1
+fi
+grep -v 'WARNING: could not open modules\.' "$DEPMOD_LOG" || true
+
+# A depmod that exits 0 over an empty or half-copied tree still writes nothing usable, so assert
+# the result: modules.dep exists and carries a line for every module the image must ship.
+MODULES_DEP="$STAGE/lib/modules/$KVER/modules.dep"
+[ -f "$MODULES_DEP" ] || { echo "FATAL: depmod wrote no modules.dep at $MODULES_DEP (modprobe deps would fail on-device)"; exit 1; }
+for critical in $CRITICAL; do
+  grep -q "/$critical:" "$MODULES_DEP" \
+    || { echo "FATAL: $critical is staged but absent from modules.dep - the dependency tree is stale or partial"; exit 1; }
+done
 
 echo "=== staged $(find "$MODDIR" -name '*.ko' | wc -l) .ko at $STAGE (whitelist: Artosyn + DRM stack + wave5 codec) ==="
