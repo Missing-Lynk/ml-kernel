@@ -16,12 +16,23 @@ Tags used below: **DONE** (working, hardware-validated) - **PARTIAL** (works, wi
 | RTC (DS1307 on i2c0) | DONE | mainline-only path (`snps,designware-i2c` + `dallas,ds1307`, verbatim from the vendor DTS minus its `resets` phandle; `configs/i2c-rtc.config`); this is the vendor's own RTC path (it never binds the SoC-internal `rtc@0a10c000`). Registers rtc0, hctosys sets the clock at boot, keeps and ticks wall time. Caveat: the backup battery is currently removed from this unit, so time resets on power-off (hardware, not driver) |
 | SD card (microSD, `mmc1`) | DONE | reads and writes validated (`test_tools/sd_rwtest.c`); ~21-22 MB/s R/W = the SD-High-Speed 50 MHz/4-bit bus limit (UHS needs 1.8 V, vqmmc is fixed 3.3 V, same mode as stock); exFAT built in (`configs/exfat.config`) and validated under a DVR-style workload. `docs/sd-card.md` |
 
+## Air-unit camera capture
+
+Air units only; the goggle has no camera hardware. Architecture (which block is stock IP and which is Artosyn-specific) is in `PERIPHERALS.md`. State below is as of the 2026-07-26 hardware session.
+
+| Item | Status | Notes |
+|---|---|---|
+| NT99235 sensor subdev (`overlay/drivers/media/artosyn/nt99235.c`) | PARTIAL | driver + DT node (`i2c0` @ `0x1a`, `configs/camera.config`) in place and the sensor streams; the link is 2 lanes, measured, so the sensor's 4-lane modes are unusable |
+| CSI-2 receiver (`ar-csi2`) | PARTIAL | DesignWare host v1.20, IPI configuration matches a capture of the vendor stack byte for byte. The receiver takes in data but the packets are corrupt: uncorrectable header ECC plus frame-boundary and frame-sequence errors |
+| VIF capture front end (`ar-vif`) | PARTIAL | fully programmed and proven correct (FIFO partition, stride, DDR size, frame end all match the vendor); its status register reads 0, so it is never handed a frame. Not the blocker |
+| End-to-end capture (first frame) | NOT DONE | blocked upstream of the VIF, in CSI-2 D-PHY bring-up: the receiver is never told what bit rate it is receiving, which is what header-ECC corruption on an otherwise correct link means |
+
 ## RF chip (AR8030)
 
 | Item | Status | Notes |
 |---|---|---|
 | SDIO enumeration, firmware upload, RF-link association | DONE | device flips `0x8030`->`0x8031`, `sdio0` up, associates with a paired air unit; `docs/artosyn-sdio.md`. ABI-level module status: see `artosyn_sdio` below. |
-| Full-rate video downlink | DONE | the air unit streams H.265 to the open slot-B stack, **~1.5 MB/s sustained** on `sdio0` `:10001`; the gating chain (poll cadence + TX power `type:8` + the UDP `:10000` params handshake) is the product story in `../docs/reference/rf-video-downlink.md`. |
+| Full-rate video downlink | DONE | the air unit streams H.265 to the open slot-B stack, **~1.5 MB/s sustained** on `sdio0` `:10001`; the gating chain (poll cadence + TX power `type:8` + the UDP `:10000` params handshake) is the product story in `../userspace/docs/rf-video-downlink.md`. |
 | Live RF video through the kernel UDP stack (end-to-end) | DONE | the live stream runs `sdio0` -> IP -> UDP at rate; ~1.6 MB/s clean (InAddrErrors 0, ReasmFails 0) after the `artosyn_sdio` RX resync fix (`docs/artosyn-sdio.md`), and the full gated chain puts 60 fps on the panel. |
 
 ## RF module (`modules/`)
@@ -54,7 +65,7 @@ Everything the goggle exercises is at parity or better on the open kernel. Hardw
 |---|---|---|
 | Scaler (crop/resize engine) | not driven (reference driver `modules/ar_scaler.c`) | no 720p->1080p upscale or digital zoom; unneeded at the native-1080p link mode (compositing runs on the DMA engine) |
 | JPEG codec (Chips&Media JPU, `0x08830000`, SPI 69) | not driven, scoped | standalone single-instance JPU, register-driven, no firmware; no mainline driver fits, open path = small custom driver from the open `jpuapi` choreography (ml-kernel#1) |
-| USB gadget MTP function | not configured (open gadget is CDC-ECM only; vendor is rndis+mtp+uart) | DVR files not pullable over USB; SD card removal or scp instead |
+| USB gadget MTP function | kernel side configured (`configs/usb-mtp.config` enables FunctionFS post-trim, merged by both boards); the responder is userspace (`umtprd`, built in the wrapper's `native/umtprd/` and kept out of `make all`) | none once the responder is installed and the gadget composed. Mass storage stays off deliberately: block-exclusive, cannot coexist with an actively-recording SD card |
 | Audio codec (`artosyn,audio_codec`, GIC 79) | not driven | none - disabled in this unit's stock config (`AudioEnable:0`) |
 
 Vendor behaviors replaced by different (mainline) means, not missing: fb0-composited-over-video -> DRM ARGB4444 overlay plane; the MPP MMZ/VB kernel plumbing -> per-device coherent pool + vb2/dma-buf.
@@ -79,5 +90,5 @@ The vendor codec is a **Chips&Media WAVE521C** (H.264/H.265 encode+decode) plus 
 | Decoder capability matrix (codecs / resolutions / rates) | DONE | **HEVC** at 640x360, 1280x720, 1920x1080 and **H.264** at 1280x720, all bit-exact; **323 fps @ 720p / 165 fps @ 1080p**. Full capability reference incl. the decoded GET_VPU_INFO bits, the 8-bit-only feature set, and the 1080p memory budget: `docs/wave5-codec-capabilities.md` |
 | Functional encode (WAVE521C -> HEVC/H.264) | DONE | all 4 combos verified by host-ffmpeg decode + PSNR vs source: **HEVC and H.264 at 1280x720 AND 1920x1080, 42-48 dB PSNR every plane**; **171 fps @ 720p / 108 fps @ 1080p**. The two encode fixes (sec-AXI off, `finish_encode` error-path job-finish) and the userspace buffer contract: `docs/wave5-codec-capabilities.md`. DVR integration DONE (concurrent-fit row below); RTSP: future work |
 | Flash-prep: convert codec to module (`=m`), fw on rootfs | DONE | `VIDEO_WAVE_VPU=m`, embedded fw dropped; Image fits the 6 MiB slot (96.9%). `wave5.ko` + its v4l2/videobuf2 deps staged by `modules/build.sh`; `chagall.bin` installed on the rootfs at `/lib/firmware/cnm/` by `rootfs/build.sh`. Validated: `modprobe wave5` brings the codec up + decodes on HW |
-| Decode -> display (dma-buf to DRM YUV plane) | DONE | validated end to end via GStreamer: H.264/H.265 file -> wave5 decode -> dma-buf export -> PRIME import -> DRM I420 primary, **1080p60 at measured 60.00 fps / 0 drops, zero-copy**; no `ar_scaler` hop needed at native res (the DC scans the decoder's 64-aligned luma stride; `artosyn_vo` dumb-pitch is 64-px for 8-bpp). Tooling + full gotcha list: `userspace/gstreamer/README.md` |
+| Decode -> display (dma-buf to DRM YUV plane) | DONE | validated end to end via GStreamer: H.264/H.265 file -> wave5 decode -> dma-buf export -> PRIME import -> DRM I420 primary, **1080p60 at measured 60.00 fps / 0 drops, zero-copy**; no `ar_scaler` hop needed at native res (the DC scans the decoder's 64-aligned luma stride; `artosyn_vo` dumb-pitch is 64-px for 8-bpp). Tooling + full gotcha list: `../userspace/gstreamer/README.md` |
 | Concurrent 2x decode + 1080p60 encode fit (DVR) | DONE | the vendor-parity load (two RF-tile decoders + the 1080p60 H.264 DVR encoder) fits the MMZ pool via `patches/0011-dma-coherent-page-granular.patch` (page-granular first-fit instead of power-of-2 rounding). HW-validated 2026-07-12: 60 fps composite, 0 drops, playable 1920x1080@60 MP4. `dec_cap_bufs` must stay 0 (`docs/wave5-codec-capabilities.md`). Kernel1 flash pending |
