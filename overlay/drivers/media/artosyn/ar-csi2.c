@@ -208,10 +208,20 @@ module_param(phy_range, int, 0444);
 MODULE_PARM_DESC(phy_range,
 		 "D-PHY frequency range 0-7, or -1 to derive it from the source link frequency");
 
-static int hs_settle;
+/* HS-settle for D-PHY internal registers 0x03 and 0x0a. Not optional: the PHY
+ * reset default samples the HS burst at the wrong instant, which shows up as
+ * SoT sync errors on every lane (INT_ST_PHY bits 0 and 1) plus double-ECC and
+ * frame-boundary errors, no measured geometry in the VIF front end, and no
+ * frame starts. 0x03 is the value the streaming vendor writes, recovered from
+ * its D-PHY test-interface writes in the MMIO trace, and hardware-confirmed:
+ * with it the error banks read all-zero in steady state exactly like the
+ * vendor, the front end measures 1924x1084, and frame starts arrive at frame
+ * rate. Zero restores the old skip-the-write behaviour, for bisecting only.
+ */
+static int hs_settle = 0x03;
 module_param(hs_settle, int, 0444);
 MODULE_PARM_DESC(hs_settle,
-		 "manual D-PHY HS-settle byte for internal registers 0x03/0x0a, 0 to use the PHY default");
+		 "D-PHY HS-settle byte for internal registers 0x03/0x0a (vendor value 0x03; 0 skips the write and breaks the link)");
 
 /* How long to let the link settle after stream-on, and how far apart the two
  * counter samples sit. At 60 fps every active lane bursts thousands of times
@@ -467,16 +477,16 @@ static void ar_csi2_phy_power_on_core(struct ar_csi2 *csi2, void __iomem *core)
 	if (code >= 0)
 		ar_csi2_phy_test_write(core, AR_CSI_PHY_REG_FREQ_RANGE, code);
 
-	/* Manual HS-settle override, the vendor's conditional step after the
-	 * range write: internal registers 0x03 and 0x0a, one settle byte
-	 * calibrated against the 333 MHz pcs clock. Skipped when 0, matching
-	 * the vendor default.
+	/* HS-settle, immediately after the range write and before the deskew
+	 * writes, which is where the vendor places it.
 	 */
 	if (hs_settle > 0) {
 		ar_csi2_phy_test_write(core, 0x03, hs_settle);
 		ar_csi2_phy_test_write(core, 0x0a, hs_settle);
-		dev_info(csi2->dev, "d-phy hs-settle forced to 0x%02x\n",
-			 hs_settle);
+		dev_dbg(csi2->dev, "d-phy hs-settle 0x%02x\n", hs_settle);
+	} else {
+		dev_warn(csi2->dev,
+			 "d-phy hs-settle write skipped: the link will not deliver valid packets\n");
 	}
 
 	ar_csi2_write(core, DW_CSI2_PHY_SHUTDOWNZ, 1);

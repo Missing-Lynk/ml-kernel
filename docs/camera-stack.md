@@ -145,7 +145,9 @@ V4L2 bridge subdev driving the DesignWare CSI-2 host core plus the Artosyn glue 
 - Frequency-range code: `rate_mbps = 2 * source_link_freq`, mapped through 8 coarse bins. The vendor mode (900 Mbps/lane, 2 lanes) maps to range code 5; a 4-lane 456 Mbps/lane link maps to code 3. Overridable with the `phy_range` module param.
 - IPI runs in camera-timing mode, cut-through, VCID 0, data type `0x2c` (RAW12).
 - Error and interrupt registers are a 10-entry mask table written twice, masked during bring-up and unmasked after. Per-PHY free-running HS activity counters in the wrapper serve as a lane-routing probe.
+- **HS-settle (hardware-confirmed, load bearing).** D-PHY internal registers `0x03` and `0x0a` must be written with `0x03` for the vendor's 2-lane 1080p60 mode, after the frequency-range write and before the deskew writes. The PHY reset default samples the HS burst at the wrong instant. Left unwritten, the link produces SoT sync errors on every lane (`INT_ST_PHY` bits 0 and 1) plus double-ECC and frame-boundary errors, the VIF front end measures no geometry, and no frame starts arrive. Written, every error bank reads zero in steady state exactly like the vendor, the front end measures 1924x1084, and frame starts arrive at frame rate. The value is the vendor's own, decoded from its D-PHY test-interface writes in the MMIO trace. This is per-rate: `dphy_freq_conf_get` in `libmpp_service.so` is a table keyed on the per-lane rate in 10 Mbps steps, so other modes need their own settle byte.
 - Clock-lane re-acquisition fix (hardware-confirmed): D-PHY internal register `0x3d`/`0x45` bit5 is set during PHY init and must be cleared at the end of configure. Left set, the receiver re-acquires the clock lane every frame and corrupts each frame-start header.
+- The full D-PHY internal register set the vendor writes, in order: frequency range `0x00` = `0x05` (900 Mbps/lane), setup `0x4d`/`0x4e`/`0x4f`/`0x50` = `0x00`/`0x08`/`0x00`/`0x08`, lane `0x25`/`0x26` = `0x07`/`0x07`, HS-settle `0x03`/`0x0a` = `0x03`, deskew `0x3d`/`0x45` = `0x20`. Recovered by decoding the paired address/data writes to `PHY_TEST_CTRL0`/`CTRL1` (core `+0x050`/`+0x054`); seven of the nine match constants the driver already carried, which validates the decode.
 - `s_stream(1)`: enable csi_clk, enable pcs_clk, configure, then call the sensor's `s_stream(1)` last.
 
 ### Capture: `ar-vif.c`
@@ -197,8 +199,9 @@ Validated on hardware, sensor through VIF front end:
 
 - **Clocks.** The CGU prologue reads back the vendor's values and the downstream blocks come alive.
 - **Sensor.** `nt99235` powers on and streams; the receiver sees its data.
-- **CSI-2 link.** Clean at the driver's D-PHY settings. A `phy_range`/`hs_settle` sweep read all error banks (`PHY_FATAL`, `PKT_FATAL`, `FRAME_FATAL`, `INT_ST_IPI`) as zero, with a positive control (settle `0x08` did raise ECC and frame errors), so the zero is real. The clock-lane re-acquisition fix holds.
-- **VIF front end (path0).** Accepts frame-start delimiters at frame rate. `path0_frame_start` (`0x17c` bit24) fires continuously and the steady-state interrupt-ack pattern is byte-identical to the running vendor.
+- **CSI-2 link.** Every `INT_ST_*` bank reads zero on the steady-state (second) read, matching a streaming vendor unit read the same way. The banks are clear-on-read, so a single read is meaningless: it returns the start transient too. Omitting the HS-settle write is a hard negative control and puts errors in four banks.
+- **VIF front end (path0).** Measures the incoming video timing correctly: `0x1f0` reads `0x0784043c` (1924 x 1084), and `0x1f4` and `0x1f8`/`0x1fc` match the streaming vendor's live values. `path0_frame_start` (`0x17c` bit24) fires at frame rate, 720 events per 1510 polls over 12 seconds.
+- **VIF-to-ISP hop.** The ISP-path status registers `0x10c` and `0x110` are live and advance with the vendor's value structure, so data crosses out of the front end into the ISP path.
 
 Not built:
 
