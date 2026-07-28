@@ -17,6 +17,12 @@ Drivers: `overlay/drivers/media/artosyn/` (`nt99235.c`, `ar-csi2.c`, `ar-vif.c`)
 
 This board uses CSI pair 0, core 0 at `0x08880400`. The DesignWare core version register reads v1.20, checked at probe.
 
+**All four blocks are inside the SoC**, in its media subsystem. The NT99235 is a plain Bayer sensor: it holds a pixel array, its own PLL and exposure and analogue gain, and a MIPI CSI-2 transmitter, and nothing else. Every stage that turns its raw output into a picture runs on the Proxima-9311. Nothing in this document lives on the camera module.
+
+The chain is: sensor sends CSI-2 packets over the MIPI lanes; the **CSI-2 receiver** decodes the link and produces a pixel stream on its IPI output; the **VIF** is the SoC's capture front end, which accepts that pixel stream and routes it, either straight to DDR through its bypass views or onward into the ISP; the **ISP** converts Bayer to YUV and DMAs the result to DDR.
+
+`VIF` is the vendor's own name for the block, used throughout `libmpp_service.so` (`vif_*`, 118 functions) and in the interrupt it registers (`ar_irq_reg_with_name(irq, handler, dev, "vif")`). It is the video interface between the receiver and the rest of the media block. It is not a MIPI or CSI-2 block itself: it sees pixels, not packets, and it also measures the incoming video timing, which is what makes `0x1f0` the front end's ground-truth register.
+
 The vendor kernel does no camera hardware programming. `cam_hardware_power_on` calls `ar_pwr_ctrl_on(1)`, which on the 9311 dispatches through an uninstalled pointer and returns -1. All VIF, CSI, ISP and CGU register writes on the stock unit come from userspace (`libmpp_service.so`, called by `ar_lowdelay`) through `/dev/mem`.
 
 ## How the vendor drives the pipeline
@@ -110,7 +116,43 @@ On bit 24 the handler reads `0x0c0` and tests bit 9, reads `0x0ec` and tests mas
 
 These are the only visibility into whether pixels cross from the VIF front end into the ISP. Frame-start delimiters (`0x17c` bit24 on path0) are a header-level event and do not prove pixel traversal.
 
+### VIF debug counters: `0x32c` selects, `0x330`-`0x33c` report
+
+`0x330`, `0x334`, `0x338` and `0x33c` are **read-only debug counters behind a mux**, not configuration. A vendor dump routine at `0x22ee80` (a local function, between the exported `vif_getmipitype_bits` and `vif_device_module_creat`) drives them: it read-modify-writes a channel index into `0x32c` bits [19:16], calls `ar_delay(100)`, then reads each counter and logs it as **two independent 16-bit fields**, high half and low half, through `ar_log_func_raw`. It loops, incrementing the channel index.
+
+Two consequences for anyone diffing a live VIF window:
+
+- **The values are only comparable when `0x32c` matches on both units**, because the mux decides what the counters are counting. On the captures in `out/au-chain/` it reads `0x00000fff` on both.
+- **A difference here is not a fault.** These are free-running measurements. Measured on a streaming vendor unit against the open stack with the same mux setting: `0x330` low half is 6640 on both, `0x33c` high half is 9869 on both, and `0x338` agrees within 0.2% in both halves. That level of agreement across independent units is positive evidence the front end is seeing the same video, and it is the correct way to read these registers.
+
+The same caution applies here as to the CSI wrapper's `0x030`: a single sample of a free-running counter carries no bit-level meaning, and reading one as though it did has produced retracted conclusions in this project before.
+
 `vif_ispcrc_config_path` (`0x226de8`) programs a CRC over the ISP path: after a dummy read of `0x134` it writes a `(width << 16) | height` pair to `0x118`, or to `0x114` for the other path. The vendor never writes either register in the trace, so this block is unexercised on stock; the result register has not been located.
+
+### What the ISP is made of
+
+The vendor library names every stage. `libmpp_service.so` exports 65 `isp_sub_<name>_creat` / `_delete` pairs, one per submodule, each allocating a module struct carrying an id at `+444` (`isp_sub_blc` is `0x1703`, the ISP block itself `0x1701`) and registering it. Register values are pushed per submodule through `isp_memcpy_bycmp(hw, shadow, prev, len)`, which writes a word only when it differs from the previous image, from 226 call sites spread across the per-submodule code.
+
+Read in pipeline order, the list is a conventional ISP:
+
+| Stage | Submodules |
+|---|---|
+| Sensor correction, Bayer domain | `blc`, `gib`, `fpn`, `dpc`, `dpc_v1`, `nuc_dpc`, `lsc`, `lsc_v1`, `hdr_lsc`, `hdr_lsc_v1`, `digigain1`, `digigain2`, `compander`, `decompander` |
+| Noise reduction, Bayer domain | `raw_3dnr`, `birnr`, `rnr`, `lnr`, `de3d`, `de3d_v1` |
+| Demosaic | `cfa`, the point where Bayer becomes RGB |
+| Colour | `wb`, `ccm1`, `ccm2`, `acm`, `cm`, `cm2`, `lut3d`, `qgg`, `cnf`, `lms` |
+| Tone | `gamma`, `gamma_v1`, `drc`, `drc_v1`, `ltm`, `ltm_v1`, `gtm2`, `gtm2_algo`, `hdr` |
+| Colour space | `rgb2yuv`, the point where RGB becomes YUV |
+| Geometry | `raw_crop`, `binning`, plus the scaler configuration on page `0x70` |
+| Infrared | `ir_gtm`, `ir_nbbc`, `ir_rnr`, `ir_lms_horz`, `ir_stats` |
+| Timing | `tg` |
+| Statistics, no pixel output | `af_stats`, `awbs_stats`, `hdr_awbs_stats`, `drc_stats`, `ltm_stats`, `ltm_stats_v1`, `ltm_stats_v2`, `raw_hist_stats`, `rgb_hist_stats`, `rgb_max_stats`, `rro_stats`, `rro_face_stats`, `hdr_rro_0_stats`, `hdr_rro_1_stats`, `hdr_rro_face_stats`, `derolling_stats` |
+
+The statistics family is what the per-frame loop's seven buffer addresses feed. They measure the frame for the 3A algorithms and are re-armed every frame, which is why they ping-pong while the picture planes, programmed once during setup, do not.
+
+The `_v1` and `_v2` suffixes are alternate implementations of the same stage, not extra stages. Many submodules are never enabled in this configuration: their static defaults exist in the library but the vendor never pushes them, and their registers read back zero on hardware.
+
+**The output pixel format is not established.** The library's format vocabulary distinguishes `STREAM_FORMAT_YUV420_8BIT_Plannar` (three planes) from `STREAM_FORMAT_YUV420_8BIT_semiPlannar` (two planes), and offers 420, 422 and 444 at 8, 10 and 12 bits. Three plane-address registers per buffer set point at planar rather than semi-planar. Against that, the observed buffer spacings do not fit a 1920x1080 planar layout: `0x2b439200` to `0x2b614200` is 1945600 bytes while a 1920x1080 luma plane is 2073600, so the gap is smaller than the luma plane it would have to hold. Either those three addresses are not the Y, U and V of one surface, or the surface at that stage is not full 1080p. Page `0x70` holds both `0x04380780` (1920x1080) and `0x021c03c0` (960x540), which is suggestive but untied. Settle this before describing a V4L2 format: a wrong guess makes a correct capture look like a broken one.
 
 ### Not known
 
@@ -134,6 +176,22 @@ V4L2 sensor subdev on I2C-0, address `0x1a`. 16-bit register address, 8-bit data
 - Power-on, verbatim from the vendor `nt99235_cmos_power_on`: assert enable (gpio104) and reset (gpio107), both active low; settle 10 ms; enable MCLK; release reset; settle 10 ms. The enable line stays asserted for the whole session.
 - `s_stream(1)`: runtime-resume, write the mode's full register table, `msleep(20)` for PLL and MCU settle, then `MODE_SELECT` (`0x0100`) = `0x01`. Stream-off writes `0x0100` = `0x00`.
 - Link frequency and pixel rate are exported as read-only V4L2 controls so the receiver can pick its D-PHY range. The DT endpoint lane count selects and filters the modes.
+
+#### Sensor configuration is verified equivalent to the vendor
+
+Established two independent ways, one static and one on hardware. This is the only stage of the capture chain verified to this standard.
+
+**Static, against the decompiled vendor library.** The vendor's 2-lane 1080p60 mode init is `FUN_00103440` in `libsns_nt99235.so`, 193 I2C writes issued through `FUN_00101508(ctx, reg, val)`. `nt99235_regs_1920x1080p60[]` is identical to it: same registers, same values, same order, duplicate writes included. This is a sequence comparison, not a set comparison. No register the vendor writes is missing, and no value differs.
+
+One deviation exists. The open driver additionally writes `0x0383` = `0x01` at position 118, and the vendor library writes register `0x0383` nowhere, in any mode. In SMIA-style register maps `0x0383` is `X_ODD_INC` and `1` is the no-subsampling value, so it is very likely inert, but it is unexplained and is the single divergence from the vendor sequence.
+
+**Live, on hardware.** 184 sensor registers read back over I2C from the streaming vendor on slot A and from the open stack on slot B, both mid-stream with the VIF front-end gate confirmed at `0x0784043c`. **Zero differences**, outside 26 registers in `0x8250`-`0x826c` and `0x8550`-`0x855c`.
+
+Those 26 drift at runtime on the vendor and are expected to differ. Measured on slot A: 156 of 183 registers still hold exactly the value the vendor library programmed, and every one of the 27 that moved falls in those two ranges. The vendor's 3A layer writes them through the callbacks the sensor library registers (`AR_MPI_AE_SensorRegCallBack`, `AR_MPI_AWB_SensorRegCallBack`). The open driver programs the same initial values and never updates them, so a difference there is the vendor adapting, not a fault.
+
+**Not covered: exposure and gain.** Neither the vendor mode table nor the open driver sets them. The vendor drives them from the 3A layer at runtime, so after mode init the open stack leaves the sensor at its power-on defaults. A correct capture may therefore be very dark or black. **Judge a capture by whether the DMA wrote, not by image brightness**: pre-fill the target buffer with a marker and check whether the marker was overwritten. A buffer full of zeros is indistinguishable from a DMA that never ran.
+
+Method: `glue/dev/au-chain-capture.sh` with `SLOT=a` then `SLOT=b`, diffed with `glue/dev/au-chain-diff.py`. Capture slot A first: it is the reference, and both captures are only meaningful if the front-end gate reads `0x0784043c`.
 
 ### Receiver: `ar-csi2.c`
 
@@ -198,7 +256,7 @@ The open CGU provider models these as gate-only leaves, so `clk_prepare_enable` 
 Validated on hardware, sensor through VIF front end:
 
 - **Clocks.** The CGU prologue reads back the vendor's values and the downstream blocks come alive.
-- **Sensor.** `nt99235` powers on and streams; the receiver sees its data.
+- **Sensor.** `nt99235` powers on and streams, and its configuration is **verified equivalent to the vendor's**: the mode table matches the vendor library write for write in order, and 184 registers read back live from both a streaming vendor unit and the open stack are identical outside the 26 the vendor's 3A adapts at runtime. See "Sensor configuration is verified equivalent to the vendor". Exposure and gain are the exception: nothing sets them on the open stack, so the sensor runs at power-on defaults.
 - **CSI-2 link.** Every `INT_ST_*` bank reads zero on the steady-state (second) read, matching a streaming vendor unit read the same way. The banks are clear-on-read, so a single read is meaningless: it returns the start transient too. Omitting the HS-settle write is a hard negative control and puts errors in four banks.
 - **VIF front end (path0).** Measures the incoming video timing correctly: `0x1f0` reads `0x0784043c` (1924 x 1084), and `0x1f4` and `0x1f8`/`0x1fc` match the streaming vendor's live values. `path0_frame_start` (`0x17c` bit24) fires at frame rate, 720 events per 1510 polls over 12 seconds.
 - **VIF-to-ISP hop.** The ISP-path status registers `0x10c` and `0x110` are live and advance with the vendor's value structure, so data crosses out of the front end into the ISP path.
