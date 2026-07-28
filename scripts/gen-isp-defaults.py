@@ -61,6 +61,10 @@ def load_trace(path, stop):
 		f = line.split()
 		if len(f) < 4:
 			continue
+		# Traces taken with MMIOTRACE_READS also carry r-prefixed load lines. They share
+		# the sequence counter, so they must be skipped rather than parsed as writes.
+		if f[0][0] != 'w':
+			continue
 		if int(f[0][1:], 16) > stop:
 			break
 		pa = f[2].split('=')[1]
@@ -83,6 +87,10 @@ def load_setup_writes(path, stop):
 	for line in open(path):
 		f = line.split()
 		if len(f) < 4:
+			continue
+		# Traces taken with MMIOTRACE_READS also carry r-prefixed load lines. They share
+		# the sequence counter, so they must be skipped rather than parsed as writes.
+		if f[0][0] != 'w':
 			continue
 		if int(f[0][1:], 16) > stop:
 			break

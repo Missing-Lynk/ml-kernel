@@ -132,6 +132,91 @@ static const struct {
 	{ AR_ISP_IN_LINETIME,		"in_linetime" },
 };
 
+/* The vendor's final ISP run: the 69 writes it issues AFTER re-initialising the CSI-2
+ * receiver and the VIF, and before the first per-frame acknowledge. This is where the output
+ * stage is armed and the master enable reaches its final value.
+ *
+ * Carried verbatim from out/au-mmiotrace/mmio-combined.log rather than sliced out of
+ * ar_isp_setup_1080p60: that table was generated from a different trace with consecutive
+ * duplicates collapsed, so its ordering does not align here (18 of 69 match at the best
+ * offset).
+ *
+ * The vendor's startup topology is ISP bulk -> receiver brought live -> output armed. Ours
+ * configures the receiver first and replays the ISP afterwards, so that hand-off has never been
+ * reproduced. Applying this table on its own, after the receiver is streaming, is what tests it.
+ */
+static const struct ar_isp_reg ar_isp_output_arm[] = {
+	{ 0x00cc, 0x00000000 },
+	{ 0x00d4, 0x10000600 },
+	{ 0x00cc, 0x00000000 },
+	{ 0x00d4, 0x00000100 },
+	{ 0x2e74, 0x00000c00 },
+	{ 0x2e00, 0x1f070002 },
+	{ 0x2e90, 0x03000100 },
+	{ 0x75a0, 0x2a660400 },
+	{ 0x75bc, 0x2a660400 },
+	{ 0x6440, 0x2a66a200 },
+	{ 0x6474, 0x2a66a200 },
+	{ 0x600c, 0x2a6a1200 },
+	{ 0x280c, 0x2a723200 },
+	{ 0x6508, 0x2a7ac200 },
+	{ 0x1d1c, 0x00000000 },
+	{ 0x1c08, 0x00000000 },
+	{ 0x1df0, 0x00000000 },
+	{ 0x0000, 0xb0280052 },
+	{ 0x0000, 0xb0280052 },
+	{ 0x0c10, 0x00000003 },
+	{ 0x0c10, 0x00000002 },
+	{ 0x1800, 0x000000e0 },
+	{ 0x1804, 0x04380780 },
+	{ 0x1808, 0x000f000a },
+	{ 0x180c, 0x000f000a },
+	{ 0x1810, 0x000f000a },
+	{ 0x1814, 0x000f000a },
+	{ 0x1818, 0x000f000a },
+	{ 0x181c, 0x000f000a },
+	{ 0x1820, 0x000f000a },
+	{ 0x1824, 0x000f000a },
+	{ 0x1828, 0x000f000a },
+	{ 0x182c, 0x000f000a },
+	{ 0x1830, 0x000f000a },
+	{ 0x1834, 0x000f000a },
+	{ 0x1838, 0x06400c80 },
+	{ 0x183c, 0x00000258 },
+	{ 0x1840, 0x060a0d10 },
+	{ 0x1844, 0x06400c80 },
+	{ 0x1848, 0x00000258 },
+	{ 0x184c, 0x060a0d10 },
+	{ 0x1850, 0x06400c80 },
+	{ 0x1854, 0x00000258 },
+	{ 0x1858, 0x060a0d10 },
+	{ 0x185c, 0x06400c80 },
+	{ 0x1860, 0x00000258 },
+	{ 0x1864, 0x060a0d10 },
+	{ 0x1868, 0x3c281a0d },
+	{ 0x186c, 0xc8a0785a },
+	{ 0x1870, 0x00080806 },
+	{ 0x1874, 0x000c0a0a },
+	{ 0x1878, 0x00100e0e },
+	{ 0x187c, 0x3c281a0d },
+	{ 0x1880, 0xc8a0785a },
+	{ 0x1884, 0x00080806 },
+	{ 0x1888, 0x000c0a0a },
+	{ 0x188c, 0x00100e0e },
+	{ 0x1890, 0x0001030c },
+	{ 0x1800, 0x000000e0 },
+	{ 0x1800, 0x000000e0 },
+	{ 0x0000, 0xb0280052 },
+	{ 0x4c40, 0x00010040 },
+	{ 0x4c34, 0x2b2e8600 },
+	{ 0x4c24, 0x00000034 },
+	{ 0x4c30, 0x00000034 },
+	{ 0x4c28, 0x00000034 },
+	{ 0x4c3c, 0x00000001 },
+	{ 0x4c00, 0x00000001 },
+	{ 0x3000, 0x00000000 },
+};
+
 static void ar_isp_apply(struct ar_isp *isp, const struct ar_isp_reg *tbl,
 			 size_t n)
 {
@@ -186,6 +271,29 @@ static void ar_isp_configure(struct ar_isp *isp)
 }
 
 /*
+ * Apply the vendor's output-arm run on its own.
+ *
+ * The vendor's startup order is ISP bulk, then a full re-initialisation of the
+ * CSI-2 receiver and the VIF, then these 69 writes. Ours configures the receiver
+ * first and replays the whole ISP table afterwards, so the hand-off the vendor
+ * performs, arming the output only once the receiver is live, has never been
+ * reproduced. Applying this after the stream is running is what tests that.
+ *
+ * Deliberately does not touch the recovered or setup tables, so it can follow a
+ * prefix without undoing it.
+ */
+static void ar_isp_arm_output(struct ar_isp *isp)
+{
+	ar_isp_apply(isp, ar_isp_output_arm, ARRAY_SIZE(ar_isp_output_arm));
+
+	dev_info(isp->dev,
+		 "output arm: %zu writes, control 0x%08x, in_geometry 0x%08x\n",
+		 ARRAY_SIZE(ar_isp_output_arm),
+		 readl(isp->base + AR_ISP_CONTROL),
+		 readl(isp->base + AR_ISP_IN_GEOMETRY));
+}
+
+/*
  * Apply only the first n writes of the setup table, for bisecting.
  *
  * With the VIF streaming and the ISP untouched, AR_ISP_IN_GEOMETRY reports the
@@ -227,6 +335,17 @@ static int ar_isp_prefix_get(void *data, u64 *val)
 	*val = ARRAY_SIZE(ar_isp_setup_1080p60);
 	return 0;
 }
+
+static int ar_isp_arm_set(void *data, u64 val)
+{
+	struct ar_isp *isp = data;
+
+	if (val)
+		ar_isp_arm_output(isp);
+
+	return 0;
+}
+DEFINE_DEBUGFS_ATTRIBUTE(ar_isp_arm_fops, NULL, ar_isp_arm_set, "%llu\n");
 
 DEFINE_DEBUGFS_ATTRIBUTE(ar_isp_prefix_fops, ar_isp_prefix_get,
 			 ar_isp_prefix_set, "%llu\n");
@@ -311,6 +430,8 @@ static int ar_isp_probe(struct platform_device *pdev)
 	 */
 	debugfs_create_file_unsafe("configure_upto", 0600, isp->debugfs, isp,
 				   &ar_isp_prefix_fops);
+	debugfs_create_file_unsafe("arm", 0600, isp->debugfs, isp,
+				   &ar_isp_arm_fops);
 
 	dev_info(dev, "probed, %zu registers available to apply\n",
 		 ARRAY_SIZE(ar_isp_recovered) +
