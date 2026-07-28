@@ -96,6 +96,22 @@ This is corroborated on hardware: the open driver's VIF steady state (bypass-or 
 
 The capture DMA is the ISP block's, driven by the eight per-frame address registers above.
 
+### VIF ISP-path status registers
+
+`0x104` through `0x138` are read-only: the vendor writes nothing in that range across all 48183 traced writes. Their use is recovered from `vif_ispintr_process` (`libmpp_service.so` `0x223a70`, 468 bytes), the VIF ISP-path interrupt handler. Its second argument is the interrupt status word (VIF `0x17c`), and it dispatches on the bits:
+
+| Status bit | Registers read |
+|---|---|
+| 25, 26 | `0x104` |
+| 28, 29 | `0x108` |
+| 24 (ISP frame event) | `0x0c0`, `0x0ec`, then `0x10c` and `0x110` |
+
+On bit 24 the handler reads `0x0c0` and tests bit 9, reads `0x0ec` and tests mask `0x40`, reads `0x10c` and `0x110` and discards both values, then conditionally clears the low 8 or low 16 bits of `0x0ec` and writes it back. Reading and discarding is consistent with clear-on-read status, but whether these registers latch status or count lines or pixels is **not established**; the values are never compared against anything in the handler.
+
+These are the only visibility into whether pixels cross from the VIF front end into the ISP. Frame-start delimiters (`0x17c` bit24 on path0) are a header-level event and do not prove pixel traversal.
+
+`vif_ispcrc_config_path` (`0x226de8`) programs a CRC over the ISP path: after a dummy read of `0x134` it writes a `(width << 16) | height` pair to `0x118`, or to `0x114` for the other path. The vendor never writes either register in the trace, so this block is unexercised on stock; the result register has not been located.
+
 ### Not known
 
 These are open and are not to be assumed while building the ISP driver:
@@ -200,4 +216,6 @@ Investigation history and next steps live in `plans/air-camera-first-light.md`; 
 | VIF front end, view arm, DMA | `overlay/drivers/media/artosyn/ar-vif.c` |
 | DT nodes (camera, CSI, VIF, clocks, `isp_cma`) | `devices/betafpv-vr04-air/proxima-9311-air.dts` |
 | Vendor MMIO write trace | `out/au-mmiotrace/mmio-combined.log`, capture harness `glue/dev/au-slotA-mmiotrace.sh`, shim `native/mmiotrace.c` |
-| Vendor RE cross-reference | `archive/re/notes/nt99235/` |
+| Vendor RE cross-reference | `archive/re/notes/nt99235/` (see the caution below) |
+
+Caution on the RE notes: they were checked against the trace and are unreliable in detail. They record the vendor's `0x080` as `0x76543210` (the trace shows `0xffffffff` and `0xfffffff8`), state that the open driver never writes `0x32c` when it does, and give `0x0d0` as both `0x2c` and `0xaaaaaaaa` in different files. Treat them as leads to verify. The trace is the authority for what the vendor writes; the disassembly is the authority for what a register means.
