@@ -33,6 +33,14 @@ The microSD host `mmc@1c00000` (mmc1) is the same DesignWare IP, a different ins
 
 `artosyn_gpio.c` is the open reimplementation of the vendor `artosyn,gpio` controller at `0x0A10A000`; it is needed because the AR8030 reset must be driven through gpiolib (ad-hoc `/dev/mem` pokes fail: the direction register is write-only/unreadable). GPIO23 = bank1 line0 is the AR8030 active-low reset (drive output low then high to release). The register model, the load-bearing `0xBC` (not `0xC0`) bank base, and the bank layout are `artosyn-gpio.md`.
 
+## Corrupt power-up device ID [confirmed]
+
+The AR8030 can power up in a state where it enumerates with the correct vendor (`0x4152`) but a garbage device ID (observed `0x2a22`), which is neither `0x8030` nor `0x8031`. `artosyn_sdio`'s `id_table` then never matches, so there is no probe, no firmware upload, no `/dev/artosyn_sdio` and no `sdio0`; `ml-linkd` loops on `open(/dev/artosyn_sdio): No such file or directory` and `ml-pipeline` stays at `rx=0`. Diagnose with `cat /sys/bus/sdio/devices/*/device`: anything other than `0x8030` (ROM loader) or `0x8031` (firmware running) is this state.
+
+The GPIO23 reset pulse does not clear it, so the wedge sits below the reset domain. The DTS carries no regulator or power-enable for the AR8030 and GPIO23 is the only control line, so software cannot power-cycle the chip: the remedy is a cold power cycle with the battery out, and a warm reboot may not be enough. Note this is not stale state from another slot; `ml-rf-bringup` pulses the reset and then waits for `0x8030` specifically, so the firmware and its config are re-downloaded on every bring-up.
+
+Possible debugging step (not implemented): `wait_ar8030()` in `ml-rf-bringup` reads every enumerated device ID while scanning and discards it, then reports `AR8030 never enumerated on SDIO` on timeout, which is misleading here because the chip did enumerate. Recording the observed `vendor:device` pairs and printing them on timeout would name this state at boot instead of leaving `ml-linkd` retrying without a reason. Whether a longer or repeated reset hold recovers the chip is untested.
+
 ## Clock glue: `dw_mci-artosyn` (mmc0 taps) [confirmed]
 
 The clock glue is shared with the SD card and documented in full in `sd-card.md` (the SEL tap table, the never-write rules for `0x0A108000`/`0x0A108038`, the CGU source-gate requirement); only the mmc0-specific facts are here. For mmc0 the tap registers are `AR_SDMMC0_CLK_SEL = 0x0A108088` and `AR_SDMMC0_CLK_CFG = 0x0A10808C` (the SD card uses `0x0A1080C0`/`0x0A1080C4`); the default is SEL `0x80` (100 MHz), phase 0 in CFG. The relevant CGU source gates are `0x0A104024` (bit 22) and `0x0A104028` (bit 23); gated, CMD5 times out (`-110`). Whether the glue actively writes the enable bits or relies on U-Boot is **[open]**; a proper CCF driver to own these gates is deferred (the read-only tree exists, `clocks.md`).
