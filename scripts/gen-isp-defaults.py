@@ -20,6 +20,7 @@ its shadow image with a write-only-if-changed primitive (isp_memcpy_bycmp).
 
 import argparse
 import hashlib
+import re
 import struct
 import sys
 
@@ -96,6 +97,37 @@ def load_setup_writes(path, stop):
 	return writes
 
 
+def load_window(path):
+	"""ISP registers from an au-chain-capture.sh capture."""
+	out, section = {}, None
+	for line in open(path):
+		m = re.match(r'SECTION (\S+)', line)
+		if m:
+			section = m.group(1)
+			continue
+		m = re.match(r'\+0x([0-9a-f]{4}): (.*)', line)
+		if m and section and section.startswith('isp-'):
+			page = int(section[4:], 16)
+			off = (page << 8) + int(m.group(1), 16)
+			for i, w in enumerate(m.group(2).split()):
+				if re.fullmatch(r'[0-9a-f]{8}', w):
+					out[off + 4 * i] = int(w, 16)
+	return out
+
+
+def load_trim(vendor_path, our_path):
+	"""Registers whose live value on the working device differs from ours.
+
+	Live against live, which is the only valid comparison: our intended value is
+	not a baseline, and a register can legitimately read back something else.
+	"""
+	if not vendor_path or not our_path:
+		return []
+	v = load_window(vendor_path)
+	o = load_window(our_path)
+	return [(k, v[k]) for k in sorted(set(v) & set(o)) if v[k] != o[k]]
+
+
 def agree_span(data, bases, lo, hi):
 	"""Widest [a, b) around the traced span over which all copies agree.
 
@@ -122,8 +154,15 @@ def main():
 	ap = argparse.ArgumentParser()
 	ap.add_argument('--lib', required=True, help='vendor libmpp_service.so')
 	ap.add_argument('--trace', required=True, help='MMIO write trace')
-	ap.add_argument('--stop', default='0xa29',
+	ap.add_argument('--stop', default='0xc50',
 			help='trace index at which the setup phase ends')
+	ap.add_argument('--vendor-window',
+			help='au-chain-capture.sh capture from the streaming vendor. '
+			     'Emits a trim table forcing our final state to match the '
+			     'values the working device actually holds.')
+	ap.add_argument('--our-window',
+			help='the matching capture from our stack, so the trim covers '
+			     'only registers whose live state actually differs')
 	ap.add_argument('-o', '--output', required=True)
 	args = ap.parse_args()
 
@@ -133,9 +172,11 @@ def main():
 		sys.exit('libmpp_service.so sha256 mismatch: block offsets do not apply')
 
 	first = load_trace(args.trace, int(args.stop, 16))
+	trim = load_trim(args.vendor_window, args.our_window)
 	setup = load_setup_writes(args.trace, int(args.stop, 16))
 
 	pages = []
+	disagree = []
 	n_traced = n_recovered = n_unverified = 0
 	for pg, bases in sorted(BLOCKS.items()):
 		pagebase = pg << 8
@@ -152,8 +193,11 @@ def main():
 			val = struct.unpack_from('<I', data, zero[0] + 4 * i)[0]
 			seen = off in first
 			if seen and first[off] != val:
-				sys.exit('page 0x%02x reg 0x%04x: block 0x%08x != trace 0x%08x'
-					 % (pg, off, val, first[off]))
+				# The static default and the vendor's first write disagree.
+				# Not fatal: the setup table writes the traced value after
+				# the defaults, so the traced value wins. Reported because a
+				# large count would mean the block map is wrong.
+				disagree.append((off, val, first[off]))
 			regs.append((off, val, seen))
 			if seen:
 				n_traced += 1
@@ -232,6 +276,24 @@ def main():
 			w('\t{ 0x%04x, 0x%08x },\n' % (off, val))
 		w('};\n\n')
 
+		if trim:
+			w('/*\n')
+			w(' * Final correction pass, measured rather than derived.\n')
+			w(' *\n')
+			w(' * Every entry is a register whose live value on the streaming\n')
+			w(' * vendor differs from the live value our stack reaches after the\n')
+			w(' * tables above. Live against live: our intended value is not a\n')
+			w(' * valid baseline, since a register can legitimately read back\n')
+			w(' * something other than what was written.\n')
+			w(' *\n')
+			w(' * Some entries are certainly counters and status words that\n')
+			w(' * ignore writes. Writing them is harmless and they cannot be\n')
+			w(' * told apart from configuration with a single sample each.\n')
+			w(' */\n')
+			w('static const struct ar_isp_reg ar_isp_vendor_trim[] = {\n')
+			for off, val in trim:
+				w('\t{ 0x%04x, 0x%08x },\n' % (off, val))
+			w('};\n\n')
 		w('#endif /* _AR_ISP_DEFAULTS_H */\n')
 
 	total = n_traced + n_recovered + n_unverified
@@ -240,6 +302,12 @@ def main():
 	      % (n_traced, n_recovered, n_unverified))
 	print('  setup table: %d ordered writes over %d registers'
 	      % (len(setup), len(set(o for o, _ in setup))))
+	if trim:
+		print('  trim table: %d registers corrected to the streaming vendor'
+		      % len(trim))
+	if disagree:
+		print('  %d registers where the static default and the vendor first '
+		      'write disagree (traced value wins)' % len(disagree))
 
 
 if __name__ == '__main__':
