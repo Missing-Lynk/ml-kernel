@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: GPL-2.0
+
+config VIDEO_ARTOSYN_NT99235
+	tristate "Novatek NT99235 sensor support"
+	depends on OF && I2C && VIDEO_DEV
+	select MEDIA_CONTROLLER
+	select VIDEO_V4L2_SUBDEV_API
+	select V4L2_FWNODE
+	help
+	  Subdev driver for the Novatek NT99235 MIPI CSI-2 image sensor, the
+	  camera fitted to the BetaFPV VR04 air unit.
+
+	  To compile this driver as a module, choose M here: the module will be
+	  called nt99235.
+
+config VIDEO_ARTOSYN_CSI2
+	tristate "Artosyn MIPI CSI-2 receiver"
+	depends on OF && VIDEO_DEV
+	select MEDIA_CONTROLLER
+	select VIDEO_V4L2_SUBDEV_API
+	select V4L2_FWNODE
+	help
+	  Receiver subdev for the MIPI CSI-2 block on Artosyn Proxima SoCs.
+	  Each instance is a Synopsys DesignWare CSI-2 host controller behind a
+	  small Artosyn wrapper.
+
+	  To compile this driver as a module, choose M here: the module will be
+	  called ar-csi2.
+
+config VIDEO_ARTOSYN_VIF
+	tristate "Artosyn VIF capture front end"
+	depends on OF && VIDEO_DEV
+	select MEDIA_CONTROLLER
+	select VIDEO_V4L2_SUBDEV_API
+	select V4L2_FWNODE
+	select VIDEOBUF2_DMA_CONTIG
+	help
+	  Capture driver for the video interface block on Artosyn Proxima SoCs,
+	  which writes frames from the CSI-2 receiver to memory. Provides a
+	  V4L2 capture device.
+
+	  To compile this driver as a module, choose M here: the module will be
+	  called ar-vif.

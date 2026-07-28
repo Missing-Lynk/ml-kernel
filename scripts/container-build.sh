@@ -59,6 +59,16 @@ if [ -d /repo/overlay ]; then
   grep -q "obj-y += artosyn/" drivers/gpu/drm/Makefile || \
     echo "obj-y += artosyn/" >> drivers/gpu/drm/Makefile
 
+  # Insert (not append) the media Kconfig hook: appending would land it after
+  # "endif # MEDIA_SUPPORT", outside the block its dependencies live in. The
+  # i2c source line sits in the ancillary-drivers menu, which is where a sensor
+  # driver belongs.
+  grep -q "media/artosyn/Kconfig" drivers/media/Kconfig || \
+    sed -i 's|^source "drivers/media/i2c/Kconfig"$|&\nsource "drivers/media/artosyn/Kconfig"|' \
+      drivers/media/Kconfig
+  grep -q "obj-y += artosyn/" drivers/media/Makefile || \
+    echo "obj-y += artosyn/" >> drivers/media/Makefile
+
   grep -q "clk-ar9311-cgu.o" drivers/clk/Makefile || echo "obj-y += clk-ar9311-cgu.o" >> drivers/clk/Makefile
   grep -q "spi-ar9301.o" drivers/spi/Makefile || echo "obj-y += spi-ar9301.o" >> drivers/spi/Makefile
 fi
