@@ -90,6 +90,41 @@ module_param(force_mode, int, 0444);
 MODULE_PARM_DESC(force_mode,
 		 "select a sensor mode by index regardless of the declared lane count (-1 to choose automatically)");
 
+/*
+ * Test pattern. Nothing sets exposure or gain on this stack, so a correct
+ * capture is black, and a black frame cannot be told apart from a broken one by
+ * looking at it. A generated pattern removes the sensor's optics and exposure
+ * from the question entirely: content of known shape arriving in DRAM proves
+ * sensor, CSI-2, VIF, ISP and CVISP end to end, and gives known-good data to
+ * check the recovered geometry, stride and plane layout against.
+ *
+ * The register is INFERRED, not confirmed. The vendor library never writes it,
+ * in any mode, which is what production firmware would do either way. The
+ * inference is that the NT99235 carries the SMIA register block: the mode tables
+ * use SMIA addresses throughout (0x0100 mode select, 0x0340 frame length, 0x0342
+ * line length, 0x0344-0x034b analogue crop, 0x034c output size, 0x0381-0x0387
+ * subsampling, 0x0408-0x040f digital crop, 0x0900 binning), and in that map
+ * TEST_PATTERN_MODE is a 16-bit register at 0x0600.
+ *
+ * nt99235_apply_test_pattern reads the register back and logs it, so a run
+ * settles whether the register exists at all without needing to judge an image:
+ * a readback matching what was written means it is implemented, and a readback
+ * stuck at zero means the inference is wrong and the address is elsewhere.
+ */
+#define NT99235_REG_TEST_PATTERN_HI	0x0600
+#define NT99235_REG_TEST_PATTERN_LO	0x0601
+
+#define NT99235_TEST_PATTERN_OFF	0
+#define NT99235_TEST_PATTERN_SOLID	1
+#define NT99235_TEST_PATTERN_BARS	2
+#define NT99235_TEST_PATTERN_FADE	3
+#define NT99235_TEST_PATTERN_PN9	4
+
+static int test_pattern = NT99235_TEST_PATTERN_OFF;
+module_param(test_pattern, int, 0644);
+MODULE_PARM_DESC(test_pattern,
+		 "SMIA test pattern at stream-on: 0 off, 1 solid, 2 colour bars, 3 fade to grey, 4 PN9 (register inferred, readback is logged)");
+
 struct nt99235_reg {
 	u16 address;
 	u8 value;
@@ -565,6 +600,45 @@ static int nt99235_detect(struct nt99235 *nt99235)
 	return 0;
 }
 
+/*
+ * Program the test pattern and report what the sensor makes of it. Deliberately
+ * not fatal: the address is an inference from the SMIA register map, so a device
+ * that does not implement it should leave capture exactly as it was rather than
+ * failing stream-on. The readback is the actual result of this function.
+ */
+static void nt99235_apply_test_pattern(struct nt99235 *nt99235)
+{
+	u8 hi = 0, lo = 0;
+	int ret;
+
+	ret = nt99235_write(nt99235, NT99235_REG_TEST_PATTERN_HI,
+			    (test_pattern >> 8) & 0xff);
+	if (!ret)
+		ret = nt99235_write(nt99235, NT99235_REG_TEST_PATTERN_LO,
+				    test_pattern & 0xff);
+	if (ret) {
+		dev_warn(nt99235->dev, "test pattern %d: write failed (%d)\n",
+			 test_pattern, ret);
+		return;
+	}
+
+	if (nt99235_read(nt99235, NT99235_REG_TEST_PATTERN_HI, &hi) ||
+	    nt99235_read(nt99235, NT99235_REG_TEST_PATTERN_LO, &lo)) {
+		dev_warn(nt99235->dev, "test pattern %d: readback failed\n",
+			 test_pattern);
+		return;
+	}
+
+	if (((hi << 8) | lo) == test_pattern)
+		dev_info(nt99235->dev,
+			 "test pattern %d set, reads back 0x%02x%02x: the register is implemented\n",
+			 test_pattern, hi, lo);
+	else
+		dev_warn(nt99235->dev,
+			 "test pattern %d wrote 0x%04x but reads back 0x%02x%02x: 0x0600 is not it\n",
+			 test_pattern, test_pattern, hi, lo);
+}
+
 static int nt99235_set_stream(struct v4l2_subdev *sd, int enable)
 {
 	struct nt99235 *nt99235 = to_nt99235(sd);
@@ -592,6 +666,13 @@ static int nt99235_set_stream(struct v4l2_subdev *sd, int enable)
 	 * vendor never exercises.
 	 */
 	msleep(20);
+
+	/*
+	 * After the mode table, so it is not overwritten by it, and before
+	 * stream-on, so the first frame already carries the pattern.
+	 */
+	if (test_pattern != NT99235_TEST_PATTERN_OFF)
+		nt99235_apply_test_pattern(nt99235);
 
 	ret = nt99235_write(nt99235, NT99235_REG_MODE_SELECT,
 			    NT99235_MODE_STREAMING);

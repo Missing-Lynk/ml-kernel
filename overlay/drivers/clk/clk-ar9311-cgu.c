@@ -319,7 +319,11 @@ static const struct ar9311_leaf_desc ar9311_leaves[] = {
 	{ "cgu_dla_clk",     0x10,  1, AR_HALF_HI,
 	  { "fix_pll_clk800", "fix_pll_clk666", "fix_pll_clk500", "fix_pll_clk400",
 	    "adc_pll_clk600", "adc_pll_clk400", "pixel_pll_clk", "mipi_tx_pll_div2" } },
-	{ "cgu_rsz_clk",     0x14,  1, AR_HALF_LO,   PAR_GENERIC_OSC },
+	/* CVISP's clock. Gateable like the other media leaves; the vendor never
+	 * writes this leaf during camera bringup, so it streams with whatever
+	 * state the boot left, and the gate flag is what lets ar-cvisp assert it.
+	 */
+	{ "cgu_rsz_clk",     0x14,  1, AR_HALF_LO,   PAR_GENERIC_OSC, AR_LEAF_GATE },
 	{ "cgu_de_clk",      0x14,  1, AR_HALF_HI,   PAR_GENERIC_OSC },
 	{ "cgu_venc_clk",    0x18,  1, AR_HALF_LO,   PAR_GENERIC_OSC },
 	{ "cgu_jpeg_clk",    0x18,  1, AR_HALF_HI,   PAR_GENERIC_OSC },

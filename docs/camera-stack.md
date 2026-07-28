@@ -1,10 +1,10 @@
-# Camera stack (NT99235 / CSI-2 / VIF / ISP)
+# Camera stack (NT99235 / CSI-2 / VIF / ISP / CVISP)
 
 The air unit (BetaFPV VR04, Proxima-9311) captures from an onboard NT99235 image sensor over MIPI CSI-2. The vendor firmware drives that path entirely from userspace; reproducing the vendor's sequence in open drivers is the goal.
 
 This document records two things and keeps them separate: **how the vendor drives the hardware**, recovered from a live MMIO write trace of the streaming stock unit, and **what the open stack currently implements and has validated on hardware**. Everything stated here is backed by a named artifact or a hardware observation. Anything not yet established is listed under "Not known".
 
-Drivers: `overlay/drivers/media/artosyn/` (`nt99235.c`, `ar-csi2.c`, `ar-vif.c`). Device tree: `devices/betafpv-vr04-air/proxima-9311-air.dts`.
+Drivers: `overlay/drivers/media/artosyn/` (`nt99235.c`, `ar-csi2.c`, `ar-vif.c`, `ar-isp.c`, `ar-cvisp.c`). Device tree: `devices/betafpv-vr04-air/proxima-9311-air.dts`.
 
 ## Blocks
 
@@ -12,20 +12,25 @@ Drivers: `overlay/drivers/media/artosyn/` (`nt99235.c`, `ar-csi2.c`, `ar-vif.c`)
 |---|---|---|
 | VIF | `0x08870000` (64 KiB), IRQ SPI 62 | front end (path0) plus 8 capture views |
 | MIPI CSI wrapper | `0x08880000` (64 KiB), IRQ SPI 60/61 | 8 receiver instances in 4 pairs; each pair `0x1000`: Artosyn glue at pair base, DesignWare host core 0 at `+0x400`, core 1 at `+0x800` |
-| ISP | `0x08c00000` (2 MiB), IRQ SPI 71 | frame-capture DMA; no open driver binds it |
+| ISP | `0x08c00000` (2 MiB), IRQ SPI 71 | Bayer processing; feeds CVISP, does not write frames itself |
+| CVISP | `0x08e00000` (64 KiB), IRQ unknown | the output stage: owns the frame queue and writes to DRAM |
 | CGU | `0x0a100000` / `0x0a104000` / `0x0a108000` | clock controller |
 
 This board uses CSI pair 0, core 0 at `0x08880400`. The DesignWare core version register reads v1.20, checked at probe.
 
 **All four blocks are inside the SoC**, in its media subsystem. The NT99235 is a plain Bayer sensor: it holds a pixel array, its own PLL and exposure and analogue gain, and a MIPI CSI-2 transmitter, and nothing else. Every stage that turns its raw output into a picture runs on the Proxima-9311. Nothing in this document lives on the camera module.
 
-The chain is: sensor sends CSI-2 packets over the MIPI lanes; the **CSI-2 receiver** decodes the link and produces a pixel stream on its IPI output; the **VIF** is the SoC's capture front end, which accepts that pixel stream and routes it, either straight to DDR through its bypass views or onward into the ISP; the **ISP** converts Bayer to YUV and DMAs the result to DDR.
+The chain is: sensor sends CSI-2 packets over the MIPI lanes; the **CSI-2 receiver** decodes the link and produces a pixel stream on its IPI output; the **VIF** is the SoC's capture front end, which accepts that pixel stream and routes it, either straight to DDR through its bypass views or onward into the ISP; the **ISP** converts Bayer to YUV; and **CVISP** takes the ISP's output and writes frames to DDR.
+
+**The ISP is not the writer.** That was assumed for most of this investigation and it is wrong. The correction is in "The output stage is CVISP" below, and it explains the standing contradiction: an ISP configured to match the vendor register for register, measurably receiving pixels, still produced no frames, because the stage that writes them was one we had never touched.
 
 `VIF` is the vendor's own name for the block, used throughout `libmpp_service.so` (`vif_*`, 118 functions) and in the interrupt it registers (`ar_irq_reg_with_name(irq, handler, dev, "vif")`). It is the video interface between the receiver and the rest of the media block. It is not a MIPI or CSI-2 block itself: it sees pixels, not packets, and it also measures the incoming video timing, which is what makes `0x1f0` the front end's ground-truth register.
 
 The vendor kernel does no camera hardware programming. `cam_hardware_power_on` calls `ar_pwr_ctrl_on(1)`, which on the 9311 dispatches through an uninstalled pointer and returns -1. All VIF, CSI, ISP and CGU register writes on the stock unit come from userspace (`libmpp_service.so`, called by `ar_lowdelay`) through `/dev/mem`.
 
 ## How the vendor drives the pipeline
+
+Most of this section was written before CVISP was found, from traces windowed on one block at a time. It is accurate about the blocks it describes, but where it treats the ISP as the stage that writes frames to memory it is describing the wrong stage. Read "The output stage is CVISP" below first; it says what the ISP's per-frame loop and plane registers are not.
 
 ### The trace
 
@@ -152,11 +157,129 @@ The statistics family is what the per-frame loop's seven buffer addresses feed. 
 
 The `_v1` and `_v2` suffixes are alternate implementations of the same stage, not extra stages. Many submodules are never enabled in this configuration: their static defaults exist in the library but the vendor never pushes them, and their registers read back zero on hardware.
 
-**The output pixel format is not established.** The library's format vocabulary distinguishes `STREAM_FORMAT_YUV420_8BIT_Plannar` (three planes) from `STREAM_FORMAT_YUV420_8BIT_semiPlannar` (two planes), and offers 420, 422 and 444 at 8, 10 and 12 bits. Three plane-address registers per buffer set point at planar rather than semi-planar. Against that, the observed buffer spacings do not fit a 1920x1080 planar layout: `0x2b439200` to `0x2b614200` is 1945600 bytes while a 1920x1080 luma plane is 2073600, so the gap is smaller than the luma plane it would have to hold. Either those three addresses are not the Y, U and V of one surface, or the surface at that stage is not full 1080p. Page `0x70` holds both `0x04380780` (1920x1080) and `0x021c03c0` (960x540), which is suggestive but untied. Settle this before describing a V4L2 format: a wrong guess makes a correct capture look like a broken one.
+**The output pixel format is not established.** The buffer-spacing argument below is now better explained: these ISP addresses are not the frame output. CVISP's are. The paragraph stands as a record of what the ISP's own address registers look like. The library's format vocabulary distinguishes `STREAM_FORMAT_YUV420_8BIT_Plannar` (three planes) from `STREAM_FORMAT_YUV420_8BIT_semiPlannar` (two planes), and offers 420, 422 and 444 at 8, 10 and 12 bits. Three plane-address registers per buffer set point at planar rather than semi-planar. Against that, the observed buffer spacings do not fit a 1920x1080 planar layout: `0x2b439200` to `0x2b614200` is 1945600 bytes while a 1920x1080 luma plane is 2073600, so the gap is smaller than the luma plane it would have to hold. Either those three addresses are not the Y, U and V of one surface, or the surface at that stage is not full 1080p. Page `0x70` holds both `0x04380780` (1920x1080) and `0x021c03c0` (960x540), which is suggestive but untied. Settle this before describing a V4L2 format: a wrong guess makes a correct capture look like a broken one.
+
+### The output stage is CVISP
+
+The block at `0x08e00000` is what writes frames to DRAM. The ISP feeds it. This was found late and it invalidates the framing of everything above it: the ISP was audited for months as though it were the writer.
+
+**How it was missed.** Every trace before the wide sweep narrowed `MMIOTRACE_LO`/`HI` to one block, chosen from the vendor device tree. The vendor maps all 256 MiB of register space in a single `/dev/mem` call and drives every block through it, so writes outside the chosen window were never recorded. CVISP is absent from the vendor device tree, so it was never a candidate window. The earlier claims "register state matches the vendor everywhere" and "coverage is 1267 of 1267" were true, but only of the ISP block, inside windows we picked ourselves.
+
+**The sweep.** `out/au-mmiotrace/wide-sweep.log`, window `0x08000000`-`0x0a1fffff` skipping `0x08820000`-`0x0885ffff` (encoder and DSI, excluded because a previous wide attempt corrupted them), vendor streaming throughout, 330630 writes.
+
+| Block | Writes | Identity |
+|---|---|---|
+| `0x0a080000` | 182058 | `h26x` encoder (vendor DTS) |
+| `0x08c00000` | 60622 | ISP |
+| `0x08800000` | 60228 | `axi_dma` (vendor DTS) |
+| `0x08870000` | 15129 | VIF |
+| `0x08e00000` | 11782 | **CVISP** |
+| `0x08880000` | 738 | CSI-2 |
+| `0x0a100000` | 66 | CGU |
+
+The sweep is writes-only, so it says nothing about what the vendor reads from any of these.
+
+**The name** comes from `libmpp_service.so`, which is unstripped and exports a complete `cvisp_*` stack: device, input, output, filter, statistics, gamma and LSC, plus `cvisp_outlib_*`, `cvisp_device_irq_process` and `cvisp_dispatch_irq`. It is distinct from the device tree's `scaler@08840000` and `gdc@08848000`, which are different addresses.
+
+**Cadences.** The vendor drives it at four:
+
+| Table | When | Contents |
+|---|---|---|
+| setup | once | 255 ordered writes over 224 registers, ending at the staged output enable |
+| late | once, just after the enable | 101 registers: the arbitration table on page `0x0000`, channel geometry on page `0x4000` |
+| ring | once per frame | one Y/U/V triplet, round robin over five buffer sets |
+| tick | once per ring wrap | eight registers at `0x4600`-`0x460c` and `0x4700`-`0x470c`, all `0x00000100` |
+
+The tick group going once per *wrap* rather than once per frame is measured: 496 writes to each tick register against 2477 to each plane register, and the interleaving in the trace shows five triplets between consecutive tick groups.
+
+**The enable** is a staged write to `0x8000`: `0x00800800` then `0x00800802` then `0x00800806`, five times and then twice, after which the register is never written again. Bits 1 and 2 are the launch candidates; their individual meanings are not decoded.
+
+**The ring** is five buffer sets, not the two an earlier reading suggested:
+
+```
+Y  0x28014000 -> 0x2834c000 -> 0x28684000 -> 0x289bc000 -> 0x28cf4000 -> repeat
+U  0x28232000    0x2856a000    0x288a2000    0x28bda000    0x28f12000
+V  0x282bb000    0x285f3000    0x2892b000    0x28c63000    0x28f9b000
+```
+
+Round robin, all three planes in lockstep, no deviation across 496 wraps. The range `0x28014000`-`0x2902c000` is reserved as `cvisp_cma` in the device tree; `vif_cma` moved to `0x2c000000` because the ring's last slot runs past where it used to start.
+
+**Geometry is not settled.** `0x8028` carries `0x04380780` (1080 x 1920) and `0x8008` is written `0x021c03c0` (540 x 960) during setup but ends at `0x04380780`, while page `0x4000` carries 1920 x 1080 throughout. `0x021c03c0` is also what ISP `0x7080` reads on the streaming vendor. Which stage, if any, is scaled is open.
+
+**Clock.** `cgu_rsz_clk`, `0x0a104014` low half, gate bit 12, device tree index 9. This is from the vendor clock table, not the trace: the trace contains **no CGU write for this block at all**, and `0x0a104014` does not appear in the live vendor CGU snapshot either. So the vendor streams with whatever state the boot leaves that leaf in, and enabling it is an assumption. It is the load-bearing one in `ar-cvisp.c`, which is why that driver reads no register at probe: if the leaf is wrong, the first access hangs the SoC, and a probe-time read would make that unavoidable on every boot.
+
+**No reset and no interrupt are declared.** No CVISP reset write appears anywhere in the trace and no reset leaf has been identified. The block does have its own completion path (`cvisp_device_irq_process` at `0x2424b8` dispatches through `cvisp_dispatch_irq` at `0x242390`, routing status bits 1 and 5 to output events `0x1001`/`0x1002` and bit 3 to `0x2c02`), which is good evidence that frame completion is serviced from CVISP rather than from VIF SPI 62 alone. But the hardware IRQ number and its acknowledge register are still behind the vendor's generic camera-module event layer, so asserting either in the device tree would be inventing it.
+
+Extractor: `scripts/gen-cvisp-defaults.py` -> `overlay/drivers/media/artosyn/ar-cvisp-defaults.h`. The setup table self-checks: replaying it in order reproduces the vendor's final value for every register it touches.
+
+### CVISP first light, validated on hardware
+
+Slot B RAM-boot, 2026-07-29. CVISP writes YUV planes to DRAM.
+
+`glue/dev/au-cvisp-firstlight.sh`, CVISP configured against a control run with it left alone, same addresses and same everything else:
+
+| Run | Plane `0x28014000` | `0x28232000` | `0x282bb000` |
+|---|---|---|---|
+| configured | 24/24 overwritten, `0x01010101` | 24/24, `0x7f7f7f7f` | 24/24, `0x7f7f7f7f` |
+| control | 0/24 | 0/24 | 0/24 |
+
+Frame starts ran at 60.0/s in both, so the front end was equally live in the negative case. Luma `0x01` with both chroma planes at neutral `0x7f` is a black frame, not a fill pattern: a memset would not produce that pairing. Sensor exposure and gain are still unset on the open stack, so a black frame is the expected picture.
+
+**The clock is inherited, not asserted.** There is no clock request anywhere in the CVISP path in `libmpp_service.so`, and `0x0a104014` reads `0x02011102` on slot B with gate bit 12 already set, so the boot firmware leaves it on and the vendor inherits it. `ar-cvisp` does the same; asserting it is behind an off-by-default `assert_clk` param. Taking ownership was harmful, not merely unnecessary: the leaf is gate-modelled, so `clk_disable_unprepare` on `rmmod` cleared a gate the boot had set. Stock-A baselines read `0x12011100` at the same register, differing in both halves but agreeing on bit 12.
+
+**The write is triggered by the arm, not by the configuration.** The control run above did not reset the block, and its opening `regs` dump still showed `control=0x00800806` with set 0 armed and geometry intact. So CVISP sat fully configured and enabled through ten seconds of 60 fps input and wrote nothing.
+
+**It sustains.** `glue/dev/au-cvisp-framelock.sh` arms one ring slot per VIF frame start, the vendor's cadence: 480 slots armed over 96 wraps in 8 seconds at 60.0/s, and ring slots 1, 2 and 3 were all overwritten.
+
+An earlier burst-driven test (`au-cvisp-rotate.sh`, `echo 5 > queue` in a loop) saw only slot 1 written and looked like a stall. It was not: five rotations complete in microseconds, so slots 2 to 4 were armed and superseded long before a 60 Hz frame could land in them. The apparent stall was the test.
+
+**The frame is uniformly black.** The active region of a dumped luma plane is 100% `0x01` across 1,941,016 bytes, with chroma at neutral `0x7f`. CVISP writes; there is no picture. Sensor exposure and gain are unset on the open stack, so this is the expected next problem rather than a CVISP failure. A perfectly uniform non-zero luma is consistent with a black-level clamp, that is, the ISP processing correctly with nothing above black arriving.
+
+**Line stride is 2048 for a 1920-wide plane**, measured: the gap between bright runs in a dumped plane is exactly 2048 and every sub-gap pair sums to it. A full plane is therefore 2048 x 1080, not 1920 x 1080.
+
+**Trap, hit once already.** The 128 bytes of per-line padding hold high-entropy stale DDR content that CVISP does not write. Histogramming a whole dumped plane counts it and reports a confidently "structured" frame that is in fact flat black, and dumping `width * height` rather than `stride * height` truncates at 1012 of 1080 rows and shears every row, which renders as diagonal scanlines that look like a picture. The markers cannot catch either, because at 4096-byte spacing they only sample column 0 of every other row and never touch the padding. Analyse the active columns only.
+
+The wide sweep captured every write `ar_lowdelay` made to the block, and there are only four things in it: setup, late, the per-frame plane triplet and the per-wrap tick group. We do all four. So whatever sustains the vendor is not an MMIO write to CVISP.
+
+A read-to-clear acknowledge was the obvious candidate, and it is **not supported**. `cvisp_device_irq_process` (`0x2424b8`) takes its status from an event structure, not from hardware:
+
+```
+status    = *(u32 *)(event + 0x08);
+module_id = *(u32 *)(event + 0x1c);
+if (status)
+        cvisp_dispatch_irq(device->private, module_id, status);
+```
+
+`cvisp_dispatch_irq` (`0x242390`) reads only heap-resident device and module objects and calls their `set_ctl` vtables. It never maps `0x08e00000` and never dereferences a CVISP register base. The same holds for the `cvisp_outlib_set_ctl` event paths. The status arrives from the generic camera event producer. **Do not poke candidate status registers in the `0x08e` map on the strength of this**: an invisible read below the userspace layer is still possible, but nothing here gives a safe offset to test, and a blind read of the wrong register hangs the SoC.
+
+The stronger candidate is the vendor's generic IRQ service protocol: the kernel handler disables the IRQ and queues an event, userspace handles it and then explicitly **re-enables** that IRQ. A missed re-enable wedges further completions without any CVISP register operation at all. That fits a block which produces a frame or two and then stops, and it means the thing to recover is the event producer and the IRQ registration, not a CVISP offset.
+
+There is a confirmed buffer-done path, and it is software only. For status bit 1 the dispatcher emits event `0x1001` to the selected output module; `cvisp_outlib_set_ctl` handles it at `0x240620`, rotates the software buffer entries under its lock, and invokes the registered upper callback (`0x2406d8`-`0x2406ec`). It issues no CVISP address-register write. So a slot return is real but lives above the register interface.
+
+Resolved as `hdf-20260729-002`.
+
+**The completion path, recovered (`hdf-20260729-003`).** The event is built in CVISP's registered raw IRQ handler, not in `cvisp_device_irq_process`. `cvisp_device_set_ctl` takes two `(hwirq, base)` pairs from runtime hardware info (`g_hw_info + 0x50`/`+0x54` for CVISP0, `+0x58`/`+0x5c` for CVISP1), maps each base, and registers both through `ar_irq_reg_with_name`. The handler at `0x241ed0` reads a status word at `base + 0x34` and writes the identical value back, which is a W1C acknowledge, then places that status at `event + 0x08` and the IRQ identity at `event + 0x1c` before invoking the device callback. Full path:
+
+```
+/dev/ar_mpp_ctl kernel IRQ queue -> ar_irq worker -> CVISP raw handler (0x241ed0, W1C at base+0x34)
+    -> CVISP event callback -> cvisp_device_irq_process
+```
+
+The generic worker waits on ioctl `0x80104d04`, registration is `0x40184d00`, and the re-enable is `ar_irq_enable`, ioctl `0x40044d03` with `hwirq - 32`. So each completion is acknowledged twice: a register W1C in the raw handler, and a GIC unmask through the generic service. **There are two CVISP registrations**, so completion is not simply the ISP's SPI 71. The numbers live in `g_hw_info` at runtime and are not in static code, so they are not recoverable without logging the `ar_irq_reg_with_name` arguments on a stock run. No IRQ is asserted in our device tree.
+
+**Do not W1C `0x08e00034` on the strength of that.** Taking `base` to be `0x08e00000` conflicts with the trace: that address is written exactly **once**, with `0x0000801a`, and its neighbours `0x30` and `0x38` hold `0x8013` and `0x801b`. It is an entry in the ascending arbitration table on page `0x0000`, not a per-frame status. A real per-frame W1C would appear about 2477 times, like the plane registers do. Either the IRQ status base is not the CVISP register base, or the acknowledge happens through a mapping the shim never trapped. Writing that offset as a W1C would corrupt a configuration entry.
+
+None of this is on the critical path: frame-locked arming sustains at 60 fps with no acknowledge of any kind. It matters for a completion-driven driver, not for capture.
 
 ### Not known
 
 These are open and are not to be assumed while building the ISP driver:
+
+- **Why CVISP stops after the first armed buffers.** See above; the frame-locked run is the next step and may resolve it without further analysis.
+- **Whether the late table has to follow the enable.** The vendor issues it with frames already in flight; whether that is required or is just what its threading produced is untested. `configure` takes 2 to apply setup alone.
+- **What the tick group does.** An acknowledge, a queue re-arm and a five-credit refill are all consistent with a once-per-wrap cadence.
+- **The output format.** `0x01`/`0x7f`/`0x7f` is consistent with 8-bit planar YUV but does not prove the plane geometry. `dd` on `/dev/mem` fails with `EFAULT` for reads as well as writes on this device, so dumping a plane needs `mmap`; `ml-isploop --dump` does that and is unrun.
+- **`0x4100` and `0x4108`**, written `0x00000000` nine times aperiodically, paired with `0x4104`/`0x410c` which hold 1920 and 1080. A crop origin is the obvious reading; it is not confirmed, and they are not tabled.
 
 - **How the vendor detects frame completion.** The trace has no reads. Whether the loop is driven by the VIF frame-start IRQ, an ISP IRQ (SPI 71), or a poll is undetermined.
 - **What each of the eight address registers points at.** Plane, statistics buffer, or intermediate surface is unassigned. The two-value alternation is established; the meaning of each register is not.
@@ -247,9 +370,36 @@ Source selects are done by a manual `/dev/mem` prologue poked before insmod in t
 
 - `0x0a104010` low half = `0x1300`: `cgu_vif_axi_clk` parent select 3 (fix_pll_clk333) plus gate. The vendor runs VIF AXI at 333 MHz.
 - `0x0a10400c` = `0x13001300`: `cgu_isp_clk` (low half) and `cgu_isp_hdr_clk` (high half), both select 3 and gated.
-- `0x0a10401c` = `0x1102`: undecoded low bits on `cgu_mipi_csi_0_clk`.
+- `0x0a104020` low half = `0x1103`.
 
 The open CGU provider models these as gate-only leaves, so `clk_prepare_enable` sets the gate bit but not the parent-select mux. The vendor prologue additionally sets the parent selects and enables `cgu_isp_hdr_clk`, which the open stack does not.
+
+### What the vendor programs, measured
+
+Read live from a streaming stock unit and cross-checked against a read+write trace of the CGU window, which contains only 66 writes for the whole camera bringup. Reference copy: `glue/dev/cgu-vendor-streaming.txt`.
+
+| Register | Vendor value | Open stack |
+|---|---|---|
+| `0x0a10400c` | `13001300` | set outright, matches |
+| `0x0a104010` | `02001300` | low half set, high half preserved |
+| `0x0a104020` | `10001103` | low half set, high half preserved |
+| `0x0a104018` | `04011300` | not programmed |
+| `0x0a10401c` | `02011201` | not programmed |
+| `0x0a104044` | `01001000` | not programmed |
+| `0x0a102004` | `f7ffffdf` | not programmed |
+| `0x0a102014` | `e7ffdfff` | not programmed |
+| `0x0a102008`, `0x0a102018`, `0x0a102028` | `00000000` | not programmed |
+| `0x0a106008`, `0x0a106200` | `88922000` | not programmed |
+| `0x0a106204` | `00a05f5f` | not programmed |
+| `0x0a106208` | `00005b5b` | not programmed |
+| `0x0a108098` | `0000002c` | not programmed |
+| `0x0a108410` | `07684bda` | not programmed |
+
+An earlier revision of this file gave `0x0a10401c` as `0x1102`. The measured value is `0x02011201`.
+
+`0x0a102004` and `0x0a102014` are reset control and are written twice each, in an assert-configure-release order: first with a bit clear (`f3ffffdf`, `e7ffdffb`), then the `0x0a106xxx` block is configured, then with that bit set (`f7ffffdf`, `e7ffdfff`). A block held in reset accepts register writes and reads them back correctly while its datapath does nothing.
+
+`0x0a104018` is the register the vendor polls, 17,434 reads in a 34-second trace, far more than any other register in any window.
 
 ## Status
 
@@ -261,10 +411,31 @@ Validated on hardware, sensor through VIF front end:
 - **VIF front end (path0).** Measures the incoming video timing correctly: `0x1f0` reads `0x0784043c` (1924 x 1084), and `0x1f4` and `0x1f8`/`0x1fc` match the streaming vendor's live values. `path0_frame_start` (`0x17c` bit24) fires at frame rate, 720 events per 1510 polls over 12 seconds.
 - **VIF-to-ISP hop.** The ISP-path status registers `0x10c` and `0x110` are live and advance with the vendor's value structure, so data crosses out of the front end into the ISP path.
 
-Not built:
+No frames are produced by either path, and ISP register state is not the reason: the stage that writes frames is CVISP, and until now it had never been programmed. `ar-cvisp.c` exists and builds; nothing about it has been run on hardware.
 
-- **The ISP capture path**, which is the vendor's frame-to-DRAM mechanism. No open driver binds `0x08c00000`. This is the remaining work: a driver that reproduces the vendor's ISP configuration and per-frame loop.
-- The VIF bypass view DMA the open driver currently arms produces no frames and is not the vendor's path. It is retained as front-end scaffolding, not as the capture mechanism.
+Read+write traces of a streaming vendor unit now cover every programmable block. For each, the vendor's end state was reconstructed as last-write-per-register, validated against a live register snapshot of the same streaming unit, and compared with the open stack only where model and snapshot agree:
+
+| Block | Model validation | Differences vs open stack |
+|---|---|---|
+| Sensor | n/a, compared register by register | 0 |
+| CSI-2 | 34/34 | 0 |
+| ISP | 1081/1202 | 0 |
+| VIF | 60/64 | 4, all set to vendor values on hardware with no effect |
+
+The ISP's one apparent difference, `0x00cc`, is a per-frame interrupt status register the vendor never writes. The VIF's four are `0x080`, `0x08c`, `0x140` and `0x2bc`.
+
+So the chain reaches vendor-identical register state and delivers nothing, in both the ISP path and the VIF bypass view.
+
+**That table is scoped to blocks we chose to look at, and the choice was wrong.** All four rows were measured inside tracer windows aimed at blocks in the vendor device tree. CVISP is not in it, was never in a window, and is the stage that writes frames. "Vendor-identical register state" therefore means the ISP, CSI-2, VIF and sensor are vendor-identical while a fifth block sits entirely unprogrammed. The wide sweep is the fix, and the CVISP section above is what it found.
+
+A CGU divergence also remains: the open stack programs three of the fourteen registers the vendor programs, and two of the eleven it omits are reset control. That was the leading hypothesis before the sweep. It is still unexplained, but it is no longer needed to explain the absence of frames.
+
+Two further facts from the traces bear on how to read them:
+
+- The vendor never spin-waits. There is not one consecutive-read run on any block, so a missing poll or wait state is not the mechanism.
+- The vendor brings the pipeline up, tears it down, and brings it up again. Both the VIF and CSI traces show this. Reading only the head of a trace attributes first-bringup behaviour to the working path.
+
+The VIF bypass view DMA the open driver arms is not the vendor's path: the vendor streams with view 0 held in reset. It is front-end scaffolding, not the capture mechanism.
 
 Investigation history and next steps live in `plans/air-camera-first-light.md`; this file tracks mechanism only.
 
@@ -275,8 +446,12 @@ Investigation history and next steps live in `plans/air-camera-first-light.md`; 
 | Sensor init, MCLK, stream-on | `overlay/drivers/media/artosyn/nt99235.c` |
 | CSI-2 D-PHY, lanes, IPI, deskew | `overlay/drivers/media/artosyn/ar-csi2.c` |
 | VIF front end, view arm, DMA | `overlay/drivers/media/artosyn/ar-vif.c` |
-| DT nodes (camera, CSI, VIF, clocks, `isp_cma`) | `devices/betafpv-vr04-air/proxima-9311-air.dts` |
-| Vendor MMIO write trace | `out/au-mmiotrace/mmio-combined.log`, capture harness `glue/dev/au-slotA-mmiotrace.sh`, shim `native/mmiotrace.c` |
+| ISP configuration | `overlay/drivers/media/artosyn/ar-isp.c`, tables `ar-isp-defaults.h` from `scripts/gen-isp-defaults.py` |
+| CVISP output stage and queue | `overlay/drivers/media/artosyn/ar-cvisp.c`, tables `ar-cvisp-defaults.h` from `scripts/gen-cvisp-defaults.py` |
+| DT nodes (camera, CSI, VIF, ISP, CVISP, clocks, carveouts) | `devices/betafpv-vr04-air/proxima-9311-air.dts` |
+| Vendor MMIO write trace, per block | `out/au-mmiotrace/mmio-combined.log`, capture harness `glue/dev/au-slotA-mmiotrace.sh`, shim `native/mmiotrace.c` |
+| Vendor MMIO write trace, all blocks | `out/au-mmiotrace/wide-sweep.log` (this is the one that found CVISP) |
+| CVISP first-light experiment | `glue/dev/au-cvisp-firstlight.sh` |
 | Vendor RE cross-reference | `archive/re/notes/nt99235/` (see the caution below) |
 
 Caution on the RE notes: they were checked against the trace and are unreliable in detail. They record the vendor's `0x080` as `0x76543210` (the trace shows `0xffffffff` and `0xfffffff8`), state that the open driver never writes `0x32c` when it does, and give `0x0d0` as both `0x2c` and `0xaaaaaaaa` in different files. Treat them as leads to verify. The trace is the authority for what the vendor writes; the disassembly is the authority for what a register means.

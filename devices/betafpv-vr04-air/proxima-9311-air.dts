@@ -164,16 +164,36 @@
 			no-map;
 		};
 
-		/* VIF capture buffers. In the upper half at 0x29000000 to match the
-		 * vendor, whose own capture buffer sits at 0x2902d000 (the vendor hands
-		 * the whole upper 128 MiB to the media allocator via mem=128m). no-map
-		 * (not reusable) to match the vendor's MMZ carveout: a coherent uncached
-		 * region with no cacheable kernel linear-map alias, so no speculative
-		 * writeback can land over the VIF's DMA writes.
+		/* CVISP output ring. CVISP, not the ISP, is what writes frames to DRAM in
+		 * the vendor's capture path, and it rotates five Y/U/V buffer sets whose
+		 * planes run from 0x28014000 to 0x2902c000. Those addresses are replayed
+		 * 1:1 out of the recovered configuration, so the range has to be reserved
+		 * no-map for the same reason isp_cma is: the open kernel does not cap
+		 * memory, so it would otherwise be live kernel RAM under a DMA writer.
+		 * Covers 0x28000000..0x29100000 (17 MiB), which is the ring plus the tail
+		 * of its last slot.
+		 *
+		 * This is why vif_cma moved below: the ring's last slot runs 0x2c000 past
+		 * 0x29000000, where vif_cma used to start.
 		 */
-		vif_cma: vif-cma@29000000 {
+		cvisp_cma: cvisp-cma@28000000 {
 			compatible = "shared-dma-pool";
-			reg = <0 0x29000000 0 0x01000000>;
+			reg = <0 0x28000000 0 0x01100000>;
+			no-map;
+		};
+
+		/* VIF capture buffers. Previously at 0x29000000 to sit beside the vendor's
+		 * own capture buffer at 0x2902d000; moved to 0x2c000000 because the CVISP
+		 * ring above occupies that range. ar-vif allocates these through vb2
+		 * dma-contig rather than replaying a fixed vendor address, so only the
+		 * properties matter, not the base: no-map (not reusable) to match the
+		 * vendor's MMZ carveout, a coherent uncached region with no cacheable
+		 * kernel linear-map alias, so no speculative writeback can land over the
+		 * VIF's DMA writes.
+		 */
+		vif_cma: vif-cma@2c000000 {
+			compatible = "shared-dma-pool";
+			reg = <0 0x2c000000 0 0x01000000>;
 			no-map;
 		};
 
@@ -600,6 +620,30 @@
 			clocks = <&pixclk 5>, <&pixclk 6>;	/* cgu_isp_clk, cgu_isp_hdr_clk */
 			clock-names = "isp", "isp_hdr";
 			memory-region = <&isp_cma>;
+			status = "okay";
+		};
+
+		/* The stage that actually writes frames to memory. The ISP feeds it and
+		 * CVISP owns the output queue, which is why an ISP configured to match the
+		 * vendor register for register still produced nothing.
+		 *
+		 * Absent from the vendor device tree; the block was found by tracing the
+		 * full 256 MiB register mapping the vendor makes in one call, and named
+		 * from the cvisp_* stack in its unstripped libmpp_service.so. Distinct
+		 * from scaler@08840000.
+		 *
+		 * No interrupt and no reset are declared. The block has its own completion
+		 * path (cvisp_device_irq_process, cvisp_dispatch_irq), but the hardware IRQ
+		 * number and its acknowledge register are still behind the vendor's generic
+		 * event layer, and no CVISP reset write appears anywhere in the trace.
+		 * Asserting either would be inventing it.
+		 */
+		cvisp: cvisp@8e00000 {
+			compatible = "artosyn,cvisp";
+			reg = <0 0x8e00000 0 0x10000>;
+			clocks = <&pixclk 9>;		/* cgu_rsz_clk */
+			clock-names = "rsz";
+			memory-region = <&cvisp_cma>;
 			status = "okay";
 		};
 

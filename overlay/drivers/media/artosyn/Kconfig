@@ -53,3 +53,16 @@ config VIDEO_ARTOSYN_ISP
 
 	  To compile this driver as a module, choose M here: the module will be
 	  called ar-isp.
+
+config VIDEO_ARTOSYN_CVISP
+	tristate "Artosyn CVISP output stage"
+	depends on OF && VIDEO_DEV
+	help
+	  Bring-up driver for the CVISP block on Artosyn Proxima SoCs, the stage
+	  that writes frames to memory in the vendor's capture path. The ISP
+	  feeds it; CVISP owns the output queue. Applies the recovered vendor
+	  register configuration and exposes the queue through debugfs; it does
+	  not allocate buffers or provide a V4L2 interface.
+
+	  To compile this driver as a module, choose M here: the module will be
+	  called ar-cvisp.
