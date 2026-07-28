@@ -19,8 +19,11 @@
  * status at 0x17c (bit v buffer done, bit 8+v frame done), not by the
  * address readback.
  *
- * The ISP is not involved. It reads frames back out of DDR, so a raw Bayer
- * capture never touches it.
+ * The view path this driver arms is NOT how the vendor captures. A write trace
+ * of the streaming vendor shows it configures the views, then sets the per-view
+ * reset at 0x2bc and captures every frame through the ISP instead, re-arming an
+ * ISP buffer pair from its own frame handler. Our view DMA has never written a
+ * byte to DDR. See ../../../../docs/camera-stack.md for the vendor sequence.
  */
 
 #include <linux/clk.h>
@@ -31,6 +34,7 @@
 #include <linux/of.h>
 #include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
+#include <linux/string.h>
 
 #include <media/mipi-csi2.h>
 #include <media/v4l2-async.h>
@@ -295,6 +299,33 @@ MODULE_PARM_DESC(event_census, "log every nonzero status word and print an event
 static u32 census_or[3];
 static u32 census_nonzero;
 static u32 census_polls;
+
+/* ISP-path status registers. The vendor's vif_ispintr_process reads 0x104 and
+ * 0x108 for specific status bits, and 0x10c plus 0x110 on the ISP frame event
+ * (bit 24), discarding all of them. Nothing in 0x104-0x138 is ever written by
+ * the vendor, so these are read-only and sampling them cannot perturb the
+ * block.
+ *
+ * They are the only visibility we have into whether pixels cross from the VIF
+ * front end into the ISP, a hop that frame-start delimiters do not prove.
+ * Whether they are clear-on-read or free-running is unestablished, so each is
+ * read twice per poll and both values kept: a clear-on-read register reports
+ * the accumulation since the previous poll and then near zero, while a
+ * free-running counter reports the same value twice.
+ *
+ * Sampled here rather than inside the log call below because
+ * dev_info_ratelimited() evaluates its arguments only when the rate limiter
+ * admits the message, which would make the sample interval irregular.
+ */
+#define AR_VIF_ISP_PROBES	4
+
+static const u16 ar_vif_isp_probe_reg[AR_VIF_ISP_PROBES] = {
+	0x104, 0x108, 0x10c, 0x110
+};
+
+static u32 census_isp_or[AR_VIF_ISP_PROBES];
+static u64 census_isp_sum[AR_VIF_ISP_PROBES];
+static u32 census_isp_last[AR_VIF_ISP_PROBES][2];
 
 /* Path 0 test pattern generator (0xf4 bit0): frames are fabricated inside the
  * block, independent of the sensor and receiver. Isolates the view DMA path.
@@ -701,15 +732,31 @@ static void ar_vif_configure(struct ar_vif *vif)
 static void ar_vif_stop(struct ar_vif *vif)
 {
 	if (event_census) {
+		unsigned int i;
+
 		dev_info(vif->dev,
 			 "census summary: bp-or 0x%08x intr-or 0x%08x w184-or 0x%08x (%u nonzero of %u polls)\n",
 			 census_or[0], census_or[1], census_or[2],
 			 census_nonzero, census_polls);
+
+		/* An all-zero sum on every probe means nothing crossed into the
+		 * ISP path for the whole session, whatever the registers count.
+		 */
+		for (i = 0; i < AR_VIF_ISP_PROBES; i++)
+			dev_info(vif->dev,
+				 "census isp 0x%03x: or 0x%08x sum %llu last 0x%08x/0x%08x\n",
+				 ar_vif_isp_probe_reg[i], census_isp_or[i],
+				 census_isp_sum[i], census_isp_last[i][0],
+				 census_isp_last[i][1]);
+
 		census_or[0] = 0;
 		census_or[1] = 0;
 		census_or[2] = 0;
 		census_nonzero = 0;
 		census_polls = 0;
+		memset(census_isp_or, 0, sizeof(census_isp_or));
+		memset(census_isp_sum, 0, sizeof(census_isp_sum));
+		memset(census_isp_last, 0, sizeof(census_isp_last));
 	}
 
 	ar_vif_write(vif, AR_VIF_FE_INTR_MASK, 0);
@@ -821,17 +868,32 @@ static void ar_vif_poll_work(struct work_struct *work)
 	view_full = ar_vif_read(vif, 0x184);
 
 	if (event_census) {
+		unsigned int i;
+
 		census_polls++;
 		census_or[0] |= bp_status;
 		census_or[1] |= intr_status;
 		census_or[2] |= view_full;
+
+		for (i = 0; i < AR_VIF_ISP_PROBES; i++) {
+			u32 first = ar_vif_read(vif, ar_vif_isp_probe_reg[i]);
+			u32 second = ar_vif_read(vif, ar_vif_isp_probe_reg[i]);
+
+			census_isp_or[i] |= first;
+			census_isp_sum[i] += first;
+			census_isp_last[i][0] = first;
+			census_isp_last[i][1] = second;
+		}
+
 		if (bp_status || intr_status || view_full) {
 			census_nonzero++;
 			dev_info_ratelimited(vif->dev,
-					     "census: bp 0x%08x intr 0x%08x w184 0x%08x fs 0x%08x/0x%08x\n",
+					     "census: bp 0x%08x intr 0x%08x w184 0x%08x isp %08x/%08x %08x/%08x %08x/%08x %08x/%08x\n",
 					     bp_status, intr_status, view_full,
-					     ar_vif_read(vif, 0x10c),
-					     ar_vif_read(vif, 0x110));
+					     census_isp_last[0][0], census_isp_last[0][1],
+					     census_isp_last[1][0], census_isp_last[1][1],
+					     census_isp_last[2][0], census_isp_last[2][1],
+					     census_isp_last[3][0], census_isp_last[3][1]);
 		}
 	}
 
