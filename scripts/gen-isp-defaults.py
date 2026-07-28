@@ -70,6 +70,32 @@ def load_trace(path, stop):
 	return first
 
 
+def load_setup_writes(path, stop):
+	"""Every ISP write of the setup phase, in order, with runs collapsed.
+
+	Order is preserved because the block carries an enable ladder and several
+	arm-then-load sequences whose result depends on it. Consecutive writes of
+	the same value to the same register are dropped; distinct values are not,
+	since a rewrite is how the vendor arms some registers.
+	"""
+	writes = []
+	for line in open(path):
+		f = line.split()
+		if len(f) < 4:
+			continue
+		if int(f[0][1:], 16) > stop:
+			break
+		pa = f[2].split('=')[1]
+		if not pa.startswith('0x08c'):
+			continue
+		off = int(pa, 16) & 0xFFFF
+		val = int(f[3].split('=')[1], 16)
+		if writes and writes[-1] == (off, val):
+			continue
+		writes.append((off, val))
+	return writes
+
+
 def agree_span(data, bases, lo, hi):
 	"""Widest [a, b) around the traced span over which all copies agree.
 
@@ -107,6 +133,7 @@ def main():
 		sys.exit('libmpp_service.so sha256 mismatch: block offsets do not apply')
 
 	first = load_trace(args.trace, int(args.stop, 16))
+	setup = load_setup_writes(args.trace, int(args.stop, 16))
 
 	pages = []
 	n_traced = n_recovered = n_unverified = 0
@@ -171,12 +198,40 @@ def main():
 				  % (off, val, '' if s else
 				     '\t/* recovered */' if verified else '\t/* unverified */'))
 		w('};\n\n')
+
+		w('/*\n')
+		w(' * Registers with a static default that the setup phase never writes.\n')
+		w(' * Apply these first, then ar_isp_setup_1080p60 in order.\n')
+		w(' */\n')
+		w('static const struct ar_isp_reg ar_isp_recovered[] = {\n')
+		for pg, ncopies, verified, regs in pages:
+			for off, val, seen in regs:
+				if not seen:
+					w('\t{ 0x%04x, 0x%08x },\n' % (off, val))
+		w('};\n\n')
+
+		w('/*\n')
+		w(' * The vendor setup phase for the 2-lane 1080p60 sensor mode, in write\n')
+		w(' * order. Order is load bearing: the block has a staged master enable and\n')
+		w(' * several arm-then-load registers. Consecutive duplicate writes are\n')
+		w(' * collapsed; repeated writes of differing values are kept.\n')
+		w(' *\n')
+		w(' * This is a static init table, not a timing replay. It carries no delays\n')
+		w(' * and no dependence on when each write happened.\n')
+		w(' */\n')
+		w('static const struct ar_isp_reg ar_isp_setup_1080p60[] = {\n')
+		for off, val in setup:
+			w('\t{ 0x%04x, 0x%08x },\n' % (off, val))
+		w('};\n\n')
+
 		w('#endif /* _AR_ISP_DEFAULTS_H */\n')
 
 	total = n_traced + n_recovered + n_unverified
 	print('%s: %d registers over %d pages' % (args.output, total, len(pages)))
 	print('  %d traced, %d recovered, %d unverified'
 	      % (n_traced, n_recovered, n_unverified))
+	print('  setup table: %d ordered writes over %d registers'
+	      % (len(setup), len(set(o for o, _ in setup))))
 
 
 if __name__ == '__main__':
