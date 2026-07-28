@@ -149,19 +149,46 @@
 		#size-cells = <2>;
 		ranges;
 
-		/* MMZ media pool for the wave5 encoder + camera capture buffers. 48 MiB
-		 * (0x25000000..0x28000000), a no-map hole in the 256 MiB DRAM that splits kernel
-		 * RAM into 0x20000000..0x25000000 (80 MiB) + 0x28000000..0x30000000 (128 MiB) =
-		 * 208 MiB usable. SIZE IS A FIRST-CUT ESTIMATE for the encode-only path (one 1080p
-		 * capture ring + the encoder DPB/bitstream pool); TUNE ON HW - the vendor keeps its
-		 * MMZ as a runtime ar_osal mmz= param, not in the DTB, so there is no vendor number
-		 * to copy. Too small -> the wave5 firmware spins. There is room to grow or relocate
-		 * this pool within the 256 MiB DRAM. The wave5 codec claims
-		 * it via the `memory-region` phandle on video-codec@a080000. `no-map`: coherent
-		 * uncached carveout outside the kernel linear map. */
+		/* MMZ media pool for the wave5 encoder + camera capture buffers. 32 MiB
+		 * (0x25000000..0x27000000), a no-map hole in the 256 MiB DRAM. SIZE IS A
+		 * FIRST-CUT ESTIMATE for the encode-only path (one 1080p capture ring + the
+		 * encoder DPB/bitstream pool); TUNE ON HW - the vendor keeps its MMZ as a
+		 * runtime ar_osal mmz= param, not in the DTB, so there is no vendor number to
+		 * copy. Too small -> the wave5 firmware spins. There is room to grow or relocate
+		 * this pool within the 256 MiB DRAM. The wave5 codec claims it via the
+		 * `memory-region` phandle on video-codec@a080000. `no-map`: coherent uncached
+		 * carveout outside the kernel linear map. */
 		mmz_pool: mmz@25000000 {
 			compatible = "shared-dma-pool";
-			reg = <0 0x25000000 0 0x03000000>;
+			reg = <0 0x25000000 0 0x02000000>;
+			no-map;
+		};
+
+		/* VIF capture buffers. In the upper half at 0x29000000 to match the
+		 * vendor, whose own capture buffer sits at 0x2902d000 (the vendor hands
+		 * the whole upper 128 MiB to the media allocator via mem=128m). no-map
+		 * (not reusable) to match the vendor's MMZ carveout: a coherent uncached
+		 * region with no cacheable kernel linear-map alias, so no speculative
+		 * writeback can land over the VIF's DMA writes.
+		 */
+		vif_cma: vif-cma@29000000 {
+			compatible = "shared-dma-pool";
+			reg = <0 0x29000000 0 0x01000000>;
+			no-map;
+		};
+
+		/* ISP capture carveout. The vendor's online/ISP capture path DMAs its
+		 * frame ring into the upper DRAM (observed addresses 0x2a600000..
+		 * 0x2b704000, plus the descriptor buffers at 0x2b2exxxx), a region the
+		 * vendor keeps free by handing the whole upper 128 MiB to its media
+		 * allocator with mem=128m. The open kernel does not cap memory, so this
+		 * range is otherwise ordinary kernel RAM; reserving it no-map lets the
+		 * vendor's exact ISP addresses be replayed 1:1 without the DMA landing on
+		 * live kernel memory. Covers 0x2a000000..0x2c000000 (32 MiB).
+		 */
+		isp_cma: isp-cma@2a000000 {
+			compatible = "shared-dma-pool";
+			reg = <0 0x2a000000 0 0x02000000>;
 			no-map;
 		};
 	};
@@ -262,22 +289,33 @@
 			status = "okay";
 
 			/* NT99235 camera sensor (P1_SKY): I2C 7-bit 0x1a, MIPI CSI-2, 12-bit
-			 * linear, modes 1080p60 / 720p90 / 540p120 (from libsns_nt99235.so). Reset
-			 * gpio107, power/enable gpio104 (sensor_board_cfg.cjson rst [_,6,13] / power
-			 * [_,6,10] -> artosyn_gpio bank6 base 94). Active levels, mclk, and the lane
-			 * count are TODO from the libsns/libmpi_vin RE; this node is inert until the
-			 * NT99235 V4L2 subdev + the artosyn CSI-2 driver land. */
+			 * linear. Reset gpio107, power/enable gpio104 (sensor_board_cfg.cjson
+			 * rst [_,6,13] / power [_,6,10] -> artosyn_gpio bank6 base 94).
+			 *
+			 * Both GPIOs are active low: nt99235_cmos_power_on drives the enable line
+			 * low and leaves it low for the whole streaming session, and asserts reset
+			 * low before releasing it high. The master clock is 24 MHz on
+			 * cgu_sensor_mclk0 and must be running before reset is released.
+			 *
+			 * Two lanes: the four sensor modes split into 4-lane (720p90, 1080p60) and
+			 * 2-lane (540p120, 1080p60-2lane) variants selected by sensor register
+			 * 0x0114, and the unit was captured running the 2-lane 1080p60 mode.
+			 * Whether the board routes more than two lanes is unresolved. */
 			nt99235: camera-sensor@1a {
 				compatible = "novatek,nt99235";
 				reg = <0x1a>;
 				reset-gpios = <&gpio 107 GPIO_ACTIVE_LOW>;
-				enable-gpios = <&gpio 104 GPIO_ACTIVE_HIGH>;
+				enable-gpios = <&gpio 104 GPIO_ACTIVE_LOW>;
+				clocks = <&pixclk 35>;		/* cgu_sensor_mclk0 */
+				clock-names = "mclk";
+				assigned-clocks = <&pixclk 35>;
+				assigned-clock-rates = <24000000>;
 				status = "okay";
 
 				port {
 					nt99235_out: endpoint {
 						remote-endpoint = <&mipi_in>;
-						data-lanes = <1 2>;	/* TODO confirm 1- vs 2-lane */
+						data-lanes = <1 2>;
 					};
 				};
 			};
@@ -505,12 +543,31 @@
 			reg = <0 0x8880000 0 0x10000>;
 			interrupts = <GIC_SPI 60 IRQ_TYPE_LEVEL_HIGH>,	/* vendor 0x3c */
 				     <GIC_SPI 61 IRQ_TYPE_LEVEL_HIGH>;	/* vendor 0x3d */
+			clocks = <&pixclk 13>, <&pixclk 15>;	/* cgu_mipi_csi_0_clk, cgu_mipi_pcs_clk */
+			clock-names = "csi", "pcs";
 			status = "okay";
 
-			port {
-				mipi_in: endpoint {
-					remote-endpoint = <&nt99235_out>;
-					data-lanes = <1 2>;
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				/* Sink: the sensor's D-PHY link. */
+				port@0 {
+					reg = <0>;
+
+					mipi_in: endpoint {
+						remote-endpoint = <&nt99235_out>;
+						data-lanes = <1 2>;
+					};
+				};
+
+				/* Source: the receiver's IPI output into the VIF. */
+				port@1 {
+					reg = <1>;
+
+					mipi_out: endpoint {
+						remote-endpoint = <&vif_in>;
+					};
 				};
 			};
 		};
@@ -519,7 +576,17 @@
 			compatible = "artosyn,vif";
 			reg = <0 0x8870000 0 0x10000>;
 			interrupts = <GIC_SPI 62 IRQ_TYPE_LEVEL_HIGH>;	/* vendor 0x3e */
+			clocks = <&pixclk 7>;		/* cgu_vif_axi_clk */
+			clock-names = "axi";
+			memory-region = <&vif_cma>;
 			status = "okay";
+
+			/* Sink: frames from the CSI-2 receiver's IPI output. */
+			port {
+				vif_in: endpoint {
+					remote-endpoint = <&mipi_out>;
+				};
+			};
 		};
 
 		isp: isp@8c00000 {
