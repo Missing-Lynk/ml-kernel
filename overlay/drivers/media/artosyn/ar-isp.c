@@ -1,0 +1,257 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * ar-isp.c - Artosyn ISP capture path, bring-up driver.
+ *
+ * The VIF has two output routes. The bypass "view" path writes frames straight
+ * to DDR and is what ar-vif.c arms; the ISP path hands frames to this block,
+ * and it is the one the vendor uses. A write trace of the streaming vendor
+ * shows it configures the views, sets the per-view reset, and then captures
+ * every frame through the ISP.
+ *
+ * This driver applies the vendor's register configuration for the 2-lane
+ * 1080p60 sensor mode and starts the block. It does not allocate buffers: the
+ * configuration carries the vendor's own DDR addresses, and the device tree
+ * reserves that range no-map so they can be used as they are. That is enough
+ * to answer whether the block produces a frame at all, which is what this
+ * driver is for. It is not the final shape.
+ *
+ * Not implemented here:
+ *
+ *  - The per-frame loop. The vendor re-arms seven statistics buffer addresses
+ *    and runs three indirect-port transactions on every frame, driven by the
+ *    VIF frame-start interrupt that ar-vif.c already owns. The output planes
+ *    are programmed once during setup and are not part of that loop, so the
+ *    first frame should land without it. Later frames will overwrite the same
+ *    buffer and the statistics will go stale.
+ *  - Buffer allocation, geometry other than 1920x1080, and any V4L2 interface.
+ *
+ * Configuration provenance is in ar-isp-defaults.h. Two thirds of it comes
+ * from static per-submodule default blocks in the vendor library and one third
+ * from the write trace; applying both reproduces the vendor's final register
+ * state exactly. See ../../../../docs/camera-stack.md.
+ */
+
+#include <linux/clk.h>
+#include <linux/debugfs.h>
+#include <linux/delay.h>
+#include <linux/io.h>
+#include <linux/module.h>
+#include <linux/of.h>
+#include <linux/platform_device.h>
+
+#include "ar-isp-defaults.h"
+
+/*
+ * Master control. The block is brought up by a staged sequence of writes to
+ * this register, which is embedded in the setup table in the right places
+ * rather than driven separately.
+ */
+#define AR_ISP_CONTROL			0x0000
+
+/* Input geometry, width in the low half. */
+#define AR_ISP_INPUT_SIZE		0x0004
+
+/*
+ * Indirect access port. The vendor writes an address to 0x00cc and a value to
+ * 0x00d4; three such transactions run in every frame of the per-frame loop.
+ * The port is exercised during setup by the table.
+ */
+#define AR_ISP_INDIRECT_ADDR		0x00cc
+#define AR_ISP_INDIRECT_DATA		0x00d4
+
+/* Interrupt status and mask. Read-only use here. */
+#define AR_ISP_INTR_STATUS		0x0090
+#define AR_ISP_INTR_MASK		0x00b8
+
+/*
+ * Output plane addresses, identified by their placeholder values in the
+ * vendor's static defaults: the block ships with implausible addresses which
+ * the runtime replaces with real buffers. Listed for the register dump; the
+ * setup table programs them.
+ */
+#define AR_ISP_OUT_PLANE0_SET0		0x2e3c
+#define AR_ISP_OUT_PLANE1_SET0		0x2e44
+#define AR_ISP_OUT_PLANE0_SET1		0x2e58
+#define AR_ISP_OUT_PLANE1_SET1		0x2e60
+#define AR_ISP_OUT_PLANE2_SET0		0x2e80
+#define AR_ISP_OUT_PLANE2_SET1		0x2e88
+
+/* Output stage geometry and commit. */
+#define AR_ISP_OUT_SIZE			0x2e04
+#define AR_ISP_OUT_COMMIT		0x2e90
+
+struct ar_isp {
+	struct device *dev;
+	void __iomem *base;
+	struct clk_bulk_data clks[2];
+	struct dentry *debugfs;
+	bool configured;
+};
+
+static const struct {
+	u16 off;
+	const char *name;
+} ar_isp_dump_regs[] = {
+	{ AR_ISP_CONTROL,		"control" },
+	{ AR_ISP_INPUT_SIZE,		"input_size" },
+	{ AR_ISP_INTR_STATUS,		"intr_status" },
+	{ AR_ISP_INTR_MASK,		"intr_mask" },
+	{ AR_ISP_OUT_SIZE,		"out_size" },
+	{ AR_ISP_OUT_PLANE0_SET0,	"out_plane0_set0" },
+	{ AR_ISP_OUT_PLANE1_SET0,	"out_plane1_set0" },
+	{ AR_ISP_OUT_PLANE2_SET0,	"out_plane2_set0" },
+	{ AR_ISP_OUT_PLANE0_SET1,	"out_plane0_set1" },
+	{ AR_ISP_OUT_PLANE1_SET1,	"out_plane1_set1" },
+	{ AR_ISP_OUT_PLANE2_SET1,	"out_plane2_set1" },
+	{ AR_ISP_OUT_COMMIT,		"out_commit" },
+};
+
+static void ar_isp_apply(struct ar_isp *isp, const struct ar_isp_reg *tbl,
+			 size_t n)
+{
+	size_t i;
+
+	for (i = 0; i < n; i++)
+		writel(tbl[i].val, isp->base + tbl[i].off);
+}
+
+/*
+ * Apply the whole configuration. The recovered table goes first: those are
+ * registers that have a static default in the vendor library but which the
+ * vendor never writes, because it pushes its shadow image with a
+ * write-only-if-changed primitive and they already held the right value. They
+ * are absent from any trace by construction, so nothing else would set them.
+ *
+ * The setup table then runs in write order. Order matters: it contains the
+ * staged master enable and several arm-then-load registers whose result
+ * depends on the sequence. It carries no timing, only order.
+ *
+ * The vendor interleaves CSI-2 and VIF writes into this sequence. Those blocks
+ * are configured by their own drivers here, so only the ISP writes are
+ * replayed and the interleaving is assumed not to matter. If the block turns
+ * out to need a VIF or CSI-2 register at a particular point, this is where it
+ * would show up.
+ */
+static void ar_isp_configure(struct ar_isp *isp)
+{
+	ar_isp_apply(isp, ar_isp_recovered, ARRAY_SIZE(ar_isp_recovered));
+	ar_isp_apply(isp, ar_isp_setup_1080p60,
+		     ARRAY_SIZE(ar_isp_setup_1080p60));
+
+	isp->configured = true;
+
+	dev_info(isp->dev,
+		 "configured: %zu recovered + %zu ordered writes, control 0x%08x\n",
+		 ARRAY_SIZE(ar_isp_recovered),
+		 ARRAY_SIZE(ar_isp_setup_1080p60),
+		 readl(isp->base + AR_ISP_CONTROL));
+}
+
+static int ar_isp_configure_set(void *data, u64 val)
+{
+	struct ar_isp *isp = data;
+
+	if (!val)
+		return -EINVAL;
+
+	ar_isp_configure(isp);
+	return 0;
+}
+
+static int ar_isp_configure_get(void *data, u64 *val)
+{
+	struct ar_isp *isp = data;
+
+	*val = isp->configured;
+	return 0;
+}
+
+DEFINE_DEBUGFS_ATTRIBUTE(ar_isp_configure_fops, ar_isp_configure_get,
+			 ar_isp_configure_set, "%llu\n");
+
+static int ar_isp_regs_show(struct seq_file *s, void *unused)
+{
+	struct ar_isp *isp = s->private;
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(ar_isp_dump_regs); i++)
+		seq_printf(s, "%-16s 0x%04x 0x%08x\n", ar_isp_dump_regs[i].name,
+			   ar_isp_dump_regs[i].off,
+			   readl(isp->base + ar_isp_dump_regs[i].off));
+
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(ar_isp_regs);
+
+static int ar_isp_probe(struct platform_device *pdev)
+{
+	struct device *dev = &pdev->dev;
+	struct ar_isp *isp;
+	int ret;
+
+	isp = devm_kzalloc(dev, sizeof(*isp), GFP_KERNEL);
+	if (!isp)
+		return -ENOMEM;
+
+	isp->dev = dev;
+
+	isp->base = devm_platform_ioremap_resource(pdev, 0);
+	if (IS_ERR(isp->base))
+		return PTR_ERR(isp->base);
+
+	isp->clks[0].id = "isp";
+	isp->clks[1].id = "isp_hdr";
+	ret = devm_clk_bulk_get(dev, ARRAY_SIZE(isp->clks), isp->clks);
+	if (ret)
+		return dev_err_probe(dev, ret, "no isp clocks\n");
+
+	/*
+	 * The clocks stay on from probe. Register access with the block's
+	 * clock gated hangs the SoC on this family, the same way VIF register
+	 * reads do, so there is no safe point at which to gate them while the
+	 * debugfs files exist.
+	 */
+	ret = clk_bulk_prepare_enable(ARRAY_SIZE(isp->clks), isp->clks);
+	if (ret)
+		return dev_err_probe(dev, ret, "cannot enable isp clocks\n");
+
+	platform_set_drvdata(pdev, isp);
+
+	isp->debugfs = debugfs_create_dir("ar-isp", NULL);
+	debugfs_create_file_unsafe("configure", 0600, isp->debugfs, isp,
+				   &ar_isp_configure_fops);
+	debugfs_create_file("regs", 0400, isp->debugfs, isp, &ar_isp_regs_fops);
+
+	dev_info(dev, "probed, %zu registers available to apply\n",
+		 ARRAY_SIZE(ar_isp_recovered) +
+		 ARRAY_SIZE(ar_isp_setup_1080p60));
+
+	return 0;
+}
+
+static void ar_isp_remove(struct platform_device *pdev)
+{
+	struct ar_isp *isp = platform_get_drvdata(pdev);
+
+	debugfs_remove_recursive(isp->debugfs);
+	clk_bulk_disable_unprepare(ARRAY_SIZE(isp->clks), isp->clks);
+}
+
+static const struct of_device_id ar_isp_of_match[] = {
+	{ .compatible = "artosyn,isp" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, ar_isp_of_match);
+
+static struct platform_driver ar_isp_driver = {
+	.probe = ar_isp_probe,
+	.remove = ar_isp_remove,
+	.driver = {
+		.name = "ar-isp",
+		.of_match_table = ar_isp_of_match,
+	},
+};
+module_platform_driver(ar_isp_driver);
+
+MODULE_DESCRIPTION("Artosyn ISP capture path");
+MODULE_LICENSE("GPL");

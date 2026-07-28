@@ -184,9 +184,17 @@ def main():
 		w(' * cross-checked and are marked unverified.\n')
 		w(' */\n\n')
 		w('#ifndef _AR_ISP_DEFAULTS_H\n#define _AR_ISP_DEFAULTS_H\n\n')
+		w('#include <linux/compiler_attributes.h>\n')
 		w('#include <linux/types.h>\n\n')
 		w('struct ar_isp_reg {\n\tu16 off;\n\tu32 val;\n};\n\n')
-		w('static const struct ar_isp_reg ar_isp_defaults[] = {\n')
+		w('/*\n')
+		w(' * The complete static default set. Not applied by the driver, which\n')
+		w(' * applies ar_isp_recovered followed by ar_isp_setup_1080p60 and reaches\n')
+		w(' * the same state in fewer writes. Kept because it is the mode-independent\n')
+		w(' * half of the configuration, and a driver that supports a second sensor\n')
+		w(' * mode needs it rather than the 1080p60 table.\n')
+		w(' */\n')
+		w('static const struct ar_isp_reg ar_isp_defaults[] __maybe_unused = {\n')
 		for pg, ncopies, verified, regs in pages:
 			seen = sum(1 for _, _, s in regs if s)
 			w('\t/* page 0x%02x: %d registers, %d traced, %d %s, %d block cop%s */\n'

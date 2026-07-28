@@ -41,3 +41,15 @@ config VIDEO_ARTOSYN_VIF
 
 	  To compile this driver as a module, choose M here: the module will be
 	  called ar-vif.
+
+config VIDEO_ARTOSYN_ISP
+	tristate "Artosyn ISP capture path"
+	depends on OF && VIDEO_DEV
+	help
+	  Bring-up driver for the ISP block on Artosyn Proxima SoCs, the route
+	  the vendor stack captures through. Applies the vendor register
+	  configuration for the 2-lane 1080p60 sensor mode and starts the
+	  block; it does not allocate buffers or expose a V4L2 interface.
+
+	  To compile this driver as a module, choose M here: the module will be
+	  called ar-isp.

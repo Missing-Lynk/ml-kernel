@@ -20,6 +20,7 @@
 #ifndef _AR_ISP_DEFAULTS_H
 #define _AR_ISP_DEFAULTS_H
 
+#include <linux/compiler_attributes.h>
 #include <linux/types.h>
 
 struct ar_isp_reg {
@@ -27,7 +28,14 @@ struct ar_isp_reg {
 	u32 val;
 };
 
-static const struct ar_isp_reg ar_isp_defaults[] = {
+/*
+ * The complete static default set. Not applied by the driver, which
+ * applies ar_isp_recovered followed by ar_isp_setup_1080p60 and reaches
+ * the same state in fewer writes. Kept because it is the mode-independent
+ * half of the configuration, and a driver that supports a second sensor
+ * mode needs it rather than the 1080p60 table.
+ */
+static const struct ar_isp_reg ar_isp_defaults[] __maybe_unused = {
 	/* page 0x08: 64 registers, 42 traced, 22 recovered, 3 block copies */
 	{ 0x0800, 0x0000001e },
 	{ 0x0804, 0x0000001e },

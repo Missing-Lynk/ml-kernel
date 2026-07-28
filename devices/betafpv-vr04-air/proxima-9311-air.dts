@@ -589,10 +589,17 @@
 			};
 		};
 
+		/* The route the vendor stack captures through: the VIF hands frames to
+		 * this block rather than writing them out through its bypass views.
+		 * The capture buffers are not allocated by the driver, which uses the
+		 * vendor's own addresses out of the isp_cma reservation. */
 		isp: isp@8c00000 {
 			compatible = "artosyn,isp";
 			reg = <0 0x8c00000 0 0x200000>;
 			interrupts = <GIC_SPI 71 IRQ_TYPE_LEVEL_HIGH>;	/* vendor 0x47 */
+			clocks = <&pixclk 5>, <&pixclk 6>;	/* cgu_isp_clk, cgu_isp_hdr_clk */
+			clock-names = "isp", "isp_hdr";
+			memory-region = <&isp_cma>;
 			status = "okay";
 		};
 

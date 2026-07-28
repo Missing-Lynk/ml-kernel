@@ -793,6 +793,8 @@ static const struct {
 	unsigned int index;	/* index within ar9311_leaves[] */
 	const char *name;
 } ar9311_pinned_leaves[] = {
+	{ 2,  "cgu_isp_clk" },
+	{ 3,  "cgu_isp_hdr_clk" },
 	{ 4,  "cgu_vif_axi_clk" },
 	{ 10, "cgu_mipi_csi_0_clk" },
 	{ 11, "cgu_mipi_csi_1_clk" },
