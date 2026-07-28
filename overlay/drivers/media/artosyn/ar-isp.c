@@ -80,6 +80,30 @@
 #define AR_ISP_OUT_SIZE			0x2e04
 #define AR_ISP_OUT_COMMIT		0x2e90
 
+/*
+ * Read-only status reporting what the block sees on its input. Both are the
+ * probe for whether the ISP is receiving video at all, and both are more useful
+ * than looking at the output buffer, because they report on the input side.
+ *
+ * AR_ISP_IN_GEOMETRY reads back the measured frame as (height << 16) | width.
+ * With the VIF streaming and the ISP otherwise untouched it reads 0x043c0784,
+ * 1084 x 1924, matching the VIF's own measurement at VIF 0x1f0. A streaming
+ * vendor reads 0x04380780, 1080 x 1920, the active area. Zero means the block
+ * is seeing nothing.
+ *
+ * AR_ISP_IN_LINETIME latches the incoming line time and is static, not a
+ * counter: a streaming vendor holds 0x134e across repeated samples while VIF
+ * 0x1f8 measures about the same. Zero means no line timing is arriving.
+ */
+#define AR_ISP_IN_GEOMETRY		0x706c
+#define AR_ISP_IN_LINETIME		0x2e98
+
+/* The measured correction pass. Off disables it, for an A/B of its effect. */
+static bool trim = true;
+module_param(trim, bool, 0644);
+MODULE_PARM_DESC(trim,
+		 "apply the measured correction against the streaming vendor (default on)");
+
 struct ar_isp {
 	struct device *dev;
 	void __iomem *base;
@@ -104,6 +128,8 @@ static const struct {
 	{ AR_ISP_OUT_PLANE1_SET1,	"out_plane1_set1" },
 	{ AR_ISP_OUT_PLANE2_SET1,	"out_plane2_set1" },
 	{ AR_ISP_OUT_COMMIT,		"out_commit" },
+	{ AR_ISP_IN_GEOMETRY,		"in_geometry" },
+	{ AR_ISP_IN_LINETIME,		"in_linetime" },
 };
 
 static void ar_isp_apply(struct ar_isp *isp, const struct ar_isp_reg *tbl,
@@ -138,14 +164,72 @@ static void ar_isp_configure(struct ar_isp *isp)
 	ar_isp_apply(isp, ar_isp_setup_1080p60,
 		     ARRAY_SIZE(ar_isp_setup_1080p60));
 
+	/*
+	 * Correct the result against the streaming vendor. The tables above are
+	 * derived from a write trace, which fixes ordering but not the final
+	 * value: the trace has to be cut somewhere, and the vendor keeps
+	 * configuring past any cut. This pass is measured, not derived, and
+	 * includes registers the trace never showed us writing at all.
+	 */
+	if (trim)
+		ar_isp_apply(isp, ar_isp_vendor_trim,
+			     ARRAY_SIZE(ar_isp_vendor_trim));
+
 	isp->configured = true;
 
 	dev_info(isp->dev,
-		 "configured: %zu recovered + %zu ordered writes, control 0x%08x\n",
+		 "configured: %zu recovered + %zu ordered + %zu trim, control 0x%08x\n",
 		 ARRAY_SIZE(ar_isp_recovered),
 		 ARRAY_SIZE(ar_isp_setup_1080p60),
+		 trim ? ARRAY_SIZE(ar_isp_vendor_trim) : 0,
 		 readl(isp->base + AR_ISP_CONTROL));
 }
+
+/*
+ * Apply only the first n writes of the setup table, for bisecting.
+ *
+ * With the VIF streaming and the ISP untouched, AR_ISP_IN_GEOMETRY reports the
+ * measured input. After the full setup table it reads zero: one of the writes
+ * stops the block seeing its input. Applying a prefix and reading that register
+ * back finds which one, in about eleven steps over the 2082 entries.
+ *
+ * Each probe needs a clean block, so reload the capture modules and restart the
+ * stream between probes rather than issuing several prefixes in a row. The trim
+ * pass is deliberately not applied here: it would reintroduce the writes being
+ * bisected.
+ */
+static void ar_isp_configure_prefix(struct ar_isp *isp, size_t n)
+{
+	if (n > ARRAY_SIZE(ar_isp_setup_1080p60))
+		n = ARRAY_SIZE(ar_isp_setup_1080p60);
+
+	ar_isp_apply(isp, ar_isp_recovered, ARRAY_SIZE(ar_isp_recovered));
+	ar_isp_apply(isp, ar_isp_setup_1080p60, n);
+
+	isp->configured = true;
+
+	dev_info(isp->dev,
+		 "prefix %zu of %zu: in_geometry 0x%08x, in_linetime 0x%08x, control 0x%08x\n",
+		 n, ARRAY_SIZE(ar_isp_setup_1080p60),
+		 readl(isp->base + AR_ISP_IN_GEOMETRY),
+		 readl(isp->base + AR_ISP_IN_LINETIME),
+		 readl(isp->base + AR_ISP_CONTROL));
+}
+
+static int ar_isp_prefix_set(void *data, u64 val)
+{
+	ar_isp_configure_prefix(data, val);
+	return 0;
+}
+
+static int ar_isp_prefix_get(void *data, u64 *val)
+{
+	*val = ARRAY_SIZE(ar_isp_setup_1080p60);
+	return 0;
+}
+
+DEFINE_DEBUGFS_ATTRIBUTE(ar_isp_prefix_fops, ar_isp_prefix_get,
+			 ar_isp_prefix_set, "%llu\n");
 
 static int ar_isp_configure_set(void *data, u64 val)
 {
@@ -221,6 +305,12 @@ static int ar_isp_probe(struct platform_device *pdev)
 	debugfs_create_file_unsafe("configure", 0600, isp->debugfs, isp,
 				   &ar_isp_configure_fops);
 	debugfs_create_file("regs", 0400, isp->debugfs, isp, &ar_isp_regs_fops);
+	/*
+	 * Reading this reports the table size, so a bisect script can discover
+	 * the upper bound without hardcoding it.
+	 */
+	debugfs_create_file_unsafe("configure_upto", 0600, isp->debugfs, isp,
+				   &ar_isp_prefix_fops);
 
 	dev_info(dev, "probed, %zu registers available to apply\n",
 		 ARRAY_SIZE(ar_isp_recovered) +
