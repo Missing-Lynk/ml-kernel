@@ -91,7 +91,7 @@
  */
 #define NT99235_AGAIN_MIN		0x00
 #define NT99235_AGAIN_MAX		0x60
-#define NT99235_AGAIN_DEFAULT		0x2f	/* 7.75x */
+#define NT99235_AGAIN_DEFAULT		0x3c	/* the vendor's own operating point */
 
 /*
  * Vendor's observed indoor starting point, in lines. Deliberately near the
@@ -355,7 +355,7 @@ static const struct nt99235_reg nt99235_regs_1920x1080p60_4lane[] = {
 	{ 0x3530, 0x40 }, { 0x3325, 0x2b }, { 0x0342, 0x04 }, { 0x0343, 0x4c },
 	{ 0x0340, 0x04 }, { 0x0341, 0x65 }, { 0x0344, 0x00 }, { 0x0345, 0x02 },
 	{ 0x0346, 0x00 }, { 0x0347, 0x02 }, { 0x0348, 0x07 }, { 0x0349, 0x85 },
-	{ 0x034a, 0x04 }, { 0x034b, 0x3d }, { 0x0381, 0x01 }, 
+	{ 0x034a, 0x04 }, { 0x034b, 0x3d }, { 0x0381, 0x01 },
 	{ 0x0385, 0x01 }, { 0x0387, 0x01 }, { 0x0900, 0x00 }, { 0x0901, 0x11 },
 	{ 0x0408, 0x00 }, { 0x0409, 0x00 }, { 0x040a, 0x00 }, { 0x040b, 0x00 },
 	{ 0x040c, 0x07 }, { 0x040d, 0x84 }, { 0x040e, 0x04 }, { 0x040f, 0x3c },
@@ -408,7 +408,7 @@ static const struct nt99235_reg nt99235_regs_1280x720p90[] = {
 	{ 0x3530, 0x40 }, { 0x3325, 0x2b }, { 0x0342, 0x04 }, { 0x0343, 0x4c },
 	{ 0x0340, 0x02 }, { 0x0341, 0xf0 }, { 0x0344, 0x01 }, { 0x0345, 0x44 },
 	{ 0x0346, 0x00 }, { 0x0347, 0xb8 }, { 0x0348, 0x06 }, { 0x0349, 0x43 },
-	{ 0x034a, 0x03 }, { 0x034b, 0x87 }, { 0x0381, 0x01 }, 
+	{ 0x034a, 0x03 }, { 0x034b, 0x87 }, { 0x0381, 0x01 },
 	{ 0x0385, 0x01 }, { 0x0387, 0x01 }, { 0x0900, 0x00 }, { 0x0901, 0x11 },
 	{ 0x0408, 0x00 }, { 0x0409, 0x00 }, { 0x040a, 0x00 }, { 0x040b, 0x00 },
 	{ 0x040c, 0x05 }, { 0x040d, 0x04 }, { 0x040e, 0x02 }, { 0x040f, 0xd4 },
@@ -429,6 +429,7 @@ static const struct nt99235_reg nt99235_regs_1280x720p90[] = {
 	{ 0x855b, 0x2b }, { 0x855c, 0x17 }, { 0x826c, 0x80 }, { 0x826d, 0x04 },
 	{ 0x826c, 0x20 }, { 0x9040, 0x09 }, { 0x9023, 0x60 }, { 0x8201, 0x0f },
 };
+
 /* The four modes the sensor library supports. cmos_set_image_mode rejects any
  * other index, so this table is complete.
  */
@@ -508,6 +509,7 @@ static const struct nt99235_mode nt99235_modes[] = {
  * 120, 752 at 90), giving 74.25 Mpixel/s.
  */
 #define NT99235_PIXEL_RATE		74250000ULL
+
 /* Per-lane DDR clock, half the serial bit rate. The vendor sensor library
  * libsns_nt99235.so carries the per-lane serial rate as a literal in each mode
  * descriptor: 900 Mbps for the 2-lane 1920x1080 and 960x540 modes, 456 Mbps for
@@ -564,9 +566,8 @@ static int nt99235_write(struct nt99235 *nt99235, u16 address, u8 value)
 {
 	struct i2c_client *client = v4l2_get_subdevdata(&nt99235->sd);
 	u8 buf[3] = { address >> 8, address & 0xff, value };
-	int ret;
 
-	ret = i2c_master_send(client, buf, sizeof(buf));
+	int ret = i2c_master_send(client, buf, sizeof(buf));
 	if (ret != sizeof(buf)) {
 		dev_err(nt99235->dev, "write 0x%04x = 0x%02x failed (%d)\n",
 			address, value, ret);
@@ -595,6 +596,7 @@ static int nt99235_read(struct nt99235 *nt99235, u16 address, u8 *value)
 			.buf = value,
 		},
 	};
+
 	int ret;
 
 	ret = i2c_transfer(client->adapter, msgs, ARRAY_SIZE(msgs));
@@ -610,11 +612,8 @@ static int nt99235_write_regs(struct nt99235 *nt99235,
 			      const struct nt99235_reg *regs,
 			      unsigned int num_regs)
 {
-	unsigned int i;
-	int ret;
-
-	for (i = 0; i < num_regs; i++) {
-		ret = nt99235_write(nt99235, regs[i].address, regs[i].value);
+	for (unsigned int i = 0; i < num_regs; i++) {
+		int ret = nt99235_write(nt99235, regs[i].address, regs[i].value);
 		if (ret)
 			return ret;
 	}
@@ -682,9 +681,8 @@ static int nt99235_detect(struct nt99235 *nt99235)
 {
 	u8 hi, lo;
 	u16 id;
-	int ret;
 
-	ret = nt99235_read(nt99235, NT99235_REG_MODEL_ID_HI, &hi);
+	int ret = nt99235_read(nt99235, NT99235_REG_MODEL_ID_HI, &hi);
 	if (ret)
 		return ret;
 
@@ -752,21 +750,20 @@ static const struct nt99235_cap_reg nt99235_smia_caps[] = {
 
 static void nt99235_dump_smia_caps(struct nt99235 *nt99235)
 {
-	unsigned int i;
 	u32 nonzero = 0;
 
-	for (i = 0; i < ARRAY_SIZE(nt99235_smia_caps); i++) {
+	for (unsigned int i = 0; i < ARRAY_SIZE(nt99235_smia_caps); i++) {
 		const struct nt99235_cap_reg *c = &nt99235_smia_caps[i];
 		u32 val = 0;
 		u8 b;
-		int j;
 
-		for (j = 0; j < c->len; j++) {
+		for (unsigned int j = 0; j < c->len; j++) {
 			if (nt99235_read(nt99235, c->addr + j, &b)) {
 				dev_warn(nt99235->dev, "smia: %s read failed\n",
 					 c->name);
 				return;
 			}
+
 			val = (val << 8) | b;
 		}
 
@@ -801,9 +798,11 @@ static int nt99235_commit_exposure(struct nt99235 *nt99235, u32 lines, u32 gain)
 	ret = nt99235_write(nt99235, NT99235_REG_EXPOSURE_HI, (lines >> 8) & 0xff);
 	if (!ret)
 		ret = nt99235_write(nt99235, NT99235_REG_EXPOSURE_LO, lines & 0xff);
+
 	/* The vendor writes the same code to both gain bytes. */
 	if (!ret)
 		ret = nt99235_write(nt99235, NT99235_REG_AGAIN_0, gain & 0xff);
+
 	if (!ret)
 		ret = nt99235_write(nt99235, NT99235_REG_AGAIN_1, gain & 0xff);
 
@@ -834,6 +833,7 @@ static int nt99235_apply_live(void)
 
 	if (nt99235->exposure)
 		__v4l2_ctrl_s_ctrl(nt99235->exposure, exposure);
+
 	if (nt99235->again)
 		__v4l2_ctrl_s_ctrl(nt99235->again, gain);
 
@@ -860,8 +860,10 @@ static int nt99235_param_set(const char *val, const struct kernel_param *kp)
 	 */
 	if (exposure < NT99235_EXPOSURE_MIN)
 		exposure = NT99235_EXPOSURE_MIN;
+
 	if (gain < NT99235_AGAIN_MIN)
 		gain = NT99235_AGAIN_MIN;
+
 	if (gain > NT99235_AGAIN_MAX)
 		gain = NT99235_AGAIN_MAX;
 
@@ -919,13 +921,13 @@ static const struct v4l2_ctrl_ops nt99235_ctrl_ops = {
 static void nt99235_apply_test_pattern(struct nt99235 *nt99235)
 {
 	u8 hi = 0, lo = 0;
-	int ret;
 
-	ret = nt99235_write(nt99235, NT99235_REG_TEST_PATTERN_HI,
-			    (test_pattern >> 8) & 0xff);
+	int ret = nt99235_write(nt99235, NT99235_REG_TEST_PATTERN_HI,
+				(test_pattern >> 8) & 0xff);
 	if (!ret)
 		ret = nt99235_write(nt99235, NT99235_REG_TEST_PATTERN_LO,
 				    test_pattern & 0xff);
+
 	if (ret) {
 		dev_warn(nt99235->dev, "test pattern %d: write failed (%d)\n",
 			 test_pattern, ret);
@@ -949,26 +951,20 @@ static void nt99235_apply_test_pattern(struct nt99235 *nt99235)
 			 test_pattern, test_pattern, hi, lo);
 }
 
-static int nt99235_set_stream(struct v4l2_subdev *sd, int enable)
+/* nt99235_start_stream - program the mode and start the sensor.
+ *
+ * Split from nt99235_set_stream so the runtime-PM reference is taken and
+ * released in one place: every failure here is unwound by the caller's single
+ * put, rather than by a goto from each step.
+ */
+static int nt99235_start_stream(struct nt99235 *nt99235)
 {
-	struct nt99235 *nt99235 = to_nt99235(sd);
 	int ret;
-
-	if (!enable) {
-		ret = nt99235_write(nt99235, NT99235_REG_MODE_SELECT,
-				    NT99235_MODE_STANDBY);
-		pm_runtime_put(nt99235->dev);
-		return ret;
-	}
-
-	ret = pm_runtime_resume_and_get(nt99235->dev);
-	if (ret)
-		return ret;
 
 	ret = nt99235_write_regs(nt99235, nt99235->mode->regs,
 				 nt99235->mode->num_regs);
 	if (ret)
-		goto error_put;
+		return ret;
 
 	/* The vendor programs the table and issues stream-on from two separate
 	 * framework phases, so the sensor PLL and MCU settle for tens of
@@ -998,17 +994,31 @@ static int nt99235_set_stream(struct v4l2_subdev *sd, int enable)
 	 */
 	ret = nt99235_commit_exposure(nt99235, exposure, gain);
 	if (ret)
-		goto error_put;
+		return ret;
 
-	ret = nt99235_write(nt99235, NT99235_REG_MODE_SELECT,
-			    NT99235_MODE_STREAMING);
+	return nt99235_write(nt99235, NT99235_REG_MODE_SELECT,
+			     NT99235_MODE_STREAMING);
+}
+
+static int nt99235_set_stream(struct v4l2_subdev *sd, int enable)
+{
+	struct nt99235 *nt99235 = to_nt99235(sd);
+	int ret;
+
+	if (!enable) {
+		ret = nt99235_write(nt99235, NT99235_REG_MODE_SELECT,
+				    NT99235_MODE_STANDBY);
+		pm_runtime_put(nt99235->dev);
+		return ret;
+	}
+
+	ret = pm_runtime_resume_and_get(nt99235->dev);
 	if (ret)
-		goto error_put;
+		return ret;
 
-	return 0;
-
-error_put:
-	pm_runtime_put(nt99235->dev);
+	ret = nt99235_start_stream(nt99235);
+	if (ret)
+		pm_runtime_put(nt99235->dev);
 
 	return ret;
 }
@@ -1058,12 +1068,11 @@ static int nt99235_enum_frame_size(struct v4l2_subdev *sd,
 {
 	struct nt99235 *nt99235 = to_nt99235(sd);
 	unsigned int seen = 0;
-	unsigned int i;
 
 	if (fse->code != NT99235_MBUS_CODE)
 		return -EINVAL;
 
-	for (i = 0; i < ARRAY_SIZE(nt99235_modes); i++) {
+	for (unsigned int i = 0; i < ARRAY_SIZE(nt99235_modes); i++) {
 		const struct nt99235_mode *mode = &nt99235_modes[i];
 
 		if (!nt99235_has_usable_lanes(nt99235, mode))
@@ -1089,9 +1098,8 @@ static const struct nt99235_mode *nt99235_find_mode(struct nt99235 *nt99235,
 {
 	const struct nt99235_mode *best = NULL;
 	unsigned int best_error = UINT_MAX;
-	unsigned int i;
 
-	for (i = 0; i < ARRAY_SIZE(nt99235_modes); i++) {
+	for (unsigned int i = 0; i < ARRAY_SIZE(nt99235_modes); i++) {
 		const struct nt99235_mode *mode = &nt99235_modes[i];
 		unsigned int error;
 
@@ -1271,9 +1279,8 @@ static int nt99235_init_controls(struct nt99235 *nt99235)
 {
 	struct v4l2_ctrl_handler *handler = &nt99235->ctrl_handler;
 	struct v4l2_ctrl *pixel_rate;
-	int ret;
 
-	ret = v4l2_ctrl_handler_init(handler, 4);
+	int ret = v4l2_ctrl_handler_init(handler, 4);
 	if (ret)
 		return ret;
 
@@ -1282,6 +1289,7 @@ static int nt99235_init_controls(struct nt99235 *nt99235)
 				       ARRAY_SIZE(nt99235_link_freqs) - 1,
 				       NT99235_LINK_FREQ_INDEX(nt99235->mode->lanes),
 				       nt99235_link_freqs);
+
 	if (nt99235->link_freq)
 		nt99235->link_freq->flags |= V4L2_CTRL_FLAG_READ_ONLY;
 
@@ -1462,6 +1470,7 @@ static void nt99235_remove(struct i2c_client *client)
 	pm_runtime_disable(dev);
 	if (!pm_runtime_status_suspended(dev))
 		nt99235_power_off(dev);
+
 	pm_runtime_set_suspended(dev);
 }
 
