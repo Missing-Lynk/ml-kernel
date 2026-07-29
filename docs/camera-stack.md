@@ -271,6 +271,37 @@ The generic worker waits on ioctl `0x80104d04`, registration is `0x40184d00`, an
 
 None of this is on the critical path: frame-locked arming sustains at 60 fps with no acknowledge of any kind. It matters for a completion-driven driver, not for capture.
 
+### Exposure, gain, and the tone response
+
+Exposure and gain are implemented and validated. Both are SMIA addresses, recovered from the vendor's AE commit list in `libsns_nt99235.so`: integration time is a 16-bit big-endian line count at `0x0202`/`0x0203` clamped to the mode's frame length minus two, analogue gain is a code written to both `0x0206` and `0x0207`, and the pair must be bracketed by `0x0104` = 1 then `0x0104` = 0 so no frame sees a half-updated commit. The 26 registers at `0x8250`-`0x826c` and `0x8550`-`0x855c` that drift at runtime on the vendor are **not** exposure: they are sensor-MCU lens shading tables driven by the AWB path and reloaded through `0x8201`.
+
+Gain is an index into a 97-entry table, and the mapping is closed form. The table was extracted from `libsns_nt99235.so` at virtual address `0x1a130`, file offset `0xa130` through the second `PT_LOAD`, 97 `u32` entries with 1024 meaning 1x, and
+
+	gain = 2^(code >> 4) * (16 + (code & 0xf)) / 16
+
+reproduces **all 97 entries exactly**: a four-bit mantissa with a four-bit binary exponent, 1x at code `0x00` to 64x at `0x60`. It is not an approximation of the table.
+
+**The sensor is not SMIA-compliant, only SMIA-addressed.** Reading the SMIA identification and capability blocks on hardware gives 3 of 20 registers non-zero: `model_id` `0x9235` and `revision_number` `0x0b` are real, but `manufacturer_id` is 0, `smia_version` reads `0xff`, and the whole analogue-gain capability block `0x0080`-`0x0092` and integration-time block `0x1000`-`0x1006` are zero. So the functional registers follow SMIA addresses and SMIA semantics, confirmed by behaviour rather than by a compliance claim, and nothing is discoverable from the sensor: every limit has to come from the vendor library or from measurement. `nt99235.ko dump_smia=1` reproduces this.
+
+**The tone response is bimodal, and that is the remaining defect.** Swept live on hardware at gain `0x2f`:
+
+| exposure (lines) | mean luma | at luma 0-1 | over 200 |
+|---|---|---|---|
+| 64 | 1.1 | 99.9% | 0.0% |
+| 256 | 1.1 | 99.9% | 0.0% |
+| 512 | 4.0 | 92.1% | 0.0% |
+| 1123 | 25.7 | 85.9% | 9.4% |
+
+The response **accelerates**: four times the integration from 64 to 256 changes nothing, while 2.2 times from 512 to 1123 multiplies the mean by 6.4. A linear sensor through a normal display gamma compresses at the top and does the opposite. The full distribution at 1123 is hollow in the middle: 85.91% at luma 0-1, then 1.06%, 1.32%, 1.24% and 1.10% across the bands to 199, then 9.35% at 200-239 and essentially nothing above. That is a threshold, not a curve, and it does not clip at white.
+
+Two candidates, not yet separated: a black-level pedestal far too large, clamping everything below it, or the missing gamma LUT. Handed to Codex as `hdf-20260729-007`.
+
+**What is missing is a 16 KiB gamma LUT upload, not a register.** `isp_sub_gamma_creat` allocates a `0x42e8` object whose handler at `libmpp_service.so:0x194350` calls `isp_memcpy` with length `0x4000` into an ISP-resident aperture, then flushes and programs the gamma control words. Our own trace corroborates that this never reached the register replay: across 60,622 ISP writes over 1,276 distinct offsets, the highest offset written anywhere is `0x76d8` and there are **zero** writes at or above `0x8000`, with no tracer bail-out. A 4096-word upload would be unmistakable.
+
+The colour-space conversion is **not** the problem and should not be touched first: `0x08c03c00`/`0x08c03c04` hold the Rec.601 Y row `306, 601, 116` in Q10, and a linear matrix with that row cannot map five colours to the same near-black while leaving yellow bright.
+
+The vendor ships three tuning blobs, `nt99235`, `sc2210` and `sc231`, all **exactly 879,704 bytes**, so the format is a fixed-layout struct. Across all three, 97,880 bytes differ over 46,738 regions with a largest contiguous differing region of only 1200 bytes, so there is no 16 KiB block that varies by sensor and the gamma data is likely shared. Differential analysis therefore cannot locate it.
+
 ### Not known
 
 These are open and are not to be assumed while building the ISP driver:

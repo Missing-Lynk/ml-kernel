@@ -20,8 +20,10 @@
  * device tree endpoint declares four data lanes.
  */
 
+#include <linux/cleanup.h>
 #include <linux/clk.h>
 #include <linux/delay.h>
+#include <linux/mutex.h>
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/limits.h>
@@ -46,6 +48,82 @@
 #define NT99235_REG_MODE_SELECT		0x0100
 #define NT99235_MODE_STANDBY		0x00
 #define NT99235_MODE_STREAMING		0x01
+
+/*
+ * Exposure and gain, recovered from the vendor's AE commit list in
+ * libsns_nt99235.so (cmos_get_sns_regs_info). Both are SMIA addresses, like
+ * everything else the mode tables touch outside the 0x3xxx and 0x8xxx Novatek
+ * ranges.
+ *
+ * Exposure is a 16-bit big-endian count of line periods, clamped by the vendor
+ * to vts - 2. Gain is a code written identically to both 0x0206 and 0x0207.
+ *
+ * The group hold is required, not optional: the vendor brackets every dirty
+ * entry of a commit with 0x0104 = 1 then 0x0104 = 0, so a frame never sees a
+ * half-updated exposure and gain pair.
+ *
+ * Not to be confused with 0x8250-0x826c and 0x8550-0x855c, which drift at
+ * runtime on a streaming vendor and look like the obvious candidates. They are
+ * sensor-MCU lens shading tables driven by the AWB path, and reloaded with
+ * 0x8201. They have nothing to do with brightness.
+ */
+#define NT99235_REG_GROUP_HOLD		0x0104
+#define NT99235_REG_EXPOSURE_HI		0x0202
+#define NT99235_REG_EXPOSURE_LO		0x0203
+#define NT99235_REG_AGAIN_0		0x0206
+#define NT99235_REG_AGAIN_1		0x0207
+
+/*
+ * Analogue gain is an index into a 97-entry quantisation table in the vendor
+ * library, not a linear register value. The control carries the raw sensor code,
+ * so nothing here has to reproduce the table.
+ *
+ * The mapping is closed form, and this is measured rather than assumed. The
+ * whole table was extracted from libsns_nt99235.so (virtual address 0x1a130,
+ * file offset 0xa130 through the second PT_LOAD, 97 u32 entries with 1024
+ * meaning 1x) and compared against
+ *
+ *	gain = 2^(code >> 4) * (16 + (code & 0xf)) / 16
+ *
+ * which reproduces all 97 entries exactly: four-bit mantissa, four-bit binary
+ * exponent, 1x at code 0x00 rising to 64x at code 0x60. An AE loop may use the
+ * formula directly; it is not an approximation of the table, it is the table.
+ */
+#define NT99235_AGAIN_MIN		0x00
+#define NT99235_AGAIN_MAX		0x60
+#define NT99235_AGAIN_DEFAULT		0x2f	/* 7.75x */
+
+/*
+ * Vendor's observed indoor starting point, in lines. Deliberately near the
+ * ceiling: the sensor runs at power-on defaults otherwise and the resulting
+ * frame is black, so erring bright makes a first capture legible. Clamped to
+ * the mode's vts - 2 in any case.
+ */
+#define NT99235_EXPOSURE_DEFAULT	1123
+#define NT99235_EXPOSURE_MIN		1
+
+/*
+ * Live exposure and gain, as writable module parameters.
+ *
+ * These duplicate the V4L2 controls on purpose. The controls are the right
+ * interface and are what an application would use, but nothing on the device
+ * can reach them: the rootfs has no v4l2-ctl and ml-v4l2grab does not implement
+ * VIDIOC_S_CTRL, so on a bring-up unit the controls are only ever set from
+ * their compiled-in defaults. Writing
+ *
+ *	echo 400 > /sys/module/nt99235/parameters/exposure
+ *
+ * retunes a running sensor, which is what sweeping for a working value needs
+ * when the alternative is a rebuild and a reboot per sample.
+ *
+ * The setter commits to hardware and syncs the matching V4L2 control, so the
+ * two interfaces cannot disagree.
+ */
+static struct nt99235 *nt99235_bound;
+static DEFINE_MUTEX(nt99235_bound_lock);
+
+static int exposure = NT99235_EXPOSURE_DEFAULT;
+static int gain = NT99235_AGAIN_DEFAULT;
 
 /* Master clock rate the vendor programs before releasing reset. */
 #define NT99235_MCLK_RATE		24000000
@@ -119,6 +197,15 @@ MODULE_PARM_DESC(force_mode,
 #define NT99235_TEST_PATTERN_BARS	2
 #define NT99235_TEST_PATTERN_FADE	3
 #define NT99235_TEST_PATTERN_PN9	4
+
+/*
+ * Dump the SMIA identification and capability blocks at stream-on. Off by
+ * default: it is 21 extra I2C reads and it only needs running once per sensor.
+ */
+static bool dump_smia;
+module_param(dump_smia, bool, 0644);
+MODULE_PARM_DESC(dump_smia,
+		 "log the SMIA read-only ID and capability registers at stream-on (default off)");
 
 static int test_pattern = NT99235_TEST_PATTERN_OFF;
 module_param(test_pattern, int, 0644);
@@ -352,27 +439,39 @@ struct nt99235_mode {
 	u32 frame_interval_num;
 	u32 frame_interval_den;
 	u8 lanes;
+	/*
+	 * Frame length in lines, the value the mode table writes to
+	 * 0x0340/0x0341. Exposure is counted in lines and the vendor clamps it
+	 * to vts - 2, so the ceiling moves with the mode: 1125 at 1080p60 but
+	 * 562 at 960x540p120. Carried here so the clamp follows the mode rather
+	 * than being a constant that is only right for one of them.
+	 */
+	u16 vts;
 	const struct nt99235_reg *regs;
 	unsigned int num_regs;
 };
 
-#define NT99235_MODE(_name, _w, _h, _fps, _lanes, _regs) {	\
+#define NT99235_MODE(_name, _w, _h, _fps, _lanes, _vts, _regs) {	\
 	.name = _name,						\
 	.width = _w,						\
 	.height = _h,						\
 	.frame_interval_num = 1,				\
 	.frame_interval_den = _fps,				\
 	.lanes = _lanes,					\
+	.vts = _vts,						\
 	.regs = _regs,						\
 	.num_regs = ARRAY_SIZE(_regs),				\
 }
 
 static const struct nt99235_mode nt99235_modes[] = {
-	NT99235_MODE("1920x1080p60", 1920, 1080, 60, 2, nt99235_regs_1920x1080p60),
-	NT99235_MODE("960x540p120", 960, 540, 120, 2, nt99235_regs_960x540p120),
-	NT99235_MODE("1920x1080p60-4lane", 1920, 1080, 60, 4,
+	NT99235_MODE("1920x1080p60", 1920, 1080, 60, 2, 0x0465,
+		     nt99235_regs_1920x1080p60),
+	NT99235_MODE("960x540p120", 960, 540, 120, 2, 0x0232,
+		     nt99235_regs_960x540p120),
+	NT99235_MODE("1920x1080p60-4lane", 1920, 1080, 60, 4, 0x0465,
 		     nt99235_regs_1920x1080p60_4lane),
-	NT99235_MODE("1280x720p90", 1280, 720, 90, 4, nt99235_regs_1280x720p90),
+	NT99235_MODE("1280x720p90", 1280, 720, 90, 4, 0x02f0,
+		     nt99235_regs_1280x720p90),
 };
 
 /*
@@ -445,6 +544,8 @@ struct nt99235 {
 	/* Reports the link frequency so the receiver can program its D-PHY. */
 	struct v4l2_ctrl_handler ctrl_handler;
 	struct v4l2_ctrl *link_freq;
+	struct v4l2_ctrl *exposure;
+	struct v4l2_ctrl *again;
 
 	const struct nt99235_mode *mode;
 };
@@ -601,6 +702,215 @@ static int nt99235_detect(struct nt99235 *nt99235)
 }
 
 /*
+ * Dump the SMIA read-only identification and capability blocks.
+ *
+ * Every register this driver uses outside the opaque 0x3xxx and 0x8xxx Novatek
+ * ranges is at an SMIA address, and two of them have been confirmed to behave
+ * as SMIA specifies rather than merely to exist: 0x0600 = 2 produced 100 per
+ * cent colour bars on hardware, and the vendor's own AE commit list uses
+ * 0x0202/0x0203 for line-based integration under a 0x0104 group hold. That is
+ * strong, but it is still inference from behaviour.
+ *
+ * SMIA settles it directly. 0x0005 is SMIA_VERSION, and 0x0084-0x0097 describe
+ * analogue gain: the code minimum, maximum and step, plus the m0, c0, m1 and c1
+ * coefficients of gain = (m0 * code + c0) / (m1 * code + c1). If those read
+ * sensibly the sensor is SMIA-compliant, and the gain mapping comes from the
+ * sensor itself rather than from a table read out of the vendor library, which
+ * is the one part of the exposure path we currently take on trust.
+ *
+ * Reads only. Registers that are not implemented typically read zero, so a
+ * block of zeros is the answer "not SMIA here" rather than a failure.
+ */
+struct nt99235_cap_reg {
+	u16 addr;
+	u8 len;
+	const char *name;
+};
+
+static const struct nt99235_cap_reg nt99235_smia_caps[] = {
+	{ 0x0000, 2, "model_id" },
+	{ 0x0002, 1, "revision_number" },
+	{ 0x0004, 1, "manufacturer_id" },
+	{ 0x0005, 1, "smia_version" },
+	{ 0x0007, 1, "pixel_order" },
+	{ 0x0040, 1, "frame_format_model_type" },
+	{ 0x0041, 1, "frame_format_model_subtype" },
+	{ 0x0080, 2, "analogue_gain_capability" },
+	{ 0x0084, 2, "analogue_gain_code_min" },
+	{ 0x0086, 2, "analogue_gain_code_max" },
+	{ 0x0088, 2, "analogue_gain_code_step" },
+	{ 0x008a, 2, "analogue_gain_type" },
+	{ 0x008c, 2, "analogue_gain_m0" },
+	{ 0x008e, 2, "analogue_gain_c0" },
+	{ 0x0090, 2, "analogue_gain_m1" },
+	{ 0x0092, 2, "analogue_gain_c1" },
+	{ 0x1000, 1, "integration_time_capability" },
+	{ 0x1004, 2, "coarse_integration_time_min" },
+	{ 0x1006, 2, "coarse_integration_time_max_margin" },
+	{ 0x1100, 1, "digital_gain_capability" },
+};
+
+static void nt99235_dump_smia_caps(struct nt99235 *nt99235)
+{
+	unsigned int i;
+	u32 nonzero = 0;
+
+	for (i = 0; i < ARRAY_SIZE(nt99235_smia_caps); i++) {
+		const struct nt99235_cap_reg *c = &nt99235_smia_caps[i];
+		u32 val = 0;
+		u8 b;
+		int j;
+
+		for (j = 0; j < c->len; j++) {
+			if (nt99235_read(nt99235, c->addr + j, &b)) {
+				dev_warn(nt99235->dev, "smia: %s read failed\n",
+					 c->name);
+				return;
+			}
+			val = (val << 8) | b;
+		}
+
+		if (val)
+			nonzero++;
+
+		dev_info(nt99235->dev, "smia: %-34s 0x%04x = 0x%0*x (%u)\n",
+			 c->name, c->addr, c->len * 2, val, val);
+	}
+
+	dev_info(nt99235->dev,
+		 "smia: %u of %zu capability registers non-zero\n",
+		 nonzero, ARRAY_SIZE(nt99235_smia_caps));
+}
+
+/*
+ * Commit exposure and gain inside the vendor's group hold, so a frame never
+ * sees one of the pair updated without the other.
+ */
+static int nt99235_commit_exposure(struct nt99235 *nt99235, u32 lines, u32 gain)
+{
+	u16 max = nt99235->mode->vts - 2;
+	int ret;
+
+	if (lines > max)
+		lines = max;
+
+	ret = nt99235_write(nt99235, NT99235_REG_GROUP_HOLD, 1);
+	if (ret)
+		return ret;
+
+	ret = nt99235_write(nt99235, NT99235_REG_EXPOSURE_HI, (lines >> 8) & 0xff);
+	if (!ret)
+		ret = nt99235_write(nt99235, NT99235_REG_EXPOSURE_LO, lines & 0xff);
+	/* The vendor writes the same code to both gain bytes. */
+	if (!ret)
+		ret = nt99235_write(nt99235, NT99235_REG_AGAIN_0, gain & 0xff);
+	if (!ret)
+		ret = nt99235_write(nt99235, NT99235_REG_AGAIN_1, gain & 0xff);
+
+	/* Release the hold even if a write failed, or the sensor stays held. */
+	if (nt99235_write(nt99235, NT99235_REG_GROUP_HOLD, 0) && !ret)
+		ret = -EIO;
+
+	return ret;
+}
+
+/*
+ * Apply the current module-parameter values to a bound, powered sensor, and
+ * keep the V4L2 controls showing the same thing.
+ *
+ * Does nothing when no sensor is bound or it is not powered, which is the
+ * normal case for a parameter set at insmod: stream-on commits then.
+ */
+static int nt99235_apply_live(void)
+{
+	struct nt99235 *nt99235;
+	int ret = 0;
+
+	guard(mutex)(&nt99235_bound_lock);
+
+	nt99235 = nt99235_bound;
+	if (!nt99235)
+		return 0;
+
+	if (nt99235->exposure)
+		__v4l2_ctrl_s_ctrl(nt99235->exposure, exposure);
+	if (nt99235->again)
+		__v4l2_ctrl_s_ctrl(nt99235->again, gain);
+
+	if (!pm_runtime_get_if_in_use(nt99235->dev))
+		return 0;
+
+	ret = nt99235_commit_exposure(nt99235, exposure, gain);
+	pm_runtime_put(nt99235->dev);
+
+	return ret;
+}
+
+static int nt99235_param_set(const char *val, const struct kernel_param *kp)
+{
+	int ret = param_set_int(val, kp);
+
+	if (ret)
+		return ret;
+
+	/*
+	 * Clamp here rather than rejecting: a sweep script that walks past the
+	 * ceiling should saturate, not fail halfway and leave the sensor at a
+	 * value the operator no longer knows.
+	 */
+	if (exposure < NT99235_EXPOSURE_MIN)
+		exposure = NT99235_EXPOSURE_MIN;
+	if (gain < NT99235_AGAIN_MIN)
+		gain = NT99235_AGAIN_MIN;
+	if (gain > NT99235_AGAIN_MAX)
+		gain = NT99235_AGAIN_MAX;
+
+	return nt99235_apply_live();
+}
+
+static const struct kernel_param_ops nt99235_param_ops = {
+	.set = nt99235_param_set,
+	.get = param_get_int,
+};
+
+module_param_cb(exposure, &nt99235_param_ops, &exposure, 0644);
+MODULE_PARM_DESC(exposure,
+		 "integration time in lines, clamped to the mode's frame length minus 2; writable while streaming");
+
+module_param_cb(gain, &nt99235_param_ops, &gain, 0644);
+MODULE_PARM_DESC(gain,
+		 "analogue gain code 0x00-0x60, gain = 2^(code>>4) * (16 + (code&15)) / 16, so 1x to 64x; writable while streaming");
+
+static int nt99235_s_ctrl(struct v4l2_ctrl *ctrl)
+{
+	struct nt99235 *nt99235 =
+		container_of(ctrl->handler, struct nt99235, ctrl_handler);
+
+	/*
+	 * Only touch the sensor when it is powered. Controls set while it is
+	 * off are applied by stream-on, which commits both together.
+	 */
+	if (!pm_runtime_get_if_in_use(nt99235->dev))
+		return 0;
+
+	switch (ctrl->id) {
+	case V4L2_CID_EXPOSURE:
+	case V4L2_CID_ANALOGUE_GAIN:
+		nt99235_commit_exposure(nt99235, nt99235->exposure->val,
+					nt99235->again->val);
+		break;
+	}
+
+	pm_runtime_put(nt99235->dev);
+
+	return 0;
+}
+
+static const struct v4l2_ctrl_ops nt99235_ctrl_ops = {
+	.s_ctrl = nt99235_s_ctrl,
+};
+
+/*
  * Program the test pattern and report what the sensor makes of it. Deliberately
  * not fatal: the address is an inference from the SMIA register map, so a device
  * that does not implement it should leave capture exactly as it was rather than
@@ -671,8 +981,19 @@ static int nt99235_set_stream(struct v4l2_subdev *sd, int enable)
 	 * After the mode table, so it is not overwritten by it, and before
 	 * stream-on, so the first frame already carries the pattern.
 	 */
+	if (dump_smia)
+		nt99235_dump_smia_caps(nt99235);
+
 	if (test_pattern != NT99235_TEST_PATTERN_OFF)
 		nt99235_apply_test_pattern(nt99235);
+
+	/*
+	 * The mode table does not set exposure or gain, so commit the control
+	 * values before streaming rather than waiting for someone to write one.
+	 */
+	ret = nt99235_commit_exposure(nt99235, exposure, gain);
+	if (ret)
+		goto error_put;
 
 	ret = nt99235_write(nt99235, NT99235_REG_MODE_SELECT,
 			    NT99235_MODE_STREAMING);
@@ -947,7 +1268,7 @@ static int nt99235_init_controls(struct nt99235 *nt99235)
 	struct v4l2_ctrl *pixel_rate;
 	int ret;
 
-	ret = v4l2_ctrl_handler_init(handler, 2);
+	ret = v4l2_ctrl_handler_init(handler, 4);
 	if (ret)
 		return ret;
 
@@ -964,6 +1285,23 @@ static int nt99235_init_controls(struct nt99235 *nt99235)
 				       1, NT99235_PIXEL_RATE);
 	if (pixel_rate)
 		pixel_rate->flags |= V4L2_CTRL_FLAG_READ_ONLY;
+
+	/*
+	 * Writable, unlike the two above. Nothing else sets exposure or gain on
+	 * this stack: the vendor drives them from its 3A layer, which does not
+	 * exist here, so without these the sensor stays at power-on defaults and
+	 * every capture is black.
+	 */
+	nt99235->exposure =
+		v4l2_ctrl_new_std(handler, &nt99235_ctrl_ops, V4L2_CID_EXPOSURE,
+				  NT99235_EXPOSURE_MIN, nt99235->mode->vts - 2,
+				  1, min_t(u32, exposure,
+					   nt99235->mode->vts - 2));
+
+	nt99235->again =
+		v4l2_ctrl_new_std(handler, &nt99235_ctrl_ops,
+				  V4L2_CID_ANALOGUE_GAIN, NT99235_AGAIN_MIN,
+				  NT99235_AGAIN_MAX, 1, gain);
 
 	if (handler->error) {
 		ret = handler->error;
@@ -1072,8 +1410,12 @@ static int nt99235_probe(struct i2c_client *client)
 	if (ret)
 		goto error_pm;
 
-	dev_info(dev, "NT99235 registered on %u data lanes, default mode %s\n",
-		 nt99235->num_data_lanes, nt99235->mode->name);
+	/* Publish for the live exposure and gain parameters. One sensor. */
+	scoped_guard(mutex, &nt99235_bound_lock)
+		nt99235_bound = nt99235;
+
+	dev_info(dev, "NT99235 registered on %u data lanes, default mode %s, exposure %d gain 0x%02x\n",
+		 nt99235->num_data_lanes, nt99235->mode->name, exposure, gain);
 
 	return 0;
 
@@ -1100,6 +1442,12 @@ static void nt99235_remove(struct i2c_client *client)
 	struct v4l2_subdev *sd = i2c_get_clientdata(client);
 	struct nt99235 *nt99235 = to_nt99235(sd);
 	struct device *dev = &client->dev;
+
+	/* Before anything is torn down, so a concurrent parameter write cannot
+	 * reach a half-freed sensor.
+	 */
+	scoped_guard(mutex, &nt99235_bound_lock)
+		nt99235_bound = NULL;
 
 	v4l2_async_unregister_subdev(sd);
 	v4l2_subdev_cleanup(sd);
