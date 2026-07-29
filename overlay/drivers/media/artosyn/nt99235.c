@@ -984,8 +984,13 @@ static int nt99235_set_stream(struct v4l2_subdev *sd, int enable)
 	if (dump_smia)
 		nt99235_dump_smia_caps(nt99235);
 
-	if (test_pattern != NT99235_TEST_PATTERN_OFF)
-		nt99235_apply_test_pattern(nt99235);
+	/*
+	 * Unconditional, including the off value. Skipping the write when off
+	 * left whatever was already in the sensor's register, so once a pattern
+	 * had been selected every later stream came up still showing it and
+	 * there was no way back to a live scene short of a power cycle.
+	 */
+	nt99235_apply_test_pattern(nt99235);
 
 	/*
 	 * The mode table does not set exposure or gain, so commit the control
