@@ -273,9 +273,7 @@ static u32 ar_csi2_read(void __iomem *base, u32 offset)
 /* ar_csi2_set_irq_masks - write every interrupt mask, or zero to mask all. */
 static void ar_csi2_set_irq_masks(struct ar_csi2 *csi2, bool unmask)
 {
-	unsigned int i;
-
-	for (i = 0; i < ARRAY_SIZE(ar_csi2_irq_masks); i++) {
+	for (int i = 0; i < ARRAY_SIZE(ar_csi2_irq_masks); i++) {
 		ar_csi2_write(csi2->core, ar_csi2_irq_masks[i].offset,
 			      unmask ? ar_csi2_irq_masks[i].value : 0);
 	}
@@ -371,9 +369,8 @@ static int ar_csi2_phy_range_code(unsigned int rate_mbps)
 		{  960, 1600, 6 },
 		{ 1600, 2500, 7 },
 	};
-	unsigned int i;
 
-	for (i = 0; i < ARRAY_SIZE(ranges); i++) {
+	for (unsigned int i = 0; i < ARRAY_SIZE(ranges); i++) {
 		if (rate_mbps >= ranges[i].min && rate_mbps <= ranges[i].max)
 			return ranges[i].code;
 	}
@@ -516,20 +513,21 @@ static void ar_csi2_phy_power_on(struct ar_csi2 *csi2)
 /* ar_csi2_phy_set_deskew_core - set or clear the deskew bit on one core. */
 static void ar_csi2_phy_set_deskew_core(void __iomem *core, bool enable)
 {
-	u8 value;
+	u8 value = ar_csi2_phy_test_read(core, AR_CSI_PHY_REG_DESKEW_A);
 
-	value = ar_csi2_phy_test_read(core, AR_CSI_PHY_REG_DESKEW_A);
 	if (enable)
 		value |= AR_CSI_PHY_DESKEW_ENABLE;
 	else
 		value &= ~AR_CSI_PHY_DESKEW_ENABLE;
+
 	ar_csi2_phy_test_write(core, AR_CSI_PHY_REG_DESKEW_A, value);
-
 	value = ar_csi2_phy_test_read(core, AR_CSI_PHY_REG_DESKEW_B);
+
 	if (enable)
 		value |= AR_CSI_PHY_DESKEW_ENABLE;
 	else
 		value &= ~AR_CSI_PHY_DESKEW_ENABLE;
+
 	ar_csi2_phy_test_write(core, AR_CSI_PHY_REG_DESKEW_B, value);
 }
 
@@ -543,7 +541,6 @@ static void ar_csi2_phy_set_deskew_core(void __iomem *core, bool enable)
 static void ar_csi2_phy_enable_deskew(struct ar_csi2 *csi2)
 {
 	ar_csi2_phy_set_deskew_core(csi2->core, true);
-
 	if (csi2->num_data_lanes > 2)
 		ar_csi2_phy_set_deskew_core(csi2->base + AR_CSI_CORE1_OFFSET,
 					    true);
@@ -563,7 +560,6 @@ static void ar_csi2_phy_enable_deskew(struct ar_csi2 *csi2)
 static void ar_csi2_phy_disable_deskew(struct ar_csi2 *csi2)
 {
 	ar_csi2_phy_set_deskew_core(csi2->core, false);
-
 	if (csi2->num_data_lanes > 2)
 		ar_csi2_phy_set_deskew_core(csi2->base + AR_CSI_CORE1_OFFSET,
 					    false);
@@ -674,9 +670,7 @@ static void ar_csi2_stop(struct ar_csi2 *csi2)
 static void ar_csi2_report_lanes(struct ar_csi2 *csi2)
 {
 	u32 expected = GENMASK(csi2->num_data_lanes - 1, 0);
-	u32 stopstate;
-
-	stopstate = ar_csi2_read(csi2->core, DW_CSI2_PHY_STOPSTATE);
+	u32 stopstate = ar_csi2_read(csi2->core, DW_CSI2_PHY_STOPSTATE);
 
 	if ((stopstate & expected) != expected) {
 		dev_warn(csi2->dev,
@@ -831,9 +825,7 @@ static int ar_csi2_notify_bound(struct v4l2_async_notifier *notifier,
 				struct v4l2_async_connection *asc)
 {
 	struct ar_csi2 *csi2 = container_of(notifier, struct ar_csi2, notifier);
-	int pad;
-
-	pad = media_entity_get_fwnode_pad(&subdev->entity, subdev->fwnode,
+	int pad = media_entity_get_fwnode_pad(&subdev->entity, subdev->fwnode,
 					  MEDIA_PAD_FL_SOURCE);
 	if (pad < 0) {
 		dev_err(csi2->dev, "%s has no source pad\n", subdev->name);
