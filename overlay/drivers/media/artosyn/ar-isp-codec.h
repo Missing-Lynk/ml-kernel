@@ -53,6 +53,22 @@
 #define AR_ISP_DRC_BLOB_BANK1		0x404
 
 /*
+ * LTM: a 0x680 fetch in three parts. The first 0x340 is a 10x10 lens-shading
+ * grid and is generated here. The 0x2c0 after it is scene-adaptive runtime state
+ * with no stored source, and the 0x80 tail is zero.
+ *
+ * The grid is two 100-entry float32 arrays in the tuning file, stored back to
+ * back just past the LSC enable gate at 0x9090. Each entry is a gain, unity at
+ * the frame centre and rising to about 3.9 at the corners.
+ */
+#define AR_ISP_LTM_SIZE			0x680
+#define AR_ISP_LTM_REGION_A		0x340
+#define AR_ISP_LTM_GRID			100
+#define AR_ISP_LTM_BLOB_Y		0x910c
+#define AR_ISP_LTM_BLOB_X		0x929c
+#define AR_ISP_LTM_Q			11
+
+/*
  * Compander: a 0x7800 page, mostly structure. Two spans carry content, a 0x700
  * span is zero, and everything from 0x1800 is one 16-byte unity record repeated.
  * The carried spans are in ar-isp-compander.h; the rest is rebuilt below.
@@ -239,6 +255,71 @@ static inline void ar_isp_drc_from_blob(u8 *dst, const u8 *blob,
 			samples[i] = ar_isp_get_le32(bank + i * 4);
 
 		ar_isp_drc_pack_bank(dst + b * AR_ISP_DRC_BANK, samples);
+	}
+}
+
+/*
+ * floor(f * 2048) for an IEEE-754 single, in integer arithmetic.
+ *
+ * The kernel has no FPU, and the tuning file stores the lens-shading grid as
+ * float32, so the quantisation the vendor performs has to be reproduced from the
+ * bit pattern. Truncation rather than rounding is not a guess: rounding matches
+ * only 55 of the 100 grid entries against a captured page and truncation matches
+ * all 100.
+ *
+ * Every entry in that grid is a positive gain between 1 and 4, so the general
+ * cases are absent by construction rather than by oversight. Anything outside
+ * what the 16-bit field can hold is clamped, which cannot happen for a valid
+ * tuning file and exists so a corrupt one cannot write past the field.
+ */
+static inline u16 ar_isp_f32_scale(u32 bits)
+{
+	u32 mant = (bits & 0x7fffff) | 0x800000;
+	int exp = (int)((bits >> 23) & 0xff) - 127;
+	int shift = (23 - AR_ISP_LTM_Q) - exp;
+	u32 v;
+
+	if (bits & 0x80000000)
+		return 0;
+	if (shift >= 32)
+		return 0;
+	if (shift <= 0)
+		return 0xffff;
+
+	v = mant >> shift;
+
+	return v > 0xffff ? 0xffff : (u16)v;
+}
+
+/*
+ * Build the LTM lens-shading grid from the tuning file.
+ *
+ * 100 grid points over the frame, packed two to a 16-byte record as a pair of
+ * (x, x, y) triplets. The first element of each triplet is stored twice; that
+ * duplication is the same redundant overlap field gamma and DRC carry, so the
+ * hardware reads it and an encoder has to write it.
+ *
+ * 50 records hold the grid and records 50 and 51 are zero, as are the last four
+ * bytes of every record. Zeroing the region first covers all three.
+ *
+ * Only region A. The 0x2c0 of scene-adaptive state after it is left alone: it is
+ * computed at runtime from image statistics and is not stored anywhere.
+ */
+static inline void ar_isp_ltm_from_blob(u8 *dst, const u8 *blob)
+{
+	unsigned int i;
+
+	for (i = 0; i < AR_ISP_LTM_REGION_A; i += 4)
+		ar_isp_put_le32(dst + i, 0);
+
+	for (i = 0; i < AR_ISP_LTM_GRID; i++) {
+		u16 x = ar_isp_f32_scale(ar_isp_get_le32(blob + AR_ISP_LTM_BLOB_X + i * 4));
+		u16 y = ar_isp_f32_scale(ar_isp_get_le32(blob + AR_ISP_LTM_BLOB_Y + i * 4));
+		u8 *rec = dst + (i / 2) * 16 + (i % 2) * 6;
+
+		ar_isp_put_le16(rec + 0, x);
+		ar_isp_put_le16(rec + 2, x);
+		ar_isp_put_le16(rec + 4, y);
 	}
 }
 

@@ -162,6 +162,15 @@
  */
 #define AR_ISP_VENDOR_GAMMA_PHYS	0x2b2ec600
 #define AR_ISP_VENDOR_DRC_PHYS		0x2b2e9200
+#define AR_ISP_VENDOR_LTM_PHYS		0x2b2e8600
+
+/*
+ * LTM descriptor. Unlike compander, DRC and gamma this one does not go through
+ * the 0x0014 commit: it is a module-local record with its own valid bit, which
+ * the block clears once it has fetched.
+ */
+#define AR_ISP_TABLE_LTM		0x4c34
+#define AR_ISP_TABLE_LTM_VALID		0x4c3c
 
 /*
  * The vendor tuning file, verbatim. Its length is checked because the vendor
@@ -216,6 +225,11 @@ module_param(compander, bool, 0644);
 MODULE_PARM_DESC(compander,
 		 "own the compander page and fill it from the carried template (default on)");
 
+static bool ltm = true;
+module_param(ltm, bool, 0644);
+MODULE_PARM_DESC(ltm,
+		 "own the LTM page and generate its lens-shading grid (default on)");
+
 struct ar_isp {
 	struct device *dev;
 	void __iomem *base;
@@ -230,6 +244,8 @@ struct ar_isp {
 	dma_addr_t drc_dma;
 	void *compander;
 	dma_addr_t compander_dma;
+	void *ltm;
+	dma_addr_t ltm_dma;
 };
 
 static const struct {
@@ -391,6 +407,7 @@ static void ar_isp_tables_apply(struct ar_isp *isp)
 	bool gamma_seeded = false, drc_seeded = false;
 	bool gamma_built = false, drc_built = false;
 	bool compander_built = false;
+	bool ltm_seeded = false, ltm_built = false;
 	u8 *page;
 
 	if (!tables)
@@ -467,6 +484,26 @@ static void ar_isp_tables_apply(struct ar_isp *isp)
 		compander_built = true;
 	}
 
+	if (isp->ltm) {
+		/*
+		 * Only region A, the lens-shading grid, is generated. The
+		 * scene-adaptive 0x2c0 after it has no stored source anywhere and
+		 * is left to the seed, so with seeding off it is zero and the
+		 * block runs on shading alone.
+		 */
+		if (seed)
+			ltm_seeded = ar_isp_seed_from_vendor(isp, isp->ltm,
+							     AR_ISP_VENDOR_LTM_PHYS,
+							     AR_ISP_LTM_SIZE);
+		else
+			memset(isp->ltm, 0, AR_ISP_LTM_SIZE);
+
+		if (blob) {
+			ar_isp_ltm_from_blob(isp->ltm, blob);
+			ltm_built = true;
+		}
+	}
+
 	/*
 	 * The buffers are coherent, so there is no cache to flush, but the writes
 	 * above must be visible before the address that makes the block fetch
@@ -502,14 +539,21 @@ static void ar_isp_tables_apply(struct ar_isp *isp)
 		       isp->base + AR_ISP_TABLE_COMMIT);
 	}
 
+	if (isp->ltm) {
+		writel(lower_32_bits(isp->ltm_dma), isp->base + AR_ISP_TABLE_LTM);
+		writel(1, isp->base + AR_ISP_TABLE_LTM_VALID);
+	}
+
 	dev_info(isp->dev,
-		 "tables: gamma %pad %s, drc %pad %s, compander %pad %s\n",
+		 "tables: gamma %pad %s, drc %pad %s, compander %pad %s, ltm %pad %s\n",
 		 &isp->gamma_dma,
 		 gamma_built ? "built" : (gamma_seeded ? "seeded" : "zeroed"),
 		 &isp->drc_dma,
 		 drc_built ? "built" : (drc_seeded ? "seeded" : "zeroed"),
 		 &isp->compander_dma,
-		 compander_built ? "built" : "on the vendor's page");
+		 compander_built ? "built" : "on the vendor's page",
+		 &isp->ltm_dma,
+		 ltm_built ? "shading built" : (ltm_seeded ? "seeded" : "zeroed"));
 }
 
 /*
@@ -545,7 +589,11 @@ static void ar_isp_tables_prepare(struct ar_isp *isp)
 		isp->compander = dma_alloc_coherent(dev, AR_ISP_COMPANDER_ALLOC,
 						    &isp->compander_dma,
 						    GFP_KERNEL);
-	if (!isp->gamma || !isp->drc || (compander && !isp->compander))
+	if (ltm)
+		isp->ltm = dma_alloc_coherent(dev, AR_ISP_LTM_SIZE,
+					      &isp->ltm_dma, GFP_KERNEL);
+	if (!isp->gamma || !isp->drc || (compander && !isp->compander) ||
+	    (ltm && !isp->ltm))
 		dev_warn(dev, "coefficient buffers unavailable, falling back to the vendor's\n");
 
 	ret = request_firmware(&isp->tuning, AR_ISP_TUNING_FIRMWARE, dev);
@@ -576,6 +624,9 @@ static void ar_isp_tables_release(struct ar_isp *isp)
 	if (isp->compander)
 		dma_free_coherent(isp->dev, AR_ISP_COMPANDER_ALLOC,
 				  isp->compander, isp->compander_dma);
+	if (isp->ltm)
+		dma_free_coherent(isp->dev, AR_ISP_LTM_SIZE, isp->ltm,
+				  isp->ltm_dma);
 	release_firmware(isp->tuning);
 }
 

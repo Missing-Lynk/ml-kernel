@@ -615,6 +615,20 @@ Compander is now generated too, and it needed no generator at all. **It has no r
 
 Three quarters of the page is one 16-byte unity record repeated 1536 times and a further `0x700` bytes are zero, so only `0x900` bytes at the start and `0x800` at `0x1000` are carried: 4352 bytes rather than 30720. The generator script checks that structure against the library and refuses to emit if it has changed.
 
+### LTM: the lens-shading grid is in the tuning file
+
+LTM's `0x680` fetch is three parts, and the first is now generated:
+
+	0x000..0x33f   10x10 lens-shading grid, generated from the tuning file
+	0x340..0x5ff   scene-adaptive runtime state, no stored source
+	0x600..0x67f   zero
+
+**Region A is two 100-entry float32 arrays in the tuning file**, stored back to back at `raw + 0x910c` and `raw + 0x929c`, which is `0x7c` and `0x20c` past the LSC enable gate at `0x9090`. Each value is a gain, unity at the frame centre and rising to about 3.9 at the corners; the grid is a proper 10x10 bowl with an off-centre, anisotropic falloff. The table value is `floor(f * 2048)`, and truncation is measured rather than assumed: rounding matches 55 of 100 entries against a captured page, truncation matches all 100. Grid points pack two to a 16-byte record as `(x, x, y)` triplets, 50 records of data then two zero records. `ar_isp_ltm_from_blob` reproduces all 832 bytes exactly against two independent captures.
+
+An earlier note here said no part of LTM had a stored source. That was wrong, and the reason is worth recording: the search that produced it looked for the packed `u16` table, and the data is stored unpacked as `float32`. It was found by correlating every 100-value float window in the blob against the decoded grid, which matched at r = 1.0000.
+
+**Region B has no stored source and is not worth searching for.** Between two captures of the same unit in different scenes, 43 of its 44 records differ, with 212 of 704 bytes changing: small deltas spread through nearly the whole region rather than a static part plus a dynamic part. It is computed by vendor userspace from ISP statistics delivered by event, so reproducing it is 3A work, not table work. It follows the driver's seed path, which means `ltm=1 seed=0` runs the block on shading alone.
+
 ### The coefficient pages overlap in DRAM
 
 Measured, zero differing bytes in both directions:
