@@ -140,20 +140,36 @@
 #define AR_ISP_TABLE_DRC_BIT		0x00000010
 
 /*
- * The compander allocation, which is deliberately larger than the table.
+ * GTM2 and the compander share one allocation, in the vendor's own layout.
  *
- * Its length register at 0x0024 reads 0x780. In the units gamma proves, 32 bytes,
- * that is a 0xf000 fetch, twice the 0x7800 the table occupies. The vendor cannot
- * satisfy that either: its compander sits at 0x2b2e0c00 and 0xf000 later would run
- * past the gamma page at 0x2b2ec600, so whatever the block reads beyond the table
- * is its neighbours' memory and cannot be meaningful as compander data. The same
- * over-fetch is visible on GTM2, which holds 0xa00 of content and fetches 0x1000.
+ * On the vendor these are not independent buffers: the compander sits at
+ * 0x2b2e0c00 and GTM2 at 0x2b2e0200, exactly 0xa00 lower, and GTM2's descriptor
+ * length makes it fetch 0x1000. So GTM2's last 0x600 bytes ARE the compander's
+ * first 0x600, read because the fetch overruns GTM2's own content. Measured on
+ * captured pages: zero differing bytes across all 1536.
  *
- * So the excess is ignored by the block, and the only thing that matters here is
- * that the DMA stays inside memory we own. Allocating the full fetch length and
- * zeroing the tail costs 60 KiB of a 32 MiB pool and removes the question.
+ * Allocating one block in that relationship reproduces the fetched bytes for
+ * both descriptors without copying anything twice, and makes the overlap
+ * explicit rather than something a later reader has to rediscover.
+ *
+ * The compander span is the 0xf000 its length register at 0x0024 implies rather
+ * than the 0x7800 the table occupies. The vendor cannot satisfy that either:
+ * 0xf000 past its compander runs into the gamma page, so what the block reads
+ * beyond the table is its neighbours' memory and cannot be meaningful. The
+ * excess is therefore ignored, and allocating it only keeps the DMA inside
+ * memory we own.
  */
+#define AR_ISP_GTM2_SIZE		0x1000
+#define AR_ISP_GTM2_COMPANDER		0xa00
 #define AR_ISP_COMPANDER_ALLOC		0xf000
+#define AR_ISP_TONE_ALLOC		(AR_ISP_GTM2_COMPANDER + AR_ISP_COMPANDER_ALLOC)
+
+/*
+ * GTM2's descriptor. Like LTM it is module-local, with its own valid bit and no
+ * 0x0014 commit. Unlike LTM's, the block does not clear it after fetching.
+ */
+#define AR_ISP_TABLE_GTM2		0x1c6c
+#define AR_ISP_TABLE_GTM2_VALID		0x1c60
 
 /*
  * The addresses the replayed configuration arms, inside the isp_cma reservation.
@@ -225,6 +241,11 @@ module_param(compander, bool, 0644);
 MODULE_PARM_DESC(compander,
 		 "own the compander page and fill it from the carried template (default on)");
 
+static bool gtm2 = true;
+module_param(gtm2, bool, 0644);
+MODULE_PARM_DESC(gtm2,
+		 "own the GTM2 page, which shares an allocation with the compander (default on)");
+
 static bool ltm = true;
 module_param(ltm, bool, 0644);
 MODULE_PARM_DESC(ltm,
@@ -242,8 +263,8 @@ struct ar_isp {
 	dma_addr_t gamma_dma;
 	void *drc;
 	dma_addr_t drc_dma;
-	void *compander;
-	dma_addr_t compander_dma;
+	void *tone;
+	dma_addr_t tone_dma;
 	void *ltm;
 	dma_addr_t ltm_dma;
 };
@@ -406,7 +427,7 @@ static void ar_isp_tables_apply(struct ar_isp *isp)
 	const u8 *blob = isp->tuning ? isp->tuning->data : NULL;
 	bool gamma_seeded = false, drc_seeded = false;
 	bool gamma_built = false, drc_built = false;
-	bool compander_built = false;
+	bool tone_built = false;
 	bool ltm_seeded = false, ltm_built = false;
 	u8 *page;
 
@@ -471,17 +492,24 @@ static void ar_isp_tables_apply(struct ar_isp *isp)
 		}
 	}
 
-	if (isp->compander) {
+	if (isp->tone) {
 		/*
-		 * No seed path and no tuning file: the page is the same bytes on
-		 * every unit and in every scene, so there is nothing to fall back
-		 * to and nothing to select. The tail past the table is zeroed
-		 * because the fetch length covers it; see AR_ISP_COMPANDER_ALLOC.
+		 * The compander has no seed path and no tuning file: the page is
+		 * the same bytes on every unit and in every scene, so there is
+		 * nothing to fall back to and nothing to select.
+		 *
+		 * GTM2's own 0xa00 is left zero. Its first 0x800 is zero on the
+		 * vendor too; the 0x200 after that is scene-varying runtime state,
+		 * measured at 117 of 512 bytes differing between two captures, so
+		 * it has no stored source to reproduce. Zeroing it was measured on
+		 * hardware to move 6.3% of pixels by more than 8 levels, against a
+		 * 94.5% frame-to-frame floor from scene motion alone: no effect.
 		 */
-		memset(isp->compander, 0, AR_ISP_COMPANDER_ALLOC);
-		ar_isp_compander_fill(isp->compander, ar_isp_compander_head,
+		memset(isp->tone, 0, AR_ISP_TONE_ALLOC);
+		ar_isp_compander_fill(isp->tone + AR_ISP_GTM2_COMPANDER,
+				      ar_isp_compander_head,
 				      ar_isp_compander_mid);
-		compander_built = true;
+		tone_built = true;
 	}
 
 	if (isp->ltm) {
@@ -532,11 +560,17 @@ static void ar_isp_tables_apply(struct ar_isp *isp)
 		       isp->base + AR_ISP_TABLE_COMMIT);
 	}
 
-	if (isp->compander) {
-		writel(lower_32_bits(isp->compander_dma),
+	if (isp->tone) {
+		writel(lower_32_bits(isp->tone_dma + AR_ISP_GTM2_COMPANDER),
 		       isp->base + AR_ISP_TABLE_COMPANDER);
 		writel(AR_ISP_TABLE_COMMIT_ENABLE | AR_ISP_TABLE_COMPANDER_BIT,
 		       isp->base + AR_ISP_TABLE_COMMIT);
+
+		if (gtm2) {
+			writel(lower_32_bits(isp->tone_dma),
+			       isp->base + AR_ISP_TABLE_GTM2);
+			writel(1, isp->base + AR_ISP_TABLE_GTM2_VALID);
+		}
 	}
 
 	if (isp->ltm) {
@@ -550,8 +584,8 @@ static void ar_isp_tables_apply(struct ar_isp *isp)
 		 gamma_built ? "built" : (gamma_seeded ? "seeded" : "zeroed"),
 		 &isp->drc_dma,
 		 drc_built ? "built" : (drc_seeded ? "seeded" : "zeroed"),
-		 &isp->compander_dma,
-		 compander_built ? "built" : "on the vendor's page",
+		 &isp->tone_dma,
+		 tone_built ? "gtm2+compander built" : "on the vendor's page",
 		 &isp->ltm_dma,
 		 ltm_built ? "shading built" : (ltm_seeded ? "seeded" : "zeroed"));
 }
@@ -586,13 +620,12 @@ static void ar_isp_tables_prepare(struct ar_isp *isp)
 	isp->drc = dma_alloc_coherent(dev, AR_ISP_DRC_SIZE, &isp->drc_dma,
 				      GFP_KERNEL);
 	if (compander)
-		isp->compander = dma_alloc_coherent(dev, AR_ISP_COMPANDER_ALLOC,
-						    &isp->compander_dma,
-						    GFP_KERNEL);
+		isp->tone = dma_alloc_coherent(dev, AR_ISP_TONE_ALLOC,
+					       &isp->tone_dma, GFP_KERNEL);
 	if (ltm)
 		isp->ltm = dma_alloc_coherent(dev, AR_ISP_LTM_SIZE,
 					      &isp->ltm_dma, GFP_KERNEL);
-	if (!isp->gamma || !isp->drc || (compander && !isp->compander) ||
+	if (!isp->gamma || !isp->drc || (compander && !isp->tone) ||
 	    (ltm && !isp->ltm))
 		dev_warn(dev, "coefficient buffers unavailable, falling back to the vendor's\n");
 
@@ -621,9 +654,9 @@ static void ar_isp_tables_release(struct ar_isp *isp)
 	if (isp->drc)
 		dma_free_coherent(isp->dev, AR_ISP_DRC_SIZE, isp->drc,
 				  isp->drc_dma);
-	if (isp->compander)
-		dma_free_coherent(isp->dev, AR_ISP_COMPANDER_ALLOC,
-				  isp->compander, isp->compander_dma);
+	if (isp->tone)
+		dma_free_coherent(isp->dev, AR_ISP_TONE_ALLOC, isp->tone,
+				  isp->tone_dma);
 	if (isp->ltm)
 		dma_free_coherent(isp->dev, AR_ISP_LTM_SIZE, isp->ltm,
 				  isp->ltm_dma);
