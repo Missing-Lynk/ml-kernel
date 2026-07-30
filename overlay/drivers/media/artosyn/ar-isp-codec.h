@@ -1,0 +1,232 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+ * ar-isp-codec.h - packing formats for the ISP's DMA coefficient tables.
+ *
+ * The ISP does not read the vendor tuning file. It reads DMA buffers whose
+ * physical addresses are published to descriptor registers and fetched on a
+ * write to 0x0014. Filling those buffers is a software job, done by vendor
+ * userspace; these are the packing formats it uses.
+ *
+ * Recovered from libmpp_service.so and validated byte-for-byte against buffers
+ * captured off a streaming vendor unit. The reference implementations, and the
+ * commands that check a candidate against a capture, are glue/isp/gamma-codec.py
+ * and glue/isp/drc-codec.py in the wrapper repository.
+ *
+ * Pure data transforms: no register access and no kernel API beyond the integer
+ * types, so the same source can be compiled host-side against the captures.
+ */
+
+#ifndef AR_ISP_CODEC_H
+#define AR_ISP_CODEC_H
+
+/* Gamma: a 0x4000 allocation whose first two 0x800 pages are transfer curves. */
+#define AR_ISP_GAMMA_SIZE		0x4000
+#define AR_ISP_GAMMA_PAGE		0x800
+#define AR_ISP_GAMMA_RECORDS		128
+#define AR_ISP_GAMMA_SAMPLES		512
+
+/*
+ * Curve source in the tuning file: five 0x4000-byte curves of 4096 little-endian
+ * u32, selected by an AE-derived index. Only every eighth entry is used, which is
+ * how 4096 blob entries become the 512 the packed page holds.
+ */
+#define AR_ISP_GAMMA_BLOB_OFFSET	0x26b90
+#define AR_ISP_GAMMA_BLOB_STRIDE	0x4000
+#define AR_ISP_GAMMA_BLOB_CURVES	5
+#define AR_ISP_GAMMA_BLOB_ENTRIES	4096
+#define AR_ISP_GAMMA_DECIMATE		8
+
+/* DRC: a 0x2000 allocation of four banks, each a 257-sample curve. */
+#define AR_ISP_DRC_SIZE			0x2000
+#define AR_ISP_DRC_BANK			0x800
+#define AR_ISP_DRC_RECORDS		128
+#define AR_ISP_DRC_SAMPLES		257
+#define AR_ISP_DRC_LANE_MAX		0xfffff
+
+/*
+ * DRC profile table in the tuning file, selected by the same AE-derived index.
+ * A profile holds the two banks the dynamic half of the page is built from, at
+ * its start and at +0x404.
+ */
+#define AR_ISP_DRC_BLOB_OFFSET		0x17b1c
+#define AR_ISP_DRC_BLOB_STRIDE		0xc8c
+#define AR_ISP_DRC_BLOB_BANK1		0x404
+
+/* Byte-wise so the codec is endian-independent and compiles anywhere. */
+static inline u32 ar_isp_get_le32(const u8 *p)
+{
+	return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) |
+	       ((u32)p[3] << 24);
+}
+
+static inline void ar_isp_put_le32(u8 *p, u32 v)
+{
+	p[0] = v;
+	p[1] = v >> 8;
+	p[2] = v >> 16;
+	p[3] = v >> 24;
+}
+
+static inline void ar_isp_put_le16(u8 *p, u16 v)
+{
+	p[0] = v;
+	p[1] = v >> 8;
+}
+
+/*
+ * Pack 512 twelve-bit samples into one gamma page.
+ *
+ * 128 records of 16 bytes hold four samples each. The surplus bits are not
+ * padding: they are redundant overlap fields the hardware also reads, so an
+ * encoder has to write them or the table is malformed.
+ *
+ *	sample[4i+0] =  word0        & 0xfff
+ *	sample[4i+1] = (word0 >> 12) & 0xfff
+ *	sample[4i+2] = (word1 >> 16) & 0xfff
+ *	sample[4i+3] = (word2 >>  8) & 0xfff
+ *
+ *	word0[31:24] = sample[4i+1][7:0]
+ *	word1[15:0]  = sample[4i+1][11:8] | sample[4i+2] << 4
+ *	word2[7:0]   = sample[4i+3] >> 4
+ *	word2[31:20] = the NEXT record's first sample
+ *	word3        = 0
+ *
+ * The last record has no next sample inside the page, so its forward field is
+ * passed in as @tail. It is not cosmetic and must not be left zero: the hardware
+ * interpolates the top segment of the curve towards it, so a zero there maps the
+ * brightest inputs to black. That is not a guess, it is what a bring-up with this
+ * field zeroed produced, wrapping every highlight in the frame.
+ */
+static inline void ar_isp_gamma_pack_page(u8 *dst, const u16 *samples, u16 tail)
+{
+	unsigned int i;
+
+	for (i = 0; i < AR_ISP_GAMMA_RECORDS; i++) {
+		u32 s0 = samples[4 * i + 0] & 0xfff;
+		u32 s1 = samples[4 * i + 1] & 0xfff;
+		u32 s2 = samples[4 * i + 2] & 0xfff;
+		u32 s3 = samples[4 * i + 3] & 0xfff;
+		u32 next;
+		u8 *rec = dst + i * 16;
+
+		if (i + 1 < AR_ISP_GAMMA_RECORDS)
+			next = samples[4 * (i + 1)] & 0xfff;
+		else
+			next = tail & 0xfff;
+
+		ar_isp_put_le32(rec + 0, s0 | (s1 << 12) | ((s1 & 0xff) << 24));
+		ar_isp_put_le32(rec + 4, ((s1 >> 8) & 0xf) | (s2 << 4) |
+					 (s2 << 16) | ((s3 & 0xf) << 28));
+		ar_isp_put_le32(rec + 8, (s3 >> 4) | (s3 << 8) | (next << 20));
+		ar_isp_put_le32(rec + 12, 0);
+	}
+}
+
+/*
+ * Build one gamma page from the tuning file.
+ *
+ * The decimation rounds down systematically, by at most 5 counts in 4090 and
+ * typically one, always low. That is sub-LSB at the output's precision: a page
+ * built this way and the vendor's own captured buffer differ by a mean of 0.047
+ * on 8-bit luma, measured in one bring-up.
+ *
+ * The clamp is not cosmetic. The hardware reads a transfer curve, and a
+ * non-monotonic entry inverts the response over that interval.
+ */
+static inline void ar_isp_gamma_from_blob(u8 *dst, const u8 *blob,
+					  unsigned int index)
+{
+	u16 samples[AR_ISP_GAMMA_SAMPLES];
+	const u8 *curve;
+	unsigned int i;
+	u16 tail;
+
+	curve = blob + AR_ISP_GAMMA_BLOB_OFFSET + index * AR_ISP_GAMMA_BLOB_STRIDE;
+
+	for (i = 0; i < AR_ISP_GAMMA_SAMPLES; i++)
+		samples[i] = ar_isp_get_le32(curve + i * AR_ISP_GAMMA_DECIMATE * 4) & 0xfff;
+
+	/*
+	 * The sample after the last one. Decimation puts the last stored sample at
+	 * entry 4088, so the next lands past the decimated range; the vendor uses
+	 * the curve's final entry, and matching it reproduces the vendor's own
+	 * forward field of 4093 on both curves we have captures for.
+	 */
+	tail = ar_isp_get_le32(curve + (AR_ISP_GAMMA_BLOB_ENTRIES - 1) * 4) & 0xfff;
+
+	for (i = 1; i < AR_ISP_GAMMA_SAMPLES; i++)
+		if (samples[i] < samples[i - 1])
+			samples[i] = samples[i - 1];
+
+	if (tail < samples[AR_ISP_GAMMA_SAMPLES - 1])
+		tail = samples[AR_ISP_GAMMA_SAMPLES - 1];
+
+	ar_isp_gamma_pack_page(dst, samples, tail);
+}
+
+/*
+ * Pack a 257-sample curve into one DRC bank.
+ *
+ * 128 records of 16 bytes, each carrying three unsigned 20-bit samples in its
+ * first ten bytes. Consecutive records overlap by one sample, which is what
+ * makes 128 records a 257-sample curve rather than 384 independent lanes:
+ * record i is [sample[2i], sample[2i+1], sample[2i+2]].
+ *
+ *	sample[2i+0] = word0[19:0]
+ *	sample[2i+1] = word0[31:20] | word1[7:0] << 12
+ *	sample[2i+2] = word1[31:28] | halfword[8][15:0] << 4
+ *	word1[27:8]  = a second complete copy of sample[2i+1]
+ *
+ * Bytes 10 to 15 are left alone by the vendor packer, which is documented as
+ * retaining preloaded template data. Measured across all 256 records of both
+ * the static template and a live capture, that retained data is zero, so this
+ * writes the whole record and needs no template to copy from.
+ */
+static inline void ar_isp_drc_pack_bank(u8 *dst, const u32 *samples)
+{
+	unsigned int i;
+
+	for (i = 0; i < AR_ISP_DRC_RECORDS; i++) {
+		u32 s0 = samples[2 * i + 0] & AR_ISP_DRC_LANE_MAX;
+		u32 s1 = samples[2 * i + 1] & AR_ISP_DRC_LANE_MAX;
+		u32 s2 = samples[2 * i + 2] & AR_ISP_DRC_LANE_MAX;
+		u8 *rec = dst + i * 16;
+
+		ar_isp_put_le32(rec + 0, s0 | (s1 << 20));
+		ar_isp_put_le32(rec + 4, (s1 >> 12) | (s1 << 8) | (s2 << 28));
+		ar_isp_put_le16(rec + 8, s2 >> 4);
+		ar_isp_put_le16(rec + 10, 0);
+		ar_isp_put_le32(rec + 12, 0);
+	}
+}
+
+/*
+ * Build the dynamic half of the DRC page from the tuning file.
+ *
+ * Only the first 0x1000 of the 0x2000 page. The second half is a constant the
+ * vendor never recomputes; it is in ar-isp-drc-tail.h.
+ *
+ * This is the neutral-strength form. The vendor blends the source against one of
+ * two service tables when the user DRC strength moves off 50, which is a lever
+ * we do not expose.
+ */
+static inline void ar_isp_drc_from_blob(u8 *dst, const u8 *blob,
+					unsigned int profile)
+{
+	u32 samples[AR_ISP_DRC_SAMPLES];
+	const u8 *bank;
+	unsigned int b, i;
+
+	for (b = 0; b < 2; b++) {
+		bank = blob + AR_ISP_DRC_BLOB_OFFSET +
+		       profile * AR_ISP_DRC_BLOB_STRIDE +
+		       b * AR_ISP_DRC_BLOB_BANK1;
+
+		for (i = 0; i < AR_ISP_DRC_SAMPLES; i++)
+			samples[i] = ar_isp_get_le32(bank + i * 4);
+
+		ar_isp_drc_pack_bank(dst + b * AR_ISP_DRC_BANK, samples);
+	}
+}
+
+#endif /* AR_ISP_CODEC_H */

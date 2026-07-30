@@ -34,7 +34,7 @@ Most of this section was written before CVISP was found, from traces windowed on
 
 ### The trace
 
-`out/au-mmiotrace/mmio-combined.log`: 48183 register writes from one boot of the stock firmware, captured with `native/mmiotrace.c` (an `LD_PRELOAD` shim under `ar_lowdelay`, installed by `glue/dev/au-slotA-mmiotrace.sh`) over the window `0x08860000`-`0x08c0ffff`. Lines are `wNNNNNN wWW pa=0xADDR val=0xVAL` in program order.
+`out/au-mmiotrace/mmio-combined.log`: 48183 register writes from one boot of the stock firmware, captured with `native/mmiotrace.c` (an `LD_PRELOAD` shim under `ar_lowdelay`, installed by `glue/camera/au-slotA-mmiotrace.sh`) over the window `0x08860000`-`0x08c0ffff`. Lines are `wNNNNNN wWW pa=0xADDR val=0xVAL` in program order.
 
 Distribution: ISP 34790 writes, VIF 12639, CSI 754. Distinct registers touched: ISP 1267 (spanning `0x08c00000`-`0x08c076d8`), VIF 74, CSI 52.
 
@@ -216,7 +216,7 @@ Extractor: `scripts/gen-cvisp-defaults.py` -> `overlay/drivers/media/artosyn/ar-
 
 Slot B RAM-boot, 2026-07-29. CVISP writes YUV planes to DRAM.
 
-`glue/dev/au-cvisp-firstlight.sh`, CVISP configured against a control run with it left alone, same addresses and same everything else:
+`glue/camera/au-cvisp-firstlight.sh`, CVISP configured against a control run with it left alone, same addresses and same everything else:
 
 | Run | Plane `0x28014000` | `0x28232000` | `0x282bb000` |
 |---|---|---|---|
@@ -229,7 +229,7 @@ Frame starts ran at 60.0/s in both, so the front end was equally live in the neg
 
 **The write is triggered by the arm, not by the configuration.** The control run above did not reset the block, and its opening `regs` dump still showed `control=0x00800806` with set 0 armed and geometry intact. So CVISP sat fully configured and enabled through ten seconds of 60 fps input and wrote nothing.
 
-**It sustains.** `glue/dev/au-cvisp-framelock.sh` arms one ring slot per VIF frame start, the vendor's cadence: 480 slots armed over 96 wraps in 8 seconds at 60.0/s, and ring slots 1, 2 and 3 were all overwritten.
+**It sustains.** `glue/camera/au-cvisp-framelock.sh` arms one ring slot per VIF frame start, the vendor's cadence: 480 slots armed over 96 wraps in 8 seconds at 60.0/s, and ring slots 1, 2 and 3 were all overwritten.
 
 An earlier burst-driven test (`au-cvisp-rotate.sh`, `echo 5 > queue` in a loop) saw only slot 1 written and looked like a stall. It was not: five rotations complete in microseconds, so slots 2 to 4 were armed and superseded long before a 60 Hz frame could land in them. The apparent stall was the test.
 
@@ -334,6 +334,37 @@ page. The final `0x1000` bytes remain the initial template. This establishes
 the vendor-equivalent DRC payload construction without a DMA capture, while
 the semantic meaning of the four page banks still needs hardware validation.
 
+### Static table array and GTM2/LTM activation (recovered)
+
+The service's ISP-init configuration is a contiguous array of `{u64 source,
+u64 length}` descriptors at VMA `0x472600..0x472a40` (56 non-null entries).
+It is the source of the initial payloads; it is not a second tuning blob. The
+module setup handlers now give several entries unambiguous names:
+
+| Config offset | Source / length | Consumer |
+| --- | --- | --- |
+| `+0x0b0`, `+0x0c0` | `0x46a0f0` / `0x40`, `0x469db0` / `0x340` | LSC control and DMA payload |
+| `+0x150`, `+0x160` | `0x469460` / `0x64`, `0x467460` / `0x2000` | DRC control and page |
+| `+0x240` | `0x463050` / `0x4000` | gamma initial page |
+| `+0x270` | `0x451570` / `0x3c` | shared GTM2/LTM control template |
+| `+0x290`, `+0x2a0..+0x2d0` | `0x45afe0` / `0x6c`, then four `0x2680` sources | LUT3D control and four DMA banks |
+
+The LSC and LUT3D handlers copy precisely those descriptor fields into their
+DMA allocations. This resolves their payload provenance. The unlabelled
+entries must remain unlabelled until a setup handler accesses them; size and
+pipeline position alone are not proof of a module mapping.
+
+GTM2 and LTM are **enabled** in the NT99235 FPV preview configuration. Their
+separate setup handlers (`0x18ab38` for GTM2 and `0x18e2c4` for LTM) read the
+same raw control word at `raw + 0x7abd8`; it is `1` in the vendor blob. The
+enabled paths each set bits 4 (`0x10`) and 11 (`0x800`) of their module control
+word, prepare a `0x4000` DMA page from the selected `0x9c` profile and flush
+it. Their disabled paths clear exactly those two bits. This is enough to rule
+out "the blocks are off" as a reason to skip their packers. The physical ISP
+register represented by that module-control word is still unmapped, so these
+are proven service-side enable bits rather than a claim about a named MMIO
+bit.
+
 ### 3A execution (proven)
 
 `raw_stats_filter_port` creates the AEC, AWB and AF modules in sequence
@@ -391,7 +422,7 @@ Those 26 drift at runtime on the vendor and are expected to differ. Measured on 
 
 **Not covered: exposure and gain.** Neither the vendor mode table nor the open driver sets them. The vendor drives them from the 3A layer at runtime, so after mode init the open stack leaves the sensor at its power-on defaults. A correct capture may therefore be very dark or black. **Judge a capture by whether the DMA wrote, not by image brightness**: pre-fill the target buffer with a marker and check whether the marker was overwritten. A buffer full of zeros is indistinguishable from a DMA that never ran.
 
-Method: `glue/dev/au-chain-capture.sh` with `SLOT=a` then `SLOT=b`, diffed with `glue/dev/au-chain-diff.py`. Capture slot A first: it is the reference, and both captures are only meaningful if the front-end gate reads `0x0784043c`.
+Method: `glue/camera/au-chain-capture.sh` with `SLOT=a` then `SLOT=b`, diffed with `glue/camera/au-chain-diff.py`. Capture slot A first: it is the reference, and both captures are only meaningful if the front-end gate reads `0x0784043c`.
 
 ### Receiver: `ar-csi2.c`
 
@@ -453,7 +484,7 @@ The open CGU provider models these as gate-only leaves, so `clk_prepare_enable` 
 
 ### What the vendor programs, measured
 
-Read live from a streaming stock unit and cross-checked against a read+write trace of the CGU window, which contains only 66 writes for the whole camera bringup. Reference copy: `glue/dev/cgu-vendor-streaming.txt`.
+Read live from a streaming stock unit and cross-checked against a read+write trace of the CGU window, which contains only 66 writes for the whole camera bringup. Reference copy: `glue/camera/cgu-vendor-streaming.txt`.
 
 | Register | Vendor value | Open stack |
 |---|---|---|
@@ -526,9 +557,9 @@ Investigation history and next steps live in `plans/air-camera-first-light.md`; 
 | ISP configuration | `overlay/drivers/media/artosyn/ar-isp.c`, tables `ar-isp-defaults.h` from `scripts/gen-isp-defaults.py` |
 | CVISP output stage and queue | `overlay/drivers/media/artosyn/ar-cvisp.c`, tables `ar-cvisp-defaults.h` from `scripts/gen-cvisp-defaults.py` |
 | DT nodes (camera, CSI, VIF, ISP, CVISP, clocks, carveouts) | `devices/betafpv-vr04-air/proxima-9311-air.dts` |
-| Vendor MMIO write trace, per block | `out/au-mmiotrace/mmio-combined.log`, capture harness `glue/dev/au-slotA-mmiotrace.sh`, shim `native/mmiotrace.c` |
+| Vendor MMIO write trace, per block | `out/au-mmiotrace/mmio-combined.log`, capture harness `glue/camera/au-slotA-mmiotrace.sh`, shim `native/mmiotrace.c` |
 | Vendor MMIO write trace, all blocks | `out/au-mmiotrace/wide-sweep.log` (this is the one that found CVISP) |
-| CVISP first-light experiment | `glue/dev/au-cvisp-firstlight.sh` |
+| CVISP first-light experiment | `glue/camera/au-cvisp-firstlight.sh` |
 | Vendor RE cross-reference | `archive/re/notes/nt99235/` (see the caution below) |
 
 Caution on the RE notes: they were checked against the trace and are unreliable in detail. They record the vendor's `0x080` as `0x76543210` (the trace shows `0xffffffff` and `0xfffffff8`), state that the open driver never writes `0x32c` when it does, and give `0x0d0` as both `0x2c` and `0xaaaaaaaa` in different files. Treat them as leads to verify. The trace is the authority for what the vendor writes; the disassembly is the authority for what a register means.
@@ -552,27 +583,49 @@ The first camera bring-up of a boot writes frames to DRAM. Every later bring-up 
 
 Measured: first bring-up 24/24 markers overwritten on all three planes; second and third `0/24`, each with 241 frame starts and 241 slots armed in 4 s and CVISP control `0x00800806` correct throughout.
 
-This is not simply cold-versus-warm. Slot B is RAM-booted from slot A with the vendor pipeline already streaming, so the first bring-up **inherits hardware state the vendor established**, and the register replay does not recreate it once our own teardown has destroyed it. A boot therefore yields exactly one trustworthy capture; `RUNS=` in `glue/dev/au-prove-camera.sh` selects which one to spend it on.
+This is not simply cold-versus-warm. Slot B is RAM-booted from slot A with the vendor pipeline already streaming, so the first bring-up **inherits hardware state the vendor established**, and the register replay does not recreate it once our own teardown has destroyed it. A boot therefore yields exactly one trustworthy capture; `RUNS=` in `glue/camera/au-prove-camera.sh` selects which one to spend it on.
 
 ### Within a working bring-up, capture sustains
 
 All five ring slots hold distinct frames after a one-second window, differing by 10 to 16 per cent of sampled pixels. The pipeline streams at 60 fps; it does not produce a single frame and stop.
 
-### The tone tables are unfilled, and that is NOT what crushed the image
+### The tone tables were never the crush, and they were never garbage either
 
-Both halves of that heading are load-bearing. The tables really are unfilled, and the crushed response really was reproducible across all five ring slots, at 1 s and 4 s capture windows, and on boots with and without a preceding vendor stream, so it was never scene-, time- or slot-dependent. But the two are unrelated, and assuming otherwise cost several sessions.
+The crush was two output-stage registers, `0x2e2c` and `0x2e30`, whose corrected values sit past the prefix the replay applies. Writing them recovers the whole shadow range: 57% of pixels under luma 32 becomes 0.0%. See `ar_isp_output_fix` in `ar-isp-defaults.h`. That is the whole explanation, and it was reproducible across all five ring slots, at 1 s and 4 s capture windows, and on boots with and without a preceding vendor stream, so it was never scene-, time- or slot-dependent.
 
-The crush was two output-stage registers, `0x2e2c` and `0x2e30`, whose corrected values sit past the prefix the replay applies. Writing them recovers the whole shadow range with every table below still unfilled: 57% of pixels under luma 32 becomes 0.0%. See `ar_isp_output_fix` in `ar-isp-defaults.h`.
+**Correction, 2026-07-30.** An earlier version of this section stated the DMA-fetched tuning tables were unfilled and that the ISP was fetching undefined data with the enable bits set, on the strength of a residency check that scored each page by its zero fraction and monotonicity:
 
-So what follows is a real gap with real consequences for colour and dynamic range, but it is not a tone-crush explanation and must not be cited as one.
+	gamma      0x2b2ec600  0x4000   zero  6.2%  non-decreasing 51.4%
+	compander  0x2b2e0c00  0x7800   zero 50.6%  non-decreasing 75.1%
+	drc        0x2b2e9200  0x2000   zero 33.2%  non-decreasing 47.7%
 
-The replay ends on the vendor's physical addresses for the DMA-fetched tuning tables and never fills them, so the ISP fetches undefined data with the enable bits set. Confirmed by direct read, including immediately after a vendor stream:
+Those are not garbage. Every row is the vendor's own correct table:
 
-	gamma      0x2b2ec600  0x4000   zero  6.2%  non-decreasing 51.4%  garbage
-	compander  0x2b2e0c00  0x7800   zero 50.6%  non-decreasing 75.1%  garbage
-	drc        0x2b2e9200  0x2000   zero 33.2%  non-decreasing 47.7%  garbage
+- The compander figures are **byte-identical** to the prepacked `0x7800` constant at service VMA `0x46a3b0`, and reproduce it to the digit, `50.6%` and `75.1%`.
+- The DRC page decodes exactly as tuning-file profile 3 through the packing in `ar-isp-codec.h`, across all 514 samples of its dynamic half.
+- The gamma page decodes to tuning-file curve 2, within 6 counts of 4095.
 
-Eight such tables are missing in total, five of them tone-path. The fetch is triggered by a pulse on ISP `0x0014` with the module's bits, issued after the address is written, so a fill only takes effect if it precedes that pulse.
+The heuristic was wrong, not the pages. These are packed multi-lane formats: a correct table is neither mostly zero nor monotonic when read as a flat `u32` array, so both scores measured the packing rather than the content.
+
+**What is actually true is worse in one way and better in another.** The tables are present because slot B is RAM-booted from a slot A whose camera was streaming, so the vendor's pages survive in DRAM at the addresses the replay arms. The pipeline has therefore been running on **inherited** tables, not on nothing, which is why the image looked right; and a cold slot-B boot, with no vendor stream first, would find those pages undefined. That has never been tested.
+
+`ar-isp.c` now allocates and publishes its own gamma and DRC buffers to remove the dependency. Compander is still on the vendor's page, because its generator is not recovered.
+
+### Committing a coefficient table
+
+Each table has a descriptor register holding a physical address, and a bit in `0x0014` that makes the block fetch it. The commit is **write-to-trigger, not a set-then-clear pulse**: clearing the bit afterwards cancels the fetch, and a fill only takes effect if it precedes the write. Bit 16 is set alongside every commit. From the vendor trace, one table at a time:
+
+	0x0020 = 0x2b2e0c00                     0x0014 = 0x00010001    compander
+	0x0060 = 0x2b2e9200                     0x0014 = 0x00010010    DRC
+	0x0030 / 0x0040 / 0x0050 = 0x2b2ec600   0x0014 = 0x0001000e    gamma
+
+Gamma has three descriptors and the vendor points all three at one buffer. The sequence is not a one-time setup: the vendor reissues it on every AE update, which is what makes republishing our own addresses after the replay an ordinary operation rather than a special case.
+
+**Each descriptor also has a length, and it is not the allocation size.** `0x0034`, `0x0044` and `0x0054` hold the transfer length in units of 32 bytes. The vendor writes `0x200` during setup, describing the whole `0x4000` allocation, and then **`0x80` immediately before the commit**, describing `0x1000`. The three slots carry the same base and the same length with no offset or stride field between them, so they are channel aliases fetching the same first `0x1000` bytes, not three slices of the buffer. That is also why the three captured gamma dumps are byte-identical.
+
+Two consequences. The `0x4000` memcpy in the vendor handler is the size of its software allocation and must not be read as a DMA length. And **the tail from `0x1000` to `0x3fff` is never fetched**: it is per-record software state that rides along in the same copy, which is why it decodes as high-entropy nonsense and why it differs between captures without meaning anything.
+
+Our replay already programs the streaming length: `0x80` appears at `ar_isp_setup_1080p60` indices 470, 472 and 474, inside the 1475-entry prefix the harness applies. Only pages 0 and 1 need to be correct.
 
 ### ml-isploop flags
 

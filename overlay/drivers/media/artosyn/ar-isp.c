@@ -9,11 +9,18 @@
  * every frame through the ISP.
  *
  * This driver applies the vendor's register configuration for the 2-lane
- * 1080p60 sensor mode and starts the block. It does not allocate buffers: the
- * configuration carries the vendor's own DDR addresses, and the device tree
- * reserves that range no-map so they can be used as they are. That is enough
- * to answer whether the block produces a frame at all, which is what this
- * driver is for. It is not the final shape.
+ * 1080p60 sensor mode and starts the block. The configuration carries the
+ * vendor's own DDR addresses and the device tree reserves that range no-map, so
+ * the capture buffers are used as they are. That is enough to answer whether the
+ * block produces a frame at all, which is what this driver is for. It is not the
+ * final shape.
+ *
+ * The coefficient tables are the exception: gamma and DRC are allocated here,
+ * generated from the vendor tuning file, and published at addresses this driver
+ * owns. Everything else still runs on replayed vendor addresses. That matters
+ * because slot B is RAM-booted from a streaming slot A, so those pages hold the
+ * vendor's own tables and an unfilled buffer is not obviously wrong; on a cold
+ * boot it would be. Formats are in ar-isp-codec.h.
  *
  * Not implemented here:
  *
@@ -34,12 +41,17 @@
 #include <linux/clk.h>
 #include <linux/debugfs.h>
 #include <linux/delay.h>
+#include <linux/dma-mapping.h>
+#include <linux/firmware.h>
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
 
 #include "ar-isp-defaults.h"
+#include "ar-isp-codec.h"
+#include "ar-isp-drc-tail.h"
 
 /*
  * Master control. The block is brought up by a staged sequence of writes to
@@ -98,11 +110,78 @@
 #define AR_ISP_IN_GEOMETRY		0x706c
 #define AR_ISP_IN_LINETIME		0x2e98
 
+/*
+ * Coefficient table descriptors. Each holds the physical address of a DMA buffer
+ * the block fetches when the matching bit is written to AR_ISP_TABLE_COMMIT.
+ *
+ * The commit is write-to-trigger, not a set-then-clear pulse: clearing the bit
+ * afterwards cancels the fetch. Bit 16 is always set alongside. From the vendor
+ * trace, which publishes an address and then commits, one table at a time:
+ *
+ *	0x0020 = 0x2b2e0c00   0x0014 = 0x00010001    compander
+ *	0x0060 = 0x2b2e9200   0x0014 = 0x00010010    DRC
+ *	0x0030/0x0040/0x0050 = 0x2b2ec600
+ *	                      0x0014 = 0x0001000e    gamma, three descriptors
+ */
+#define AR_ISP_TABLE_COMMIT		0x0014
+#define AR_ISP_TABLE_COMMIT_ENABLE	0x00010000
+#define AR_ISP_TABLE_COMPANDER		0x0020
+#define AR_ISP_TABLE_COMPANDER_BIT	0x00000001
+#define AR_ISP_TABLE_GAMMA0		0x0030
+#define AR_ISP_TABLE_GAMMA1		0x0040
+#define AR_ISP_TABLE_GAMMA2		0x0050
+#define AR_ISP_TABLE_GAMMA_BITS		0x0000000e
+#define AR_ISP_TABLE_DRC		0x0060
+#define AR_ISP_TABLE_DRC_BIT		0x00000010
+
+/*
+ * The addresses the replayed configuration arms, inside the isp_cma reservation.
+ * They are the vendor's own buffers, not ours. Reading them is how a table is
+ * seeded from whatever the vendor left in DRAM across a RAM-boot.
+ */
+#define AR_ISP_VENDOR_GAMMA_PHYS	0x2b2ec600
+#define AR_ISP_VENDOR_DRC_PHYS		0x2b2e9200
+
+/*
+ * The vendor tuning file, verbatim. Its length is checked because the vendor
+ * loader checks it: every offset in ar-isp-codec.h is an absolute position in a
+ * fixed-layout record, so a file of a different size is a different format and
+ * not something to parse on a best-effort basis.
+ */
+#define AR_ISP_TUNING_FIRMWARE		"artosyn/nt99235-tuning-preview-fpv.bin"
+#define AR_ISP_TUNING_SIZE		0xd6c58
+
 /* The measured correction pass. Off disables it, for an A/B of its effect. */
 static bool trim = true;
 module_param(trim, bool, 0644);
 MODULE_PARM_DESC(trim,
 		 "apply the measured correction against the streaming vendor (default on)");
+
+static bool tables = true;
+module_param(tables, bool, 0644);
+MODULE_PARM_DESC(tables,
+		 "own the coefficient DMA buffers instead of arming the vendor's (default on)");
+
+static bool seed = true;
+module_param(seed, bool, 0644);
+MODULE_PARM_DESC(seed,
+		 "seed owned buffers from the vendor's inherited pages, for the regions we cannot yet generate (default on)");
+
+/*
+ * Which curve to select out of the tuning file. The vendor derives this from AE
+ * and interpolates between adjacent curves; we have no AE, so it is pinned.
+ *
+ * Curve 3 reproduces one of our captures to within 5 counts of 4095 and curve 2
+ * reproduces another, which is the AE selection visible directly in our own
+ * data. Any pinned value is therefore an operating point, not a correct answer.
+ */
+static int gamma_curve = 3;
+module_param(gamma_curve, int, 0644);
+MODULE_PARM_DESC(gamma_curve, "tuning-file gamma curve, 0-4, or -1 to leave the page alone");
+
+static int drc_profile = 3;
+module_param(drc_profile, int, 0644);
+MODULE_PARM_DESC(drc_profile, "tuning-file DRC profile, or -1 to leave the page alone");
 
 struct ar_isp {
 	struct device *dev;
@@ -110,6 +189,12 @@ struct ar_isp {
 	struct clk_bulk_data clks[2];
 	struct dentry *debugfs;
 	bool configured;
+
+	const struct firmware *tuning;
+	void *gamma;
+	dma_addr_t gamma_dma;
+	void *drc;
+	dma_addr_t drc_dma;
 };
 
 static const struct {
@@ -227,6 +312,207 @@ static void ar_isp_apply(struct ar_isp *isp, const struct ar_isp_reg *tbl,
 }
 
 /*
+ * Copy the page the vendor left at a fixed physical address into one of our
+ * buffers.
+ *
+ * This is a transitional crutch and is named as one. It only has anything to
+ * copy because slot B is RAM-booted from a slot A whose camera was streaming, so
+ * the vendor's tables are still resident in DRAM. On a cold boot these pages hold
+ * nothing, which is exactly the dependency owning the buffers is meant to remove.
+ * It exists so a first bring-up can change one thing at a time: with seeding on,
+ * only the addresses move; with it off, the content is ours too.
+ */
+static bool ar_isp_seed_from_vendor(struct ar_isp *isp, void *dst,
+				    phys_addr_t phys, size_t size)
+{
+	void *src;
+
+	src = memremap(phys, size, MEMREMAP_WB);
+	if (!src) {
+		dev_warn(isp->dev, "cannot map vendor page at %pa to seed from\n",
+			 &phys);
+		return false;
+	}
+
+	memcpy(dst, src, size);
+	memunmap(src);
+	return true;
+}
+
+/*
+ * Fill the owned buffers and hand them to the block.
+ *
+ * Runs after the register replay, which arms the vendor's addresses and commits
+ * them. Republishing ours and committing again is the same sequence the vendor
+ * itself issues on every AE update, so this is not a special case for the block.
+ *
+ * Compander is deliberately untouched. Its 0x7800 page is the one table whose
+ * generator is not recovered, so the replayed vendor address stays armed rather
+ * than being pointed at a buffer we have nothing correct to put in.
+ */
+static void ar_isp_tables_apply(struct ar_isp *isp)
+{
+	const u8 *blob = isp->tuning ? isp->tuning->data : NULL;
+	bool gamma_seeded = false, drc_seeded = false;
+	bool gamma_built = false, drc_built = false;
+	u8 *page;
+
+	if (!tables)
+		return;
+
+	if (isp->gamma) {
+		if (seed)
+			gamma_seeded = ar_isp_seed_from_vendor(isp, isp->gamma,
+							       AR_ISP_VENDOR_GAMMA_PHYS,
+							       AR_ISP_GAMMA_SIZE);
+		else
+			memset(isp->gamma, 0, AR_ISP_GAMMA_SIZE);
+
+		if (blob && gamma_curve >= 0 &&
+		    gamma_curve < AR_ISP_GAMMA_BLOB_CURVES) {
+			page = isp->gamma;
+			ar_isp_gamma_from_blob(page, blob, gamma_curve);
+			gamma_built = true;
+
+			/*
+			 * Page 1 is a second curve whose source is runtime state
+			 * in the vendor service, not an offset in the tuning
+			 * file, so it cannot be generated. Seeded it is the
+			 * vendor's; unseeded, page 0 is duplicated into it,
+			 * because a valid curve is a better unknown than the
+			 * zeroed page a missing one would leave.
+			 */
+			if (!gamma_seeded)
+				memcpy(page + AR_ISP_GAMMA_PAGE, page,
+				       AR_ISP_GAMMA_PAGE);
+		}
+	}
+
+	if (isp->drc) {
+		if (seed)
+			drc_seeded = ar_isp_seed_from_vendor(isp, isp->drc,
+							     AR_ISP_VENDOR_DRC_PHYS,
+							     AR_ISP_DRC_SIZE);
+		else
+			memset(isp->drc, 0, AR_ISP_DRC_SIZE);
+
+		if (blob && drc_profile >= 0) {
+			/*
+			 * The whole page, both halves: the first two banks from
+			 * the tuning file, the second two from the constant the
+			 * vendor never recomputes. Nothing here is inherited,
+			 * which is why the seed above is redundant when this
+			 * runs and is left in place only so the two can be
+			 * compared in one bring-up.
+			 */
+			page = isp->drc;
+			ar_isp_drc_from_blob(page, blob, drc_profile);
+			ar_isp_drc_pack_bank(page + 2 * AR_ISP_DRC_BANK,
+					     ar_isp_drc_tail_bank0);
+			ar_isp_drc_pack_bank(page + 3 * AR_ISP_DRC_BANK,
+					     ar_isp_drc_tail_bank1);
+			drc_built = true;
+		}
+	}
+
+	/*
+	 * The buffers are coherent, so there is no cache to flush, but the writes
+	 * above must be visible before the address that makes the block fetch
+	 * them.
+	 */
+	wmb();
+
+	/*
+	 * The descriptors are 32-bit. dma_alloc_coherent is bounded by the mask
+	 * set in ar_isp_tables_prepare, so this cannot truncate, but the cast is
+	 * written out rather than left implicit.
+	 */
+	if (isp->gamma) {
+		u32 addr = lower_32_bits(isp->gamma_dma);
+
+		writel(addr, isp->base + AR_ISP_TABLE_GAMMA0);
+		writel(addr, isp->base + AR_ISP_TABLE_GAMMA1);
+		writel(addr, isp->base + AR_ISP_TABLE_GAMMA2);
+		writel(AR_ISP_TABLE_COMMIT_ENABLE | AR_ISP_TABLE_GAMMA_BITS,
+		       isp->base + AR_ISP_TABLE_COMMIT);
+	}
+
+	if (isp->drc) {
+		writel(lower_32_bits(isp->drc_dma), isp->base + AR_ISP_TABLE_DRC);
+		writel(AR_ISP_TABLE_COMMIT_ENABLE | AR_ISP_TABLE_DRC_BIT,
+		       isp->base + AR_ISP_TABLE_COMMIT);
+	}
+
+	dev_info(isp->dev,
+		 "tables: gamma %pad %s, drc %pad %s, compander left on the vendor's page\n",
+		 &isp->gamma_dma,
+		 gamma_built ? (gamma_seeded ? "built, page 1 seeded" : "built, page 1 duplicated")
+			     : (gamma_seeded ? "seeded" : "zeroed"),
+		 &isp->drc_dma,
+		 drc_built ? "built" : (drc_seeded ? "seeded" : "zeroed"));
+}
+
+/*
+ * Allocate the owned buffers and load the tuning file.
+ *
+ * Both are optional: a failure here leaves the replayed vendor addresses armed,
+ * which is what the driver did before it owned anything, so the camera still
+ * comes up. The tuning file is not in the repository and has to be installed on
+ * the device; without it the buffers are still ours but carry only seeded data.
+ */
+static void ar_isp_tables_prepare(struct ar_isp *isp)
+{
+	struct device *dev = isp->dev;
+	int ret;
+
+	ret = of_reserved_mem_device_init(dev);
+	if (ret) {
+		dev_warn(dev, "no isp memory pool (%d), not owning tables\n", ret);
+		return;
+	}
+
+	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
+	if (ret) {
+		dev_warn(dev, "no 32-bit dma mask (%d), not owning tables\n", ret);
+		return;
+	}
+
+	isp->gamma = dma_alloc_coherent(dev, AR_ISP_GAMMA_SIZE, &isp->gamma_dma,
+					GFP_KERNEL);
+	isp->drc = dma_alloc_coherent(dev, AR_ISP_DRC_SIZE, &isp->drc_dma,
+				      GFP_KERNEL);
+	if (!isp->gamma || !isp->drc)
+		dev_warn(dev, "coefficient buffers unavailable, falling back to the vendor's\n");
+
+	ret = request_firmware(&isp->tuning, AR_ISP_TUNING_FIRMWARE, dev);
+	if (ret) {
+		dev_warn(dev, "no %s (%d), tables cannot be generated\n",
+			 AR_ISP_TUNING_FIRMWARE, ret);
+		isp->tuning = NULL;
+		return;
+	}
+
+	if (isp->tuning->size != AR_ISP_TUNING_SIZE) {
+		dev_warn(dev, "%s is %zu bytes, expected %u; ignoring it\n",
+			 AR_ISP_TUNING_FIRMWARE, isp->tuning->size,
+			 AR_ISP_TUNING_SIZE);
+		release_firmware(isp->tuning);
+		isp->tuning = NULL;
+	}
+}
+
+static void ar_isp_tables_release(struct ar_isp *isp)
+{
+	if (isp->gamma)
+		dma_free_coherent(isp->dev, AR_ISP_GAMMA_SIZE, isp->gamma,
+				  isp->gamma_dma);
+	if (isp->drc)
+		dma_free_coherent(isp->dev, AR_ISP_DRC_SIZE, isp->drc,
+				  isp->drc_dma);
+	release_firmware(isp->tuning);
+}
+
+/*
  * Apply the whole configuration. The recovered table goes first: those are
  * registers that have a static default in the vendor library but which the
  * vendor never writes, because it pushes its shadow image with a
@@ -261,6 +547,12 @@ static void ar_isp_configure(struct ar_isp *isp)
 			     ARRAY_SIZE(ar_isp_vendor_trim));
 
 	ar_isp_apply(isp, ar_isp_output_fix, ARRAY_SIZE(ar_isp_output_fix));
+
+	/*
+	 * After the replay, which arms the vendor's buffer addresses. Ours
+	 * replace them.
+	 */
+	ar_isp_tables_apply(isp);
 
 	isp->configured = true;
 
@@ -327,6 +619,7 @@ static void ar_isp_configure_prefix(struct ar_isp *isp, size_t n)
 	 * which chases the setup entry that kills the input geometry at 0x7070.
 	 */
 	ar_isp_apply(isp, ar_isp_output_fix, ARRAY_SIZE(ar_isp_output_fix));
+	ar_isp_tables_apply(isp);
 
 	isp->configured = true;
 
@@ -434,6 +727,8 @@ static int ar_isp_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, isp);
 
+	ar_isp_tables_prepare(isp);
+
 	isp->debugfs = debugfs_create_dir("ar-isp", NULL);
 	debugfs_create_file_unsafe("configure", 0600, isp->debugfs, isp,
 				   &ar_isp_configure_fops);
@@ -459,6 +754,7 @@ static void ar_isp_remove(struct platform_device *pdev)
 	struct ar_isp *isp = platform_get_drvdata(pdev);
 
 	debugfs_remove_recursive(isp->debugfs);
+	ar_isp_tables_release(isp);
 	clk_bulk_disable_unprepare(ARRAY_SIZE(isp->clks), isp->clks);
 }
 
