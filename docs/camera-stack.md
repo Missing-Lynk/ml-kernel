@@ -611,6 +611,19 @@ The heuristic was wrong, not the pages. These are packed multi-lane formats: a c
 
 `ar-isp.c` now allocates and publishes its own gamma and DRC buffers, and produces every byte the hardware fetches from either. Gamma page 0 and the dynamic half of the DRC page come from the tuning file; gamma page 1 and the static half of the DRC page are not in that file in any form and are carried as decoded curves, extracted from the service library by `scripts/gen-gamma-page1.py` and `scripts/gen-drc-tail.py`. Neither table inherits anything.
 
+**Current ownership of the tone path**, validated on hardware with seeding off, so nothing came from the vendor's residual DRAM:
+
+| Table | Source | Status |
+|---|---|---|
+| gamma | tuning file + carried page 1 | every fetched byte ours |
+| DRC | tuning file + carried tail | every fetched byte ours |
+| compander | library template, verbatim | every fetched byte ours |
+| GTM2 | nothing to generate | ours; payload is runtime state, left zero |
+| LTM region A | tuning file, two float32 arrays | every byte ours, exact |
+| LTM region B | none exists | scene-adaptive, left to the seed path |
+
+The only unowned bytes in the tone path are LTM's region B and GTM2's payload, and neither is recoverable from any file. Reproducing them means running the vendor's algorithms against live ISP statistics, which is 3A work.
+
 Compander is now generated too, and it needed no generator at all. **It has no runtime producer and no tuning-file source**: the `0x7800` page is installed verbatim at ISP init from entry 6 of the descriptor array at VMA `0x472600`, a list of `{u64 source, u64 length}` pairs, whose body at VMA `0x46a3b0` is byte-identical to the page captured off a streaming vendor unit and to the page resident in DRAM on a RAM-booted unit. `scripts/gen-compander.py` extracts it and `ar_isp_compander_fill` rebuilds it. The bilinear at `0x186920` that an earlier note named as its generator produces something else; the `0x7800` size match was a coincidence.
 
 Three quarters of the page is one 16-byte unity record repeated 1536 times and a further `0x700` bytes are zero, so only `0x900` bytes at the start and `0x800` at `0x1000` are carried: 4352 bytes rather than 30720. The generator script checks that structure against the library and refuses to emit if it has changed.
@@ -637,7 +650,17 @@ Measured, zero differing bytes in both directions:
 	compander  0x2b2e0c00 = GTM2 + 0xa00
 	LTM        0x2b2e8600 = compander + 0x7a00
 
-So GTM2's `0xa00..0xfff` **is** the compander table's first `0x600` bytes, read because GTM2 over-fetches past its own content, and a `0x8000` dump of the compander runs into the LTM page. GTM2's real payload is only the 512 bytes at `0x800..0x9ff`; `0x000..0x7ff` is zero. Anything that allocates these separately must either reproduce the packing or accept that a block's over-fetch reads its neighbour. The same reasoning applies to the compander's own length field at `0x0024`, which reads `0x780` and in gamma's proven 32-byte units implies a `0xf000` fetch the vendor cannot satisfy either, so `ar-isp.c` allocates the full fetch length and zeroes the tail rather than letting the DMA run outside memory it owns.
+So GTM2's `0xa00..0xfff` **is** the compander table's first `0x600` bytes, read because GTM2 over-fetches past its own content, and a `0x8000` dump of the compander runs into the LTM page. GTM2's real payload is only the 512 bytes at `0x800..0x9ff`; `0x000..0x7ff` is zero.
+
+`ar-isp.c` reproduces this rather than working around it: GTM2 and the compander share **one allocation**, GTM2 at offset 0 and the compander at `+0xa00`, and the two descriptors are published into the same block. That reproduces the fetched bytes for both without copying the shared `0x600` twice. The compander span is the `0xf000` its length field at `0x0024` implies rather than the `0x7800` the table occupies: in gamma's proven 32-byte units that is a fetch the vendor cannot satisfy either, since `0xf000` past its compander runs into the gamma page, so the excess is ignored by the block and allocating it only keeps the DMA inside memory we own.
+
+### GTM2 needs nothing generated
+
+Its `0x1000` fetch is `0x800` of zeros, then `0x200` of payload, then `0x600` of compander. The payload has no stored source: absent from the tuning file, from the service library, and from all 53 non-null entries of the ISP-init template array, and a float-correlation scan of the kind that located the LTM shading grid finds nothing above `r = 0.24` at 256, 128 or 64-value windows.
+
+It is **scene-varying runtime state**, and that is measured rather than inferred: two captures of the same unit in different scenes differ by 117 of its 512 bytes, the same proportion as LTM's region B at 212 of 704. Its byte fingerprint matches region B's closely, entropy 5.50 against 5.53 with bit 7 set in 78% of bytes in both.
+
+Zeroing it was measured on hardware to move 6.3% of pixels by more than eight levels, against a 94.5% frame-to-frame floor from scene motion alone, so the driver leaves it zero. **Do not spend further effort searching for its source.**
 
 ### Committing a coefficient table
 
@@ -692,6 +715,27 @@ The model was checked against something it was not fitted to. The bands come fro
 	session B   gamma curve 3 [280,330]  n  drc profile 4 [290,380]  =  [290,330]
 
 **The units of that scalar are not established.** It spans 0 to 500, and both a light level in lux and a total gain in percent fit the evidence, with opposite physical meanings but the same self-consistency. Do not record either as fact. Settling it means tracing what value reaches `is_aec_trigger_compute_user`.
+
+### Shading and colour: LSC, LUT3D, CCM (recovered)
+
+Recovered by static analysis of the module code in `libmpp_service.so` plus the vendor MMIO trace; nothing here required a hardware run. Each `isp_sub_*` module registers three handlers from its `_creat`; the second maps the module's register bank (an `ar_dev_pa2va` call pair with the bank offset as an immediate) and the third is the command handler that fills it. The bank constants attribute the register map to modules:
+
+| Module | Register bank | Descriptor / payload |
+| --- | --- | --- |
+| `isp_sub_ccm1` | `0x3400` | register file, no DMA |
+| `isp_sub_ccm2` | `0x3800` | register file, no DMA |
+| `isp_sub_lsc` | `0x4c00` | descriptor `0x4c34`, valid `0x4c3c`, length `0x4c28` = `0x34` units, the `0x680` fetch |
+| `isp_sub_lut3d` | `0x5800` | four descriptors at `0x5810`/`0x5828`/`0x5840`/`0x5858` |
+| `isp_sub_gtm2`, `isp_sub_ltm` | `0x2800` | descriptors `0x2808`/`0x280c` |
+| `isp_sub_digigain2` | CVISP `+0x4700` | register file, no DMA |
+
+**The page this document calls LTM belongs to the vendor's `isp_sub_lsc`.** Its command handler publishes the DMA address to bank `+0x34`, sets valid at `+0x3c` and writes length `0x34`, exactly the known `0x4c34` record, and its tuning path reads the enable at `raw + 0x9090`, the known LSC gate. So the lens-shading grid already generated by `ar_isp_ltm_from_blob` is the LSC stage's table, and this handoff item was closed by the tone path before it was opened. The labels GTM2 and LTM used elsewhere in this document name the hardware descriptors, not the vendor modules: the modules the vendor calls `gtm2` and `ltm` sit together on bank `0x2800` (descriptors `0x2808`/`0x280c`), and the owner of bank `0x1c00` (descriptor `0x1c6c`) is unattributed. The descriptor-level facts recorded elsewhere are unaffected; only the vendor-side names move.
+
+The float region past the LSC gate holds sixteen 10x10 grids, not one pair: groups at `raw + 0x910c`, `0x9784`, `0x9dfc`, `0xa474`, stride `0x678`, four back-to-back `0x190` grids per group behind a `0x38` header. Every grid correlates with the shipped pair at r > 0.997. The shipped pair is byte-exact against two captures, so the static bring-up choice is proven; the other grids are per-illuminant or per-channel variants for the runtime path (inference, not measured). The `0x2c0` region B stays scene-varying runtime state: it does not decode as the grid's triplet format, correlates with nothing in the tuning file at any window size, and carries the established runtime signature (top bytes clustering on `0xc3`/`0xc6`).
+
+**LUT3D is present, armed, and disabled on the streaming vendor.** The init handler copies ISP-init template entries 42 to 45 verbatim (`0x458960`, `0x4562e0`, `0x453c60`, `0x4515e0`, `0x2680` each, four distinct banks of 16-byte records with nine content bytes) into four DMA banks, writes per-descriptor length `0x280` in 16-byte records (an over-fetch, flush is `0x2800`), publishes the four addresses and valid bits, and never reads the tuning file for payload. The tuning gate at `raw + 0x7b634` only drives module control `0x5800` bit 0 through the apply-tuning command. The working bringup's last write to `0x5800` is 0 and the whole bank reads zero on the streaming unit, so the module is off and the driver reproduces the vendor by leaving it off. The four banks are deliberately not carried in-tree; `ar-isp-colour.h` records the register layout and the template VMAs to extract them if the stage is ever enabled.
+
+**CCM lands in registers, not a DMA page.** Both banks are `0x50` bytes: a packed 3x3 matrix at `+0x00`, a second copy at `+0x20`, a zero tail at `+0x40`. A matrix is six words, `{c0|c1<<16, c2, c3|c4<<16, c5, c6|c7<<16, c8}`, each coefficient 16-bit sign-magnitude Q8 with the magnitude truncated toward zero (`fcvtzs #8`; a negative v is encoded `0x8000 + |v|`). At init ccm1 gets an identity pair (template entry 33) and ccm2 gets the vendor's fixed matrix pair (entry 34, word-identical to the traced registers; its tuning gate at `raw + 0x2595c` reads 0, so it never moves). At runtime the AWB path packs an interpolated tuning matrix into ccm1's first copy only: gate `raw + 0x253fc` reads 1, the illuminant ladder is eight kelvins at `raw + 0x25438`, and four of eight matrix slots at `raw + 0x25470` (stride `0x24`, nine float32 row-major) hold data, matching the bank count in the selector block. The traced runtime write is bank 0 packed verbatim, which is the byte-for-byte proof: `scripts/gen-ccm.py` re-packs it and refuses to emit `ar-isp-ccm-init.h` on any mismatch. The packing functions are in `ar-isp-colour.h`. CCM enable is not a bank register: ccm2's enabled path clears bits 25 and 27 of the ISP global control word at `+0x0000` (both already 0 in the live streaming value `0xb0280052`).
 
 ### ml-isploop flags
 

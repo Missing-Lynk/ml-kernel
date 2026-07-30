@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""
+Extract the Artosyn ISP's CCM init blocks and emit them as a kernel header.
+
+The two CCM register banks (ccm1 at ISP +0x3400, ccm2 at +0x3800) are 0x50-byte
+register files, not DMA pages. At init the vendor service copies entries 33 and
+34 of its ISP-init template array into them verbatim: an identity matrix pair
+for ccm1 and a fixed colour matrix pair for ccm2. At runtime only ccm1 moves,
+when the AWB path packs an interpolated tuning-file matrix into its first copy.
+
+This script carries the two init blocks and proves the packing. It decodes the
+ccm1 template back to an identity under the recovered word layout, packs the
+tuning file's first matrix bank with the same Q8 sign-magnitude quantisation as
+ar-isp-colour.h, and compares both against the registers captured in the vendor
+MMIO trace. It refuses to emit if any of that stops matching.
+
+The library and tuning file are proprietary and are not in the repository.
+
+    kernel/scripts/gen-ccm.py --lib out/air-gather/vendor-root/usr/lib/libmpp_service.so \\
+        --blob out/air-gather/camera/nt99235_tuning_preview_fpv.bin \\
+        > overlay/drivers/media/artosyn/ar-isp-ccm-init.h
+"""
+
+import argparse
+import hashlib
+import struct
+import sys
+
+# Second LOAD segment maps file 0x4004d0 at 0x4104d0, so VMA - 0x10000 is the
+# file offset for everything in it.
+VMA_TO_FILE = 0x10000
+
+# ISP-init template array: 56 {u64 source, u64 length} entries.
+CONFIG_ARRAY_VMA = 0x472600
+CCM1_ENTRY = 33
+CCM2_ENTRY = 34
+BLOCK = 0x50
+
+GATE_CCM1 = 0x253FC
+GATE_CCM2 = 0x2595C
+LADDER = 0x25438
+ILLUMINANTS = 8
+BANKS = 0x25470
+BANK_STRIDE = 0x24
+BANKS_USED = 4
+
+# Last-write register values from out/au-mmiotrace/mmio-isp.log: the runtime
+# ccm1 matrix the AWB path packed (writes w0006d6..w0006db, ISP +0x3400) and
+# the ccm2 init block (writes w0001b4..w0001c7, ISP +0x3800).
+TRACED_CCM1_RUNTIME = (0x80400159, 0x00008019, 0x0140800C,
+                       0x00008033, 0x804C0014, 0x00000138)
+TRACED_CCM2 = (0x80F7020C, 0x00008017, 0x01978051, 0x00008048, 0x80868003,
+               0x00000187, 0x00000000, 0x00000000, 0x80F7020C, 0x00008017,
+               0x01978051, 0x00008048, 0x80868003, 0x00000187, 0x00000000,
+               0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000)
+
+
+def f32_q8sm(bits):
+    """Mirror ar_isp_f32_q8sm: Q8 truncated toward zero, sign-magnitude."""
+    mant = (bits & 0x7FFFFF) | 0x800000
+    exp = ((bits >> 23) & 0xFF) - 127
+    shift = 15 - exp
+    if not bits & 0x7FFFFFFF:
+        return 0
+    if shift >= 32:
+        mag = 0
+    elif shift <= 0:
+        mag = 0x7FFF
+    else:
+        mag = mant >> shift
+    mag = min(mag, 0x7FFF)
+    return (0x8000 | mag) if bits & 0x80000000 else mag
+
+
+def pack_matrix(bits):
+    """Mirror ar_isp_ccm_pack: six words, two coefficients per even word."""
+    c = [f32_q8sm(b) for b in bits]
+    return (c[0] | c[1] << 16, c[2],
+            c[3] | c[4] << 16, c[5],
+            c[6] | c[7] << 16, c[8])
+
+
+def config_entry(lib, index):
+    base = CONFIG_ARRAY_VMA - VMA_TO_FILE + index * 16
+    src, length = struct.unpack_from("<QQ", lib, base)
+    if length != BLOCK:
+        sys.exit(f"config entry {index}: length 0x{length:x}, expected 0x{BLOCK:x}")
+    return lib[src - VMA_TO_FILE:src - VMA_TO_FILE + length]
+
+
+def check_ccm1_template(words):
+    identity = pack_matrix([0x3F800000, 0, 0, 0, 0x3F800000, 0, 0, 0, 0x3F800000])
+    if tuple(words[0:6]) != identity or tuple(words[8:14]) != identity:
+        sys.exit("ccm1 template is not an identity pair under the recovered layout")
+    if any(words[i] for i in (6, 7, 14, 15, 16, 17, 18, 19)):
+        sys.exit("ccm1 template has data outside the two matrix copies")
+
+
+def check_ccm2_template(words):
+    if tuple(words) != TRACED_CCM2:
+        sys.exit("ccm2 template no longer matches the traced init block")
+    if words[0:8] != words[8:16]:
+        sys.exit("ccm2 template copies differ")
+
+
+def check_blob(blob):
+    gate1 = struct.unpack_from("<I", blob, GATE_CCM1)[0]
+    gate2 = struct.unpack_from("<I", blob, GATE_CCM2)[0]
+    if gate1 != 1:
+        sys.exit(f"ccm1 gate at 0x{GATE_CCM1:x} reads {gate1}, expected 1")
+    if gate2 != 0:
+        sys.exit(f"ccm2 gate at 0x{GATE_CCM2:x} reads {gate2}, expected 0")
+
+    ladder = struct.unpack_from(f"<{ILLUMINANTS}f", blob, LADDER)
+    if list(ladder) != sorted(ladder) or not 1000 < ladder[0] < ladder[-1] < 20000:
+        sys.exit("illuminant ladder is not an ascending kelvin sequence")
+
+    for bank in range(BANKS_USED, ILLUMINANTS):
+        off = BANKS + bank * BANK_STRIDE
+        if any(blob[off:off + BANK_STRIDE]):
+            sys.exit(f"matrix bank {bank} expected empty, has data")
+
+    bank0 = struct.unpack_from("<9I", blob, BANKS)
+    if pack_matrix(bank0) != TRACED_CCM1_RUNTIME:
+        sys.exit("packed bank 0 no longer matches the traced ccm1 registers")
+
+
+def emit(ccm1, ccm2, lib_digest, blob_digest):
+    print("/* SPDX-License-Identifier: GPL-2.0 */")
+    print("/* Generated by kernel/scripts/gen-ccm.py. Do not edit. */")
+    print("/*")
+    print(" * CCM register-bank init blocks, 20 words each for ISP +0x3400 (ccm1,")
+    print(" * an identity matrix pair) and +0x3800 (ccm2, the vendor's fixed matrix")
+    print(" * pair). Lifted from ISP-init template entries 33 and 34 of the vendor")
+    print(" * service library; the ccm2 block is word-identical to the registers the")
+    print(" * vendor was traced writing, and the ccm1 block decodes to an identity")
+    print(" * under the packing in ar-isp-colour.h.")
+    print(" *")
+    print(f" * Source library sha256 {lib_digest}.")
+    print(f" * Tuning file sha256 {blob_digest}.")
+    print(" */")
+    print()
+    print("#ifndef AR_ISP_CCM_INIT_H")
+    print("#define AR_ISP_CCM_INIT_H")
+    for name, words in (("ar_isp_ccm1_init", ccm1), ("ar_isp_ccm2_init", ccm2)):
+        print()
+        print(f"static const u32 {name}[{len(words)}] = {{")
+        for i in range(0, len(words), 4):
+            row = ", ".join(f"0x{v:08x}" for v in words[i:i + 4])
+            print(f"\t{row},")
+        print("};")
+    print()
+    print("#endif /* AR_ISP_CCM_INIT_H */")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--lib", required=True, help="vendor libmpp_service.so")
+    ap.add_argument("--blob", required=True, help="vendor tuning file")
+    args = ap.parse_args()
+
+    with open(args.lib, "rb") as handle:
+        lib = handle.read()
+    with open(args.blob, "rb") as handle:
+        blob = handle.read()
+
+    ccm1 = struct.unpack(f"<{BLOCK // 4}I", config_entry(lib, CCM1_ENTRY))
+    ccm2 = struct.unpack(f"<{BLOCK // 4}I", config_entry(lib, CCM2_ENTRY))
+
+    check_ccm1_template(ccm1)
+    check_ccm2_template(ccm2)
+    check_blob(blob)
+
+    emit(ccm1, ccm2, hashlib.sha256(lib).hexdigest(),
+         hashlib.sha256(blob).hexdigest())
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
