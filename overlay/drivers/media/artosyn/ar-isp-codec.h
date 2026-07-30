@@ -53,20 +53,24 @@
 #define AR_ISP_DRC_BLOB_BANK1		0x404
 
 /*
- * LTM: a 0x680 fetch in three parts. The first 0x340 is a 10x10 lens-shading
+ * LSC: a 0x680 fetch in three parts. The first 0x340 is a 10x10 lens-shading
  * grid and is generated here. The 0x2c0 after it is scene-adaptive runtime state
  * with no stored source, and the 0x80 tail is zero.
+ *
+ * The owner is the vendor's isp_sub_lsc on bank 0x4c00: its command handler
+ * publishes to +0x34 with the valid bit at +0x3c and a length of 0x34 units,
+ * which is this descriptor, and its tuning path reads the same 0x9090 gate.
  *
  * The grid is two 100-entry float32 arrays in the tuning file, stored back to
  * back just past the LSC enable gate at 0x9090. Each entry is a gain, unity at
  * the frame centre and rising to about 3.9 at the corners.
  */
-#define AR_ISP_LTM_SIZE			0x680
-#define AR_ISP_LTM_REGION_A		0x340
-#define AR_ISP_LTM_GRID			100
-#define AR_ISP_LTM_BLOB_Y		0x910c
-#define AR_ISP_LTM_BLOB_X		0x929c
-#define AR_ISP_LTM_Q			11
+#define AR_ISP_LSC_SIZE			0x680
+#define AR_ISP_LSC_REGION_A		0x340
+#define AR_ISP_LSC_GRID			100
+#define AR_ISP_LSC_BLOB_Y		0x910c
+#define AR_ISP_LSC_BLOB_X		0x929c
+#define AR_ISP_LSC_Q			11
 
 /*
  * Compander: a 0x7800 page, mostly structure. Two spans carry content, a 0x700
@@ -276,7 +280,7 @@ static inline u16 ar_isp_f32_scale(u32 bits)
 {
 	u32 mant = (bits & 0x7fffff) | 0x800000;
 	int exp = (int)((bits >> 23) & 0xff) - 127;
-	int shift = (23 - AR_ISP_LTM_Q) - exp;
+	int shift = (23 - AR_ISP_LSC_Q) - exp;
 	u32 v;
 
 	if (bits & 0x80000000)
@@ -292,7 +296,7 @@ static inline u16 ar_isp_f32_scale(u32 bits)
 }
 
 /*
- * Build the LTM lens-shading grid from the tuning file.
+ * Build the LSC lens-shading grid from the tuning file.
  *
  * 100 grid points over the frame, packed two to a 16-byte record as a pair of
  * (x, x, y) triplets. The first element of each triplet is stored twice; that
@@ -305,16 +309,16 @@ static inline u16 ar_isp_f32_scale(u32 bits)
  * Only region A. The 0x2c0 of scene-adaptive state after it is left alone: it is
  * computed at runtime from image statistics and is not stored anywhere.
  */
-static inline void ar_isp_ltm_from_blob(u8 *dst, const u8 *blob)
+static inline void ar_isp_lsc_from_blob(u8 *dst, const u8 *blob)
 {
 	unsigned int i;
 
-	for (i = 0; i < AR_ISP_LTM_REGION_A; i += 4)
+	for (i = 0; i < AR_ISP_LSC_REGION_A; i += 4)
 		ar_isp_put_le32(dst + i, 0);
 
-	for (i = 0; i < AR_ISP_LTM_GRID; i++) {
-		u16 x = ar_isp_f32_scale(ar_isp_get_le32(blob + AR_ISP_LTM_BLOB_X + i * 4));
-		u16 y = ar_isp_f32_scale(ar_isp_get_le32(blob + AR_ISP_LTM_BLOB_Y + i * 4));
+	for (i = 0; i < AR_ISP_LSC_GRID; i++) {
+		u16 x = ar_isp_f32_scale(ar_isp_get_le32(blob + AR_ISP_LSC_BLOB_X + i * 4));
+		u16 y = ar_isp_f32_scale(ar_isp_get_le32(blob + AR_ISP_LSC_BLOB_Y + i * 4));
 		u8 *rec = dst + (i / 2) * 16 + (i % 2) * 6;
 
 		ar_isp_put_le16(rec + 0, x);

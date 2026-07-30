@@ -165,8 +165,11 @@
 #define AR_ISP_TONE_ALLOC		(AR_ISP_GTM2_COMPANDER + AR_ISP_COMPANDER_ALLOC)
 
 /*
- * GTM2's descriptor. Like LTM it is module-local, with its own valid bit and no
- * 0x0014 commit. Unlike LTM's, the block does not clear it after fetching.
+ * The descriptor on bank 0x1c00. Like LSC's it is module-local, with its own
+ * valid bit and no 0x0014 commit. Unlike LSC's, the block does not clear it
+ * after fetching. GTM2 is this driver's name for the descriptor: the vendor
+ * module of that name sits on bank 0x2800, and bank 0x1c00 has no attributed
+ * owner.
  */
 #define AR_ISP_TABLE_GTM2		0x1c6c
 #define AR_ISP_TABLE_GTM2_VALID		0x1c60
@@ -178,15 +181,16 @@
  */
 #define AR_ISP_VENDOR_GAMMA_PHYS	0x2b2ec600
 #define AR_ISP_VENDOR_DRC_PHYS		0x2b2e9200
-#define AR_ISP_VENDOR_LTM_PHYS		0x2b2e8600
+#define AR_ISP_VENDOR_LSC_PHYS		0x2b2e8600
 
 /*
- * LTM descriptor. Unlike compander, DRC and gamma this one does not go through
- * the 0x0014 commit: it is a module-local record with its own valid bit, which
- * the block clears once it has fetched.
+ * LSC descriptor, owned by the vendor's isp_sub_lsc on bank 0x4c00. Unlike
+ * compander, DRC and gamma this one does not go through the 0x0014 commit: it
+ * is a module-local record with its own valid bit, which the block clears once
+ * it has fetched.
  */
-#define AR_ISP_TABLE_LTM		0x4c34
-#define AR_ISP_TABLE_LTM_VALID		0x4c3c
+#define AR_ISP_TABLE_LSC		0x4c34
+#define AR_ISP_TABLE_LSC_VALID		0x4c3c
 
 /*
  * The vendor tuning file, verbatim. Its length is checked because the vendor
@@ -246,10 +250,10 @@ module_param(gtm2, bool, 0644);
 MODULE_PARM_DESC(gtm2,
 		 "own the GTM2 page, which shares an allocation with the compander (default on)");
 
-static bool ltm = true;
-module_param(ltm, bool, 0644);
-MODULE_PARM_DESC(ltm,
-		 "own the LTM page and generate its lens-shading grid (default on)");
+static bool lsc = true;
+module_param(lsc, bool, 0644);
+MODULE_PARM_DESC(lsc,
+		 "own the LSC page and generate its lens-shading grid (default on)");
 
 struct ar_isp {
 	struct device *dev;
@@ -265,8 +269,8 @@ struct ar_isp {
 	dma_addr_t drc_dma;
 	void *tone;
 	dma_addr_t tone_dma;
-	void *ltm;
-	dma_addr_t ltm_dma;
+	void *lsc;
+	dma_addr_t lsc_dma;
 };
 
 static const struct {
@@ -428,7 +432,7 @@ static void ar_isp_tables_apply(struct ar_isp *isp)
 	bool gamma_seeded = false, drc_seeded = false;
 	bool gamma_built = false, drc_built = false;
 	bool tone_built = false;
-	bool ltm_seeded = false, ltm_built = false;
+	bool lsc_seeded = false, lsc_built = false;
 	u8 *page;
 
 	if (!tables)
@@ -512,7 +516,7 @@ static void ar_isp_tables_apply(struct ar_isp *isp)
 		tone_built = true;
 	}
 
-	if (isp->ltm) {
+	if (isp->lsc) {
 		/*
 		 * Only region A, the lens-shading grid, is generated. The
 		 * scene-adaptive 0x2c0 after it has no stored source anywhere and
@@ -520,15 +524,15 @@ static void ar_isp_tables_apply(struct ar_isp *isp)
 		 * block runs on shading alone.
 		 */
 		if (seed)
-			ltm_seeded = ar_isp_seed_from_vendor(isp, isp->ltm,
-							     AR_ISP_VENDOR_LTM_PHYS,
-							     AR_ISP_LTM_SIZE);
+			lsc_seeded = ar_isp_seed_from_vendor(isp, isp->lsc,
+							     AR_ISP_VENDOR_LSC_PHYS,
+							     AR_ISP_LSC_SIZE);
 		else
-			memset(isp->ltm, 0, AR_ISP_LTM_SIZE);
+			memset(isp->lsc, 0, AR_ISP_LSC_SIZE);
 
 		if (blob) {
-			ar_isp_ltm_from_blob(isp->ltm, blob);
-			ltm_built = true;
+			ar_isp_lsc_from_blob(isp->lsc, blob);
+			lsc_built = true;
 		}
 	}
 
@@ -573,21 +577,21 @@ static void ar_isp_tables_apply(struct ar_isp *isp)
 		}
 	}
 
-	if (isp->ltm) {
-		writel(lower_32_bits(isp->ltm_dma), isp->base + AR_ISP_TABLE_LTM);
-		writel(1, isp->base + AR_ISP_TABLE_LTM_VALID);
+	if (isp->lsc) {
+		writel(lower_32_bits(isp->lsc_dma), isp->base + AR_ISP_TABLE_LSC);
+		writel(1, isp->base + AR_ISP_TABLE_LSC_VALID);
 	}
 
 	dev_info(isp->dev,
-		 "tables: gamma %pad %s, drc %pad %s, compander %pad %s, ltm %pad %s\n",
+		 "tables: gamma %pad %s, drc %pad %s, compander %pad %s, lsc %pad %s\n",
 		 &isp->gamma_dma,
 		 gamma_built ? "built" : (gamma_seeded ? "seeded" : "zeroed"),
 		 &isp->drc_dma,
 		 drc_built ? "built" : (drc_seeded ? "seeded" : "zeroed"),
 		 &isp->tone_dma,
 		 tone_built ? "gtm2+compander built" : "on the vendor's page",
-		 &isp->ltm_dma,
-		 ltm_built ? "shading built" : (ltm_seeded ? "seeded" : "zeroed"));
+		 &isp->lsc_dma,
+		 lsc_built ? "shading built" : (lsc_seeded ? "seeded" : "zeroed"));
 }
 
 /*
@@ -622,11 +626,11 @@ static void ar_isp_tables_prepare(struct ar_isp *isp)
 	if (compander)
 		isp->tone = dma_alloc_coherent(dev, AR_ISP_TONE_ALLOC,
 					       &isp->tone_dma, GFP_KERNEL);
-	if (ltm)
-		isp->ltm = dma_alloc_coherent(dev, AR_ISP_LTM_SIZE,
-					      &isp->ltm_dma, GFP_KERNEL);
+	if (lsc)
+		isp->lsc = dma_alloc_coherent(dev, AR_ISP_LSC_SIZE,
+					      &isp->lsc_dma, GFP_KERNEL);
 	if (!isp->gamma || !isp->drc || (compander && !isp->tone) ||
-	    (ltm && !isp->ltm))
+	    (lsc && !isp->lsc))
 		dev_warn(dev, "coefficient buffers unavailable, falling back to the vendor's\n");
 
 	ret = request_firmware(&isp->tuning, AR_ISP_TUNING_FIRMWARE, dev);
@@ -657,9 +661,9 @@ static void ar_isp_tables_release(struct ar_isp *isp)
 	if (isp->tone)
 		dma_free_coherent(isp->dev, AR_ISP_TONE_ALLOC, isp->tone,
 				  isp->tone_dma);
-	if (isp->ltm)
-		dma_free_coherent(isp->dev, AR_ISP_LTM_SIZE, isp->ltm,
-				  isp->ltm_dma);
+	if (isp->lsc)
+		dma_free_coherent(isp->dev, AR_ISP_LSC_SIZE, isp->lsc,
+				  isp->lsc_dma);
 	release_firmware(isp->tuning);
 }
 
