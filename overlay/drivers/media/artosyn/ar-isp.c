@@ -56,6 +56,7 @@
 #include "ar-isp-codec.h"
 #include "ar-isp-drc-tail.h"
 #include "ar-isp-gamma-page1.h"
+#include "ar-isp-compander.h"
 
 /*
  * Master control. The block is brought up by a staged sequence of writes to
@@ -139,6 +140,22 @@
 #define AR_ISP_TABLE_DRC_BIT		0x00000010
 
 /*
+ * The compander allocation, which is deliberately larger than the table.
+ *
+ * Its length register at 0x0024 reads 0x780. In the units gamma proves, 32 bytes,
+ * that is a 0xf000 fetch, twice the 0x7800 the table occupies. The vendor cannot
+ * satisfy that either: its compander sits at 0x2b2e0c00 and 0xf000 later would run
+ * past the gamma page at 0x2b2ec600, so whatever the block reads beyond the table
+ * is its neighbours' memory and cannot be meaningful as compander data. The same
+ * over-fetch is visible on GTM2, which holds 0xa00 of content and fetches 0x1000.
+ *
+ * So the excess is ignored by the block, and the only thing that matters here is
+ * that the DMA stays inside memory we own. Allocating the full fetch length and
+ * zeroing the tail costs 60 KiB of a 32 MiB pool and removes the question.
+ */
+#define AR_ISP_COMPANDER_ALLOC		0xf000
+
+/*
  * The addresses the replayed configuration arms, inside the isp_cma reservation.
  * They are the vendor's own buffers, not ours. Reading them is how a table is
  * seeded from whatever the vendor left in DRAM across a RAM-boot.
@@ -194,6 +211,11 @@ static int drc_profile = 3;
 module_param(drc_profile, int, 0644);
 MODULE_PARM_DESC(drc_profile, "tuning-file DRC profile, or -1 to leave the page alone");
 
+static bool compander = true;
+module_param(compander, bool, 0644);
+MODULE_PARM_DESC(compander,
+		 "own the compander page and fill it from the carried template (default on)");
+
 struct ar_isp {
 	struct device *dev;
 	void __iomem *base;
@@ -206,6 +228,8 @@ struct ar_isp {
 	dma_addr_t gamma_dma;
 	void *drc;
 	dma_addr_t drc_dma;
+	void *compander;
+	dma_addr_t compander_dma;
 };
 
 static const struct {
@@ -357,15 +381,16 @@ static bool ar_isp_seed_from_vendor(struct ar_isp *isp, void *dst,
  * them. Republishing ours and committing again is the same sequence the vendor
  * itself issues on every AE update, so this is not a special case for the block.
  *
- * Compander is deliberately untouched. Its 0x7800 page is the one table whose
- * generator is not recovered, so the replayed vendor address stays armed rather
- * than being pointed at a buffer we have nothing correct to put in.
+ * Compander has no generator to recover: the vendor installs its 0x7800 page
+ * verbatim from a static template in the service library and never recomputes
+ * it, so the page is carried and filled here like any other constant.
  */
 static void ar_isp_tables_apply(struct ar_isp *isp)
 {
 	const u8 *blob = isp->tuning ? isp->tuning->data : NULL;
 	bool gamma_seeded = false, drc_seeded = false;
 	bool gamma_built = false, drc_built = false;
+	bool compander_built = false;
 	u8 *page;
 
 	if (!tables)
@@ -429,6 +454,19 @@ static void ar_isp_tables_apply(struct ar_isp *isp)
 		}
 	}
 
+	if (isp->compander) {
+		/*
+		 * No seed path and no tuning file: the page is the same bytes on
+		 * every unit and in every scene, so there is nothing to fall back
+		 * to and nothing to select. The tail past the table is zeroed
+		 * because the fetch length covers it; see AR_ISP_COMPANDER_ALLOC.
+		 */
+		memset(isp->compander, 0, AR_ISP_COMPANDER_ALLOC);
+		ar_isp_compander_fill(isp->compander, ar_isp_compander_head,
+				      ar_isp_compander_mid);
+		compander_built = true;
+	}
+
 	/*
 	 * The buffers are coherent, so there is no cache to flush, but the writes
 	 * above must be visible before the address that makes the block fetch
@@ -457,12 +495,21 @@ static void ar_isp_tables_apply(struct ar_isp *isp)
 		       isp->base + AR_ISP_TABLE_COMMIT);
 	}
 
+	if (isp->compander) {
+		writel(lower_32_bits(isp->compander_dma),
+		       isp->base + AR_ISP_TABLE_COMPANDER);
+		writel(AR_ISP_TABLE_COMMIT_ENABLE | AR_ISP_TABLE_COMPANDER_BIT,
+		       isp->base + AR_ISP_TABLE_COMMIT);
+	}
+
 	dev_info(isp->dev,
-		 "tables: gamma %pad %s, drc %pad %s, compander left on the vendor's page\n",
+		 "tables: gamma %pad %s, drc %pad %s, compander %pad %s\n",
 		 &isp->gamma_dma,
 		 gamma_built ? "built" : (gamma_seeded ? "seeded" : "zeroed"),
 		 &isp->drc_dma,
-		 drc_built ? "built" : (drc_seeded ? "seeded" : "zeroed"));
+		 drc_built ? "built" : (drc_seeded ? "seeded" : "zeroed"),
+		 &isp->compander_dma,
+		 compander_built ? "built" : "on the vendor's page");
 }
 
 /*
@@ -494,7 +541,11 @@ static void ar_isp_tables_prepare(struct ar_isp *isp)
 					GFP_KERNEL);
 	isp->drc = dma_alloc_coherent(dev, AR_ISP_DRC_SIZE, &isp->drc_dma,
 				      GFP_KERNEL);
-	if (!isp->gamma || !isp->drc)
+	if (compander)
+		isp->compander = dma_alloc_coherent(dev, AR_ISP_COMPANDER_ALLOC,
+						    &isp->compander_dma,
+						    GFP_KERNEL);
+	if (!isp->gamma || !isp->drc || (compander && !isp->compander))
 		dev_warn(dev, "coefficient buffers unavailable, falling back to the vendor's\n");
 
 	ret = request_firmware(&isp->tuning, AR_ISP_TUNING_FIRMWARE, dev);
@@ -522,6 +573,9 @@ static void ar_isp_tables_release(struct ar_isp *isp)
 	if (isp->drc)
 		dma_free_coherent(isp->dev, AR_ISP_DRC_SIZE, isp->drc,
 				  isp->drc_dma);
+	if (isp->compander)
+		dma_free_coherent(isp->dev, AR_ISP_COMPANDER_ALLOC,
+				  isp->compander, isp->compander_dma);
 	release_firmware(isp->tuning);
 }
 

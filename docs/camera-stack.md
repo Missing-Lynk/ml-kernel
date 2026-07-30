@@ -611,7 +611,19 @@ The heuristic was wrong, not the pages. These are packed multi-lane formats: a c
 
 `ar-isp.c` now allocates and publishes its own gamma and DRC buffers, and produces every byte the hardware fetches from either. Gamma page 0 and the dynamic half of the DRC page come from the tuning file; gamma page 1 and the static half of the DRC page are not in that file in any form and are carried as decoded curves, extracted from the service library by `scripts/gen-gamma-page1.py` and `scripts/gen-drc-tail.py`. Neither table inherits anything.
 
-Compander is still on the vendor's page. Its generator is characterised, a two-control bilinear interpolation at `0x186920` over four float banks, but its group-index schedule and its float-to-four-signed-10-bit packing are not recovered, so the prepacked `0x7800` constant at VMA `0x46a3b0` is the only correct source we have. The two controls come from `get_env() + 0x44/+0x48`, which trace back to the exported `ar_camera_set_global_env` and are therefore **configuration inputs, not AE outputs**: compander is config-varying, not scene-varying.
+Compander is now generated too, and it needed no generator at all. **It has no runtime producer and no tuning-file source**: the `0x7800` page is installed verbatim at ISP init from entry 6 of the descriptor array at VMA `0x472600`, a list of `{u64 source, u64 length}` pairs, whose body at VMA `0x46a3b0` is byte-identical to the page captured off a streaming vendor unit and to the page resident in DRAM on a RAM-booted unit. `scripts/gen-compander.py` extracts it and `ar_isp_compander_fill` rebuilds it. The bilinear at `0x186920` that an earlier note named as its generator produces something else; the `0x7800` size match was a coincidence.
+
+Three quarters of the page is one 16-byte unity record repeated 1536 times and a further `0x700` bytes are zero, so only `0x900` bytes at the start and `0x800` at `0x1000` are carried: 4352 bytes rather than 30720. The generator script checks that structure against the library and refuses to emit if it has changed.
+
+### The coefficient pages overlap in DRAM
+
+Measured, zero differing bytes in both directions:
+
+	GTM2       0x2b2e0200   fetches 0x1000, holds 0xa00 of content
+	compander  0x2b2e0c00 = GTM2 + 0xa00
+	LTM        0x2b2e8600 = compander + 0x7a00
+
+So GTM2's `0xa00..0xfff` **is** the compander table's first `0x600` bytes, read because GTM2 over-fetches past its own content, and a `0x8000` dump of the compander runs into the LTM page. GTM2's real payload is only the 512 bytes at `0x800..0x9ff`; `0x000..0x7ff` is zero. Anything that allocates these separately must either reproduce the packing or accept that a block's over-fetch reads its neighbour. The same reasoning applies to the compander's own length field at `0x0024`, which reads `0x780` and in gamma's proven 32-byte units implies a `0xf000` fetch the vendor cannot satisfy either, so `ar-isp.c` allocates the full fetch length and zeroes the tail rather than letting the DMA run outside memory it owns.
 
 ### Committing a coefficient table
 

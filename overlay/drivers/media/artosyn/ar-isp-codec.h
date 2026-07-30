@@ -52,6 +52,19 @@
 #define AR_ISP_DRC_BLOB_STRIDE		0xc8c
 #define AR_ISP_DRC_BLOB_BANK1		0x404
 
+/*
+ * Compander: a 0x7800 page, mostly structure. Two spans carry content, a 0x700
+ * span is zero, and everything from 0x1800 is one 16-byte unity record repeated.
+ * The carried spans are in ar-isp-compander.h; the rest is rebuilt below.
+ */
+#define AR_ISP_COMPANDER_SIZE		0x7800
+#define AR_ISP_COMPANDER_HEAD		0x900
+#define AR_ISP_COMPANDER_MID_OFF	0x1000
+#define AR_ISP_COMPANDER_MID		0x800
+#define AR_ISP_COMPANDER_FILL_OFF	0x1800
+#define AR_ISP_COMPANDER_FILL0		0x00000100
+#define AR_ISP_COMPANDER_FILL1		0x00010000
+
 /* Byte-wise so the codec is endian-independent and compiles anywhere. */
 static inline u32 ar_isp_get_le32(const u8 *p)
 {
@@ -226,6 +239,38 @@ static inline void ar_isp_drc_from_blob(u8 *dst, const u8 *blob,
 			samples[i] = ar_isp_get_le32(bank + i * 4);
 
 		ar_isp_drc_pack_bank(dst + b * AR_ISP_DRC_BANK, samples);
+	}
+}
+
+/*
+ * Rebuild the compander page from its two carried spans.
+ *
+ * Unlike gamma and DRC this is not a packing: the vendor installs the page
+ * verbatim from a static template and never recomputes it, so there is no curve
+ * to encode. What this reconstructs is the part of the page that is constant by
+ * structure rather than by content, which is three quarters of it.
+ *
+ * The unity record writes only its first two words; the remaining eight bytes
+ * are zero in every one of the 1536 records in the template.
+ */
+static inline void ar_isp_compander_fill(u8 *dst, const u32 *head, const u32 *mid)
+{
+	unsigned int i;
+
+	for (i = 0; i < AR_ISP_COMPANDER_HEAD / 4; i++)
+		ar_isp_put_le32(dst + i * 4, head[i]);
+
+	for (i = AR_ISP_COMPANDER_HEAD; i < AR_ISP_COMPANDER_MID_OFF; i += 4)
+		ar_isp_put_le32(dst + i, 0);
+
+	for (i = 0; i < AR_ISP_COMPANDER_MID / 4; i++)
+		ar_isp_put_le32(dst + AR_ISP_COMPANDER_MID_OFF + i * 4, mid[i]);
+
+	for (i = AR_ISP_COMPANDER_FILL_OFF; i < AR_ISP_COMPANDER_SIZE; i += 16) {
+		ar_isp_put_le32(dst + i + 0, AR_ISP_COMPANDER_FILL0);
+		ar_isp_put_le32(dst + i + 4, AR_ISP_COMPANDER_FILL1);
+		ar_isp_put_le32(dst + i + 8, 0);
+		ar_isp_put_le32(dst + i + 12, 0);
 	}
 }
 
