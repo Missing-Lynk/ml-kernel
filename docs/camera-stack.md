@@ -609,7 +609,9 @@ The heuristic was wrong, not the pages. These are packed multi-lane formats: a c
 
 **What is actually true is worse in one way and better in another.** The tables are present because slot B is RAM-booted from a slot A whose camera was streaming, so the vendor's pages survive in DRAM at the addresses the replay arms. The pipeline has therefore been running on **inherited** tables, not on nothing, which is why the image looked right; and a cold slot-B boot, with no vendor stream first, would find those pages undefined. That has never been tested.
 
-`ar-isp.c` now allocates and publishes its own gamma and DRC buffers to remove the dependency. Compander is still on the vendor's page, because its generator is not recovered.
+`ar-isp.c` now allocates and publishes its own gamma and DRC buffers, and produces every byte the hardware fetches from either. Gamma page 0 and the dynamic half of the DRC page come from the tuning file; gamma page 1 and the static half of the DRC page are not in that file in any form and are carried as decoded curves, extracted from the service library by `scripts/gen-gamma-page1.py` and `scripts/gen-drc-tail.py`. Neither table inherits anything.
+
+Compander is still on the vendor's page. Its generator is characterised, a two-control bilinear interpolation at `0x186920` over four float banks, but its group-index schedule and its float-to-four-signed-10-bit packing are not recovered, so the prepacked `0x7800` constant at VMA `0x46a3b0` is the only correct source we have. The two controls come from `get_env() + 0x44/+0x48`, which trace back to the exported `ar_camera_set_global_env` and are therefore **configuration inputs, not AE outputs**: compander is config-varying, not scene-varying.
 
 ### Committing a coefficient table
 
@@ -626,6 +628,44 @@ Gamma has three descriptors and the vendor points all three at one buffer. The s
 Two consequences. The `0x4000` memcpy in the vendor handler is the size of its software allocation and must not be read as a DMA length. And **the tail from `0x1000` to `0x3fff` is never fetched**: it is per-record software state that rides along in the same copy, which is why it decodes as high-entropy nonsense and why it differs between captures without meaning anything.
 
 Our replay already programs the streaming length: `0x80` appears at `ar_isp_setup_1080p60` indices 470, 472 and 474, inside the 1475-entry prefix the harness applies. Only pages 0 and 1 need to be correct.
+
+### GTM2 and LTM do not use the 0x0014 commit at all
+
+They are module-local descriptor records, not entries in the global table selector. There is no `0x0014` bit for either; the only global commits are compander bit 0, DRC bit 4 and gamma bits 1 to 3.
+
+| | pointer | length | valid |
+|---|---|---|---|
+| GTM2 | `0x1c6c` = `0x2b2e0200` | `0x1c74` = `0x80`, so `0x1000` fetched | `0x1c60` |
+| LTM | `0x4c34` = `0x2b2e8600` | `0x4c28` = `0x34`, so `0x680` fetched | `0x4c3c` |
+
+Recovered from the vendor write trace and independently confirmed against a live register read of a streaming vendor unit; the pointers agree exactly. Both valid bits read `0` mid-stream, so like the `0x0014` commit they appear to self-clear after the fetch.
+
+The length fields matter for the same reason gamma's did. Both handlers flush `0x4000` before publishing the address, at `0x18ad54` and `0x18e54c`, but that is the size of the software allocation. **LTM fetches only `0x680`.**
+
+That makes `out/au-snapshot/tbl_isp_0x1c6c.bin` truncated to `0x1000` and `tbl_isp_0x4c34.bin` truncated to `0x680` exact oracles for the two pages.
+
+### The AE selector is a threshold table in the tuning file
+
+Each module carries a table of float thresholds giving every entry an active band. Gamma's is at blob `0x26b0c`, ten floats, with the curve count `5` stored just before it at `0x26b04`. DRC's is at `0x17a9c`, twelve floats.
+
+```
+gamma, 5 curves            drc, 6 profiles
+  0:    0 ..  40             0:    0 ..  80
+  1:   80 .. 130             1:  100 .. 130
+  2:  150 .. 250             2:  150 .. 180
+  3:  280 .. 330             3:  210 .. 270
+  4:  360 .. 450             4:  290 .. 380
+                             5:  410 .. 500
+```
+
+The gaps between bands are the interpolation regions: inside a band one entry is used, between bands a Q12-weighted mix of the pair either side.
+
+The model was checked against something it was not fitted to. The bands come from the blob and the indices come from decoding captures, independently. One scalar drives both modules, so the bands our captures decode to must intersect, and they do:
+
+	session A   gamma curve 2 [150,250]  n  drc profile 3 [210,270]  =  [210,250]
+	session B   gamma curve 3 [280,330]  n  drc profile 4 [290,380]  =  [290,330]
+
+**The units of that scalar are not established.** It spans 0 to 500, and both a light level in lux and a total gain in percent fit the evidence, with opposite physical meanings but the same self-consistency. Do not record either as fact. Settling it means tracing what value reaches `is_aec_trigger_compute_user`.
 
 ### ml-isploop flags
 

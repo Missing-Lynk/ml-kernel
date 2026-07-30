@@ -16,11 +16,14 @@
  * final shape.
  *
  * The coefficient tables are the exception: gamma and DRC are allocated here,
- * generated from the vendor tuning file, and published at addresses this driver
- * owns. Everything else still runs on replayed vendor addresses. That matters
- * because slot B is RAM-booted from a streaming slot A, so those pages hold the
- * vendor's own tables and an unfilled buffer is not obviously wrong; on a cold
- * boot it would be. Formats are in ar-isp-codec.h.
+ * generated, and published at addresses this driver owns. Every byte the hardware
+ * fetches from either is produced from the vendor tuning file, except gamma's
+ * second page and the static half of the DRC page, which are not in that file in
+ * any form and are carried as decoded curves. Everything else still runs on
+ * replayed vendor addresses. That matters because slot B is RAM-booted from a
+ * streaming slot A, so those pages hold the vendor's own tables and an unfilled
+ * buffer is not obviously wrong; on a cold boot it would be. Formats are in
+ * ar-isp-codec.h.
  *
  * Not implemented here:
  *
@@ -52,6 +55,7 @@
 #include "ar-isp-defaults.h"
 #include "ar-isp-codec.h"
 #include "ar-isp-drc-tail.h"
+#include "ar-isp-gamma-page1.h"
 
 /*
  * Master control. The block is brought up by a staged sequence of writes to
@@ -162,10 +166,17 @@ module_param(tables, bool, 0644);
 MODULE_PARM_DESC(tables,
 		 "own the coefficient DMA buffers instead of arming the vendor's (default on)");
 
+/*
+ * Only reachable now when the tuning file is missing or a table is switched off:
+ * both gamma and DRC generate every byte the hardware reads. Kept because that
+ * fallback is the difference between a degraded camera and no camera, and
+ * because turning it off is how a bring-up proves the generation really is
+ * standalone rather than quietly leaning on what the vendor left behind.
+ */
 static bool seed = true;
 module_param(seed, bool, 0644);
 MODULE_PARM_DESC(seed,
-		 "seed owned buffers from the vendor's inherited pages, for the regions we cannot yet generate (default on)");
+		 "fall back to the vendor's inherited pages when a table cannot be generated (default on)");
 
 /*
  * Which curve to select out of the tuning file. The vendor derives this from AE
@@ -372,19 +383,22 @@ static void ar_isp_tables_apply(struct ar_isp *isp)
 		    gamma_curve < AR_ISP_GAMMA_BLOB_CURVES) {
 			page = isp->gamma;
 			ar_isp_gamma_from_blob(page, blob, gamma_curve);
-			gamma_built = true;
 
 			/*
-			 * Page 1 is a second curve whose source is runtime state
-			 * in the vendor service, not an offset in the tuning
-			 * file, so it cannot be generated. Seeded it is the
-			 * vendor's; unseeded, page 0 is duplicated into it,
-			 * because a valid curve is a better unknown than the
-			 * zeroed page a missing one would leave.
+			 * Page 1 is not an AE selection and is not in the tuning
+			 * file: it is a carried constant. Both pages are written
+			 * here, so gamma no longer depends on anything inherited.
+			 *
+			 * Nothing fills the rest of the allocation because nothing
+			 * reads it. The descriptor length at 0x0034/0x0044/0x0054
+			 * is in units of 32 bytes and the replay leaves it at 0x80,
+			 * so the fetch is 0x1000. The allocation stays 0x4000 to
+			 * match the vendor's, not because the block needs it.
 			 */
-			if (!gamma_seeded)
-				memcpy(page + AR_ISP_GAMMA_PAGE, page,
-				       AR_ISP_GAMMA_PAGE);
+			ar_isp_gamma_pack_page(page + AR_ISP_GAMMA_PAGE,
+					       ar_isp_gamma_page1,
+					       AR_ISP_GAMMA_PAGE1_TAIL);
+			gamma_built = true;
 		}
 	}
 
@@ -446,8 +460,7 @@ static void ar_isp_tables_apply(struct ar_isp *isp)
 	dev_info(isp->dev,
 		 "tables: gamma %pad %s, drc %pad %s, compander left on the vendor's page\n",
 		 &isp->gamma_dma,
-		 gamma_built ? (gamma_seeded ? "built, page 1 seeded" : "built, page 1 duplicated")
-			     : (gamma_seeded ? "seeded" : "zeroed"),
+		 gamma_built ? "built" : (gamma_seeded ? "seeded" : "zeroed"),
 		 &isp->drc_dma,
 		 drc_built ? "built" : (drc_seeded ? "seeded" : "zeroed"));
 }

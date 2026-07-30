@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Extract the static half of the Artosyn ISP's DRC page and emit it as a kernel header.
+"""
+Extract the static half of the Artosyn ISP's DRC page and emit it as a kernel header.
 
 The DRC DMA page is 0x2000 bytes of four 257-sample curves. The first two are
 rebuilt from the tuning file on every AE update and are generated at runtime by
@@ -52,14 +53,19 @@ def decode_bank(data, base):
         duplicate = (word1 >> 8) & LANE_MAX
         if lane1 != duplicate:
             sys.exit(f"record {record} at 0x{base:x}: overlap 0x{lane1:x} != 0x{duplicate:x}")
+
         if record == 0:
             samples.extend((lane0, lane1, lane2))
             continue
+
         if lane0 != samples[-1]:
             sys.exit(f"record {record} at 0x{base:x}: curve break 0x{lane0:x} != 0x{samples[-1]:x}")
+
         samples.extend((lane1, lane2))
+
     if len(samples) != SAMPLES:
         sys.exit(f"decoded {len(samples)} samples, expected {SAMPLES}")
+
     return samples
 
 
