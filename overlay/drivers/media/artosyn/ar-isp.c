@@ -260,13 +260,16 @@ static void ar_isp_configure(struct ar_isp *isp)
 		ar_isp_apply(isp, ar_isp_vendor_trim,
 			     ARRAY_SIZE(ar_isp_vendor_trim));
 
+	ar_isp_apply(isp, ar_isp_output_fix, ARRAY_SIZE(ar_isp_output_fix));
+
 	isp->configured = true;
 
 	dev_info(isp->dev,
-		 "configured: %zu recovered + %zu ordered + %zu trim, control 0x%08x\n",
+		 "configured: %zu recovered + %zu ordered + %zu trim + %zu output fix, control 0x%08x\n",
 		 ARRAY_SIZE(ar_isp_recovered),
 		 ARRAY_SIZE(ar_isp_setup_1080p60),
 		 trim ? ARRAY_SIZE(ar_isp_vendor_trim) : 0,
+		 ARRAY_SIZE(ar_isp_output_fix),
 		 readl(isp->base + AR_ISP_CONTROL));
 }
 
@@ -313,6 +316,17 @@ static void ar_isp_configure_prefix(struct ar_isp *isp, size_t n)
 
 	ar_isp_apply(isp, ar_isp_recovered, ARRAY_SIZE(ar_isp_recovered));
 	ar_isp_apply(isp, ar_isp_setup_1080p60, n);
+
+	/*
+	 * Applied here as well as in the full path. A prefix is not only a bisect
+	 * tool: it is how the capture harness configures the block for every run,
+	 * and the correction these two carry lives at entries 1773/1774, past every
+	 * prefix in practical use. Without this a prefix bring-up is always crushed.
+	 *
+	 * Unlike the trim pass this does not interfere with the bisect it sits in,
+	 * which chases the setup entry that kills the input geometry at 0x7070.
+	 */
+	ar_isp_apply(isp, ar_isp_output_fix, ARRAY_SIZE(ar_isp_output_fix));
 
 	isp->configured = true;
 

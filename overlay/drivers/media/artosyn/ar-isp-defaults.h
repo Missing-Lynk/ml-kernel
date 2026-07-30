@@ -3653,4 +3653,33 @@ static const struct ar_isp_reg ar_isp_vendor_trim[] = {
 	{ 0x757c, 0x00000000 },
 };
 
+/*
+ * The output-stage pair that decides whether the image is crushed.
+ *
+ * ar_isp_setup_1080p60 carries both an early value and a later correction for
+ * each of these, at entries 572/573 and 1773/1774. Anything that applies only a
+ * prefix of that table stops before the correction and leaves the placeholder,
+ * which crushes 57% of the frame below luma 32.
+ *
+ * Bisected on hardware one register at a time, cumulative, luma mean of the
+ * same scene in one bring-up:
+ *
+ *	baseline 86.5   ...   0x2e20 91.1   0x2e2c 12.2   0x2e30 187.2
+ *
+ * The two are a PAIR and must be written together: 0x2e2c on its own takes the
+ * mean to 12, far worse than not writing either. They are kept in their own
+ * table for that reason, so a caller cannot apply half of them.
+ *
+ * Only these two. Every other register in the page was measured and none moved
+ * the image: the 0x2ebc-0x2efc LUT that our tables hold flat at 0x10101010
+ * changed the mean by 1.3 counts across all eighteen registers, and 0x2e00's
+ * enable nibble by 21. One of the measured writes, 0x2ea0, made it worse (187
+ * to 164), which is why this table is the proven pair rather than every
+ * difference against the vendor.
+ */
+static const struct ar_isp_reg ar_isp_output_fix[] = {
+	{ 0x2e2c, 0x00000100 },
+	{ 0x2e30, 0x001020fc },
+};
+
 #endif /* _AR_ISP_DEFAULTS_H */
