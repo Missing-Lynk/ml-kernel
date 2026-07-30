@@ -302,6 +302,53 @@ The colour-space conversion is **not** the problem and should not be touched fir
 
 The vendor ships three tuning blobs, `nt99235`, `sc2210` and `sc231`, all **exactly 879,704 bytes**, so the format is a fixed-layout struct. Across all three, 97,880 bytes differ over 46,738 regions with a largest contiguous differing region of only 1200 bytes, so there is no 16 KiB block that varies by sensor and the gamma data is likely shared. Differential analysis therefore cannot locate it.
 
+### DRC upload and strength control (recovered)
+
+Dynamic-range control (DRC) is another ISP DMA payload, not a single register.
+For this vendor `libmpp_service.so`, its immutable 8 KiB initial template is
+embedded at service-image VMA `0x467460` (file offset `0x457460`). The
+runtime configuration table at VMA `0x472760` supplies the exact pair
+`(source=0x467460, length=0x2000)`. The module's initial `0xb09` handler
+copies those bytes to its DMA allocation, flushes all `0x2000` bytes, stores
+the physical address in its descriptor and sets the descriptor apply bit
+(`0x1a5828..0x1a5940`). This is a firmware-build-specific constant; do not
+assume it is the same in another vendor build.
+
+During normal operation the service overwrites only the first `0x1000` bytes
+of that page (`0x1a4200`). They are two `0x800` banks, each containing 128
+16-byte records. A record packs three unsigned 20-bit values in its first ten
+bytes; the second value is duplicated, and adjacent records overlap. Thus one
+bank represents a 257-sample curve, not 384 independent values. The active
+DRC tuning profile starts at raw tuning offset `0x17b1c + index*0xc8c`; its
+first two 257-word curves are packed into the two banks. At neutral strength
+50, a retained vendor DRC page decodes byte-for-byte to profile 3 of the
+NT99235 FPV blob.
+
+Strength is implemented in ARM software before packing, around neutral 50.
+For a requested strength `s`, the service calculates
+`q = floor(abs(s - 50) * 4096 / 50)` and blends every curve word in Q12 with
+one of two fixed 514-word service-image curves: the high curve at VMA
+`0x35f080` when `s > 50`, or the low curve at `0x35fc90` when `s < 50`.
+It then performs the 20-bit packing; the ISP receives only the resulting DMA
+page. The final `0x1000` bytes remain the initial template. This establishes
+the vendor-equivalent DRC payload construction without a DMA capture, while
+the semantic meaning of the four page banks still needs hardware validation.
+
+### 3A execution (proven)
+
+`raw_stats_filter_port` creates the AEC, AWB and AF modules in sequence
+(`creat_aec_algo_module` at `0x15db40`, `creat_awb_algo_module` at
+`0x15dbb0`, and `creat_af_algo_module` at `0x15dc20`).  The AEC module
+selects an in-process algorithm through `get_aec_algo_lib`; the vendor's
+`artosyn_ae_algo_creat`, AWB and AF implementations are all in
+`libmpp_service.so`.
+
+The only DSP remote-call sites are `AR_DSP_AiISP_PreProcess`/`PostProcess`, an
+optional CNN/NPU enhancement path: it allocates NPU buffers and starts
+NPU/DSP pre/post threads, not 3A modules.  The FPV rootfs contains no DSP
+program image, so that path cannot run there.  The ARM MMIO trace therefore
+has no hidden DSP ISP-programming participant.
+
 ### Not known
 
 These are open and are not to be assumed while building the ISP driver:
@@ -316,7 +363,6 @@ These are open and are not to be assumed while building the ISP driver:
 - **What each of the eight address registers points at.** Plane, statistics buffer, or intermediate surface is unassigned. The two-value alternation is established; the meaning of each register is not.
 - **The pixel format in those buffers.** Whether the ISP output is raw Bayer or processed YUV has not been read back and decoded.
 - **What the three indirect-port transactions do.**
-- **Whether the on-chip DSP participates.** The DSP runs AiISP 3A tuning (AE/AWB/AF) over RPC and `libhal_dsp.so` is present on the unit. Whether it also writes ISP datapath registers cannot be answered from this trace, because DSP-core writes are not visible to the shim. The whole ISP configuration and the whole per-frame loop observed above come from userspace MMIO, so at minimum the datapath is userspace-driven; whether that is sufficient is untested.
 - **The function of the ~1267 ISP registers.** They are captured verbatim; they are not decoded.
 
 ## Open stack
@@ -486,3 +532,153 @@ Investigation history and next steps live in `plans/air-camera-first-light.md`; 
 | Vendor RE cross-reference | `archive/re/notes/nt99235/` (see the caution below) |
 
 Caution on the RE notes: they were checked against the trace and are unreliable in detail. They record the vendor's `0x080` as `0x76543210` (the trace shows `0xffffffff` and `0xfffffff8`), state that the open driver never writes `0x32c` when it does, and give `0x0d0` as both `0x2c` and `0xaaaaaaaa` in different files. Treat them as leads to verify. The trace is the authority for what the vendor writes; the disassembly is the authority for what a register means.
+
+### Judging a capture: the marker count, never the image
+
+`ml-isploop` writes 24 marker words (`0xa5a5a5a5`, every `0x1000` bytes) into each output plane before its capture window opens, and reports how many survived. **A capture is only ours if those markers were overwritten.** `0/24` means nothing in our stack wrote that memory and the dump is whatever was already in DRAM.
+
+This is not a theoretical caution. DDR survives a RAM-boot, so the vendor's last frame from slot A persists at the same addresses our ring uses. One such frame was read as our own output and treated as proof the pipeline was healthy, which then required inventing a regression to explain why every later frame looked worse. Three separate theories were built and refuted against a phenomenon that never existed. The marker count was in every log throughout.
+
+The vendor's residual frame is now useful as a **control**, being the same sensor, lens and scene through a correctly configured ISP:
+
+| | dark 0-31 | mid 32-223 | blown 224+ | mean |
+|---|---|---|---|---|
+| ours | 71.2% | 10.0% | 18.8% | 61.5 |
+| vendor residual | 0.0% | 97.6% | 2.4% | 95.7 |
+
+### CVISP writes only on the first bring-up after a RAM-boot
+
+The first camera bring-up of a boot writes frames to DRAM. Every later bring-up in the same boot arms normally, reports full frame-start and slot-arm counts, and writes nothing, leaving the first bring-up's frame in place.
+
+Measured: first bring-up 24/24 markers overwritten on all three planes; second and third `0/24`, each with 241 frame starts and 241 slots armed in 4 s and CVISP control `0x00800806` correct throughout.
+
+This is not simply cold-versus-warm. Slot B is RAM-booted from slot A with the vendor pipeline already streaming, so the first bring-up **inherits hardware state the vendor established**, and the register replay does not recreate it once our own teardown has destroyed it. A boot therefore yields exactly one trustworthy capture; `RUNS=` in `glue/dev/au-prove-camera.sh` selects which one to spend it on.
+
+### Within a working bring-up, capture sustains
+
+All five ring slots hold distinct frames after a one-second window, differing by 10 to 16 per cent of sampled pixels. The pipeline streams at 60 fps; it does not produce a single frame and stop.
+
+### The tone tables are unfilled, and that is NOT what crushed the image
+
+Both halves of that heading are load-bearing. The tables really are unfilled, and the crushed response really was reproducible across all five ring slots, at 1 s and 4 s capture windows, and on boots with and without a preceding vendor stream, so it was never scene-, time- or slot-dependent. But the two are unrelated, and assuming otherwise cost several sessions.
+
+The crush was two output-stage registers, `0x2e2c` and `0x2e30`, whose corrected values sit past the prefix the replay applies. Writing them recovers the whole shadow range with every table below still unfilled: 57% of pixels under luma 32 becomes 0.0%. See `ar_isp_output_fix` in `ar-isp-defaults.h`.
+
+So what follows is a real gap with real consequences for colour and dynamic range, but it is not a tone-crush explanation and must not be cited as one.
+
+The replay ends on the vendor's physical addresses for the DMA-fetched tuning tables and never fills them, so the ISP fetches undefined data with the enable bits set. Confirmed by direct read, including immediately after a vendor stream:
+
+	gamma      0x2b2ec600  0x4000   zero  6.2%  non-decreasing 51.4%  garbage
+	compander  0x2b2e0c00  0x7800   zero 50.6%  non-decreasing 75.1%  garbage
+	drc        0x2b2e9200  0x2000   zero 33.2%  non-decreasing 47.7%  garbage
+
+Eight such tables are missing in total, five of them tone-path. The fetch is triggered by a pulse on ISP `0x0014` with the module's bits, issued after the address is written, so a fill only takes effect if it precedes that pulse.
+
+### ml-isploop flags
+
+`--cvisp` rotates the CVISP ring once per frame start and does **not** drive the per-frame ISP cycle. That is the combination recorded above as sustaining. The cycle is opt-in behind `--isp-cycle`; briefly folding it into `--cvisp` silently changed the behaviour of every existing caller.
+
+`cycle[]` follows the order the wide sweep shows for the target registers: statistics buffers, then the VIF clears, then the three indirect transactions on `0x0cc`/`0x0d4`. Those two are an indirect access port, not acknowledgements, so their pairs must stay adjacent and ordered; the real interrupt acknowledgement is the VIF `0x17c` write.
+
+### Never touch VIF without a live pixel domain
+
+Reading VIF with its clock gated hard-hangs the SoC into a watchdog reset to slot A. The frame-start liveness check cannot prevent this, because the check is itself a VIF read: it catches a stopped stream but not a gated clock. `ml-isploop` now reads the camera gate bit in CGU `0x0a104014` first, which is safe at any time, and refuses before touching VIF.
+
+"The modules are still loaded" is not the same as "the pipeline is live". Scripts kill their grabber on exit, which puts the sensor into standby and gates the pixel domain, so a later standalone invocation hangs. Run captures only through a gated harness.
+
+## The capture node advertises raw Bayer but has never delivered a frame
+
+`/dev/video2` advertises `V4L2_PIX_FMT_SRGGB12` and is wired to the VIF bypass view: 1920x1080,
+`RG12`, 3840 bytes per line, 4147200 bytes per frame, so 16-bit padded samples. That is what the
+node claims. **No frame has ever come out of it, on any run.**
+
+Read mid-stream, with a grabber holding the stream open, the view is armed and running and still
+signals nothing:
+
+	0x17c  view-done W1C status    0x00000000    never signalled
+	0x184  second W1C status       0x00000000
+	0x1b0  block status            0x00000000
+	0x020  armed view address      0x2c000000    a vb2 buffer is armed
+	0x000  view control            0x0000c068    the configured value
+	0x190  AXI config              0x40000101    RUN and ENABLE both set
+
+The vendor does not use this path either. It configures view 0's geometry, then holds the view in
+reset (`VIF+0x2bc = 0x00000002`) and streams everything through the ISP path; afterwards it never
+writes a view address again. So there is no vendor sequence to copy, and bringing the view DMA up
+means working from the hardware specification.
+
+Two things that look like the cause are not. The `crop_v 0xffff` / `crop_h 0xffff` /
+`frame_end 0x05000780` values in our init log are reset defaults printed before the write:
+`ar_vif_configure()` writes `+0x3a0 = 0x84380280`, `+0x3c0 = 0x00000438`, `+0x3c4 = 0x0000027f`,
+matching the vendor's live window exactly. And `+0x17c` bit 24, which the vendor acknowledges in
+its per-frame loop, is an ISP-path frame event rather than bypass-view completion, so a poll loop
+waiting on it is watching the wrong register.
+
+**Consequence for judging images: there is no raw reference.** Whether the ISP is destroying
+information has to be answered from the live register diff against the vendor or from a
+same-scene vendor capture. Do not plan on a raw-against-ISP histogram comparison.
+
+`ml-v4l2grab` writes its output file on the first and last frame of the requested count. A caller
+that passes a large `-n` and kills the process, which is what a streaming harness does, gets the
+first frame. Before that behaviour existed, such callers got no file at all.
+
+## The sensor is unpowered outside a live stream
+
+i2c reads of the sensor fail unless the pipeline is streaming, because the driver powers the
+sensor down when the stream stops. Any sensor register comparison has to run inside a bring-up,
+between the streaming gate and teardown.
+
+## Liveness: a running grabber is not a delivering pipeline
+
+Checking that `ml-v4l2grab` is still alive does not establish that frames are arriving. It blocks
+indefinitely waiting for a buffer that never completes, staying alive the whole time, which is
+its normal state on `/dev/video2`. Gate on a delivered artifact, not on the process.
+
+Do not gate on the grabber's log either: its stdout is fully buffered when redirected, so the log
+stays empty until it exits and an empty log proves nothing.
+
+The same distinction applies to VIF frame starts: `ml-isploop` counts frame starts, which
+continue on a failing bring-up, while no view DMA completes. Frame starts are not frames.
+
+## Sensor registers that differ between stacks without meaning anything
+
+A live-against-live comparison of all 3328 readable sensor registers, ours mid-stream on slot B
+against the vendor's mid-stream on slot A, leaves twelve differences. None of them is
+configuration. Four groups, all accounted for:
+
+`0x0005` is a status byte that changes continuously between consecutive reads.
+
+`0x0206`/`0x0207` is the committed analog gain code, and `0x0250`-`0x0253` is its shadow, exactly
+`gain << 4`. The difference was our old default of `0x2f` against the vendor's `0x3c`; the driver
+now defaults to `0x3c`.
+
+`0x32bc`-`0x32bf` is written by no code path in the vendor library. It is an output of the
+sensor's own MCU, in the same class as the gain shadow, and exists on the vendor unit only
+because its AE loop has run.
+
+`0x0138`-`0x013a` is the SMIA temperature sensor: `0x0138 = 0x01` enables it on both stacks and
+`0x013a` is `TEMP_SENSE_OUTPUT`. The value drifts upward as the unit warms, and it drifts *within*
+one stack, so it is not a stack difference at all. Five dumps, two stacks:
+
+	ours   0x0139 = 0x23  0x013a = 0x74
+	ours   0x0139 = 0x24  0x013a = 0x75
+	vendor 0x0139 = 0x25  0x013a = 0x77
+	vendor 0x0139 = 0x26  0x013a = 0x78
+	vendor 0x0139 = 0x2a  0x013a = 0x7e
+
+The two bytes track each other with a near-constant offset of about `0x52`, so they are one
+rising quantity read out in two places. The vendor's own dumps span `0x25` to `0x2a`, a wider
+spread than the gap to ours.
+
+`0x0340` read `0x08` on the vendor during the first snapshot. That was contamination from an
+accidental i2c write, not a vendor value; a clean stack reads `0x04`, which is what we write.
+
+The 271 registers our mode table never writes are power-on defaults: they read identically on
+both stacks.
+
+## Sensor clamps are ours, not the chip's
+
+Exposure is clamped to `vts - 2` and gain to `NT99235_AGAIN_MAX` (`0x60`) by the driver.
+Requesting exposure 2000 reads back as 1123 from the sensor, so the chip never sees the larger
+value and its own limit is unknown. Gain values above `0x60` all behave identically for the same
+reason. Both clamps are correct for a fixed frame rate, but they are decisions, not measurements.
