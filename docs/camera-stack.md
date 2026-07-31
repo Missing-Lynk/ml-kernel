@@ -654,7 +654,18 @@ with the first group of four shifted left by 6 on its way to the registers and t
 
 The vendor's operating point is pinned exactly: at gain **187** the band is 130 to 510, `t` is 0.150000, and all four lanes come out at 961 and 272, which are the `0xf040` and `0x110` the trace holds. An earlier note suggested those values came from a static fallback rather than the blob blend; that was wrong, and the blend reproducing both registers on all four lanes from the tuning file is what disproves it.
 
-`lnr` and `de3d` trigger off the same gain through the same machinery and are still frozen at one operating point, so **auto-exposure moving gain will make those two stages wrong** until they are recovered too. That is a prerequisite for AE being any good, not a completeness item.
+**BLC is not the only stage that recomputes with gain, and the rest are still frozen at the operating point the capture happened to sit at.** Every stage below reaches the AE trigger and converts between integer and float inside its own code, which is what distinguishes a gain-indexed recomputation from static configuration. Auto-exposure moving gain therefore walks the picture away from the only point those stages are correct for, which is a prerequisite for AE being any good rather than a completeness item.
+
+| Stage | Table | Status |
+|---|---|---|
+| `rnr` | `0x7a6c`, stride `0x160`, 12 entries | mechanism, table and proof recovered; ordering within an entry not recoverable from this tuning file |
+| `lnr` | `0x89f18`, stride `0x428`, 11 entries | table pinned, source fields known, destination registers not established |
+| `de3d` | `0x963ac`, stride `0x2f8`, 12 entries | as `lnr` |
+| `acm`, `cfa`, `cnf` | not located | carry a recomputation path that did not fire during this capture |
+
+`rnr`, `lnr` and `de3d` all blend between two adjacent entries by an AE-supplied weight, exactly as BLC does, and truncate on the way to the registers.
+
+**`acm`, `cfa` and `cnf` are the subtle case, and the distinction is worth stating precisely.** Their registers are constant across the whole trace and are replayed with the vendor's values, which was measured and is unchanged. What is not established is that they *cannot* move: each reaches the AE trigger and carries float conversion, `acm` more of it than any other stage in this group. So they are correct at the capture's operating point rather than correct by construction, and whether they move under conditions the capture did not cover is unknown. An earlier note recorded `acm` as doing no float work at all and offered that as the mechanism behind its constant registers; that was an artefact of bounding a module's code at the next branch target and of counting only scalar mnemonics, and both halves are refuted.
 
 **CCM was not merely unowned, it was inactive.** The register replay does carry the vendor's runtime colour matrix, but at entry 1718 of the setup table, while the camera harness applies a 1475-entry prefix. Every bring-up before this one therefore ran with ccm1 holding the identity that earlier entries wrote, so colour correction was switched off and it was not obvious, because an identity CCM yields a plausible picture rather than a broken one. The driver now installs the matrix itself, after the prefix. Generated from the tuning file, the six words reproduce the traced vendor registers exactly.
 
