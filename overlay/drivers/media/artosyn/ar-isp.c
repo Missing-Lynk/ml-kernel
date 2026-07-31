@@ -246,6 +246,29 @@
 #define AR_ISP_STATS_HIST	(AR_ISP_HIST_BANK + AR_ISP_HIST_REG_ADDR)
 
 /*
+ * Bank 0x2800, shared by the vendor's gtm2 and ltm modules. 0x2808 is the
+ * coefficient page the block fetches: 64 tiles of a 128-sample u16 curve at a
+ * 0x100 stride, every tile monotonic from 0 to a measured maximum of 1003.
+ * 0x280c is the ltm_stats buffer the hardware writes, filling its whole
+ * measured 0x80000 extent. Both are plain address publishes on the vendor's
+ * per-frame list, with no valid bit.
+ *
+ * The vendor recomputes the page every frame from ltm_stats. Publishing a
+ * fixed identity page forgoes local tone adaptation but is scene-safe, which
+ * is what a cold boot needs: the replay otherwise arms the vendor's address,
+ * and on a boot where slot A never streamed that memory is junk applied as
+ * per-tile tone curves.
+ */
+#define AR_ISP_LTM_PAGE_ADDR		0x2808
+#define AR_ISP_LTM_STATS_ADDR		0x280c
+#define AR_ISP_LTM_PAGE_SIZE		0x4000
+#define AR_ISP_LTM_STATS_SIZE		0x80000
+#define AR_ISP_LTM_TILES		64
+#define AR_ISP_LTM_SAMPLES		128
+#define AR_ISP_LTM_TILE_STRIDE		0x100
+#define AR_ISP_LTM_CURVE_MAX		1003
+
+/*
  * The vendor tuning file, verbatim. Its length is checked because the vendor
  * loader checks it: every offset in ar-isp-codec.h is an absolute position in a
  * fixed-layout record, so a file of a different size is a different format and
@@ -334,6 +357,11 @@ module_param(stats, bool, 0644);
 MODULE_PARM_DESC(stats,
 		 "own the AE statistics buffers instead of the vendor's (default on)");
 
+static bool ltm = true;
+module_param(ltm, bool, 0644);
+MODULE_PARM_DESC(ltm,
+		 "own the LTM page and statistics buffer, publishing an identity curve (default on)");
+
 struct ar_isp {
 	struct device *dev;
 	void __iomem *base;
@@ -357,15 +385,23 @@ struct ar_isp {
 	 * one buffer to both. rro_face is the second, smaller-window grid and
 	 * hist is the Bayer histogram.
 	 *
-	 * af_stats and ltm_stats are deliberately absent: af_stats is disabled
-	 * on this sensor so nothing writes its buffer, and neither module's
-	 * length is established, so both keep the vendor's addresses rather
-	 * than being given a guessed allocation.
+	 * af_stats is deliberately absent: it is disabled on this sensor so
+	 * nothing writes its buffer, and its module keeps the vendor's address
+	 * rather than being given a guessed allocation.
 	 */
 	void *rro;
 	dma_addr_t rro_dma;
 	void *rro_face;
 	dma_addr_t rro_face_dma;
+
+	/* Bank 0x2800: the coefficient page at 0x2808 published as a fixed
+	 * identity, and the ltm_stats scribble target at 0x280c, whose 0x80000
+	 * extent is measured rather than guessed.
+	 */
+	void *ltm_page;
+	dma_addr_t ltm_page_dma;
+	void *ltm_stats;
+	dma_addr_t ltm_stats_dma;
 	void *hist;
 	dma_addr_t hist_dma;
 
@@ -585,9 +621,21 @@ static void ar_isp_stats_publish(struct ar_isp *isp)
 	if (isp->hist)
 		writel(lower_32_bits(isp->hist_dma), isp->base + AR_ISP_STATS_HIST);
 
+	if (isp->ltm_page)
+		writel(lower_32_bits(isp->ltm_page_dma),
+		       isp->base + AR_ISP_LTM_PAGE_ADDR);
+
+	if (isp->ltm_stats)
+		writel(lower_32_bits(isp->ltm_stats_dma),
+		       isp->base + AR_ISP_LTM_STATS_ADDR);
+
 	if (isp->rro || isp->hist)
 		dev_info(isp->dev, "stats: rro %pad, rro_face %pad, hist %pad\n",
 			 &isp->rro_dma, &isp->rro_face_dma, &isp->hist_dma);
+
+	if (isp->ltm_page)
+		dev_info(isp->dev, "ltm: identity page %pad, stats %pad\n",
+			 &isp->ltm_page_dma, &isp->ltm_stats_dma);
 }
 
 /*
@@ -759,6 +807,28 @@ static void ar_isp_tables_apply(struct ar_isp *isp)
 		tone_built = true;
 	}
 
+	if (isp->ltm_page) {
+		__le16 *page = isp->ltm_page;
+		unsigned int t, i;
+
+		/*
+		 * Every tile the same linear curve, monotonic from 0 to the
+		 * measured maximum, truncating as every quantisation in this
+		 * pipeline does. The stride leaves a gap after each tile's 128
+		 * samples; the whole page is zeroed first so the gaps match the
+		 * vendor's.
+		 */
+		memset(isp->ltm_page, 0, AR_ISP_LTM_PAGE_SIZE);
+		for (t = 0; t < AR_ISP_LTM_TILES; t++)
+			for (i = 0; i < AR_ISP_LTM_SAMPLES; i++)
+				page[t * AR_ISP_LTM_TILE_STRIDE / 2 + i] =
+					cpu_to_le16(i * AR_ISP_LTM_CURVE_MAX /
+						    (AR_ISP_LTM_SAMPLES - 1));
+	}
+
+	if (isp->ltm_stats)
+		memset(isp->ltm_stats, 0, AR_ISP_LTM_STATS_SIZE);
+
 	if (isp->lsc) {
 		/*
 		 * Only region A, the lens-shading grid, is generated. The
@@ -890,6 +960,17 @@ static void ar_isp_tables_prepare(struct ar_isp *isp)
 			dev_warn(dev, "statistics buffers unavailable, falling back to the vendor's\n");
 	}
 
+	if (ltm) {
+		isp->ltm_page = dma_alloc_coherent(dev, AR_ISP_LTM_PAGE_SIZE,
+						   &isp->ltm_page_dma,
+						   GFP_KERNEL);
+		isp->ltm_stats = dma_alloc_coherent(dev, AR_ISP_LTM_STATS_SIZE,
+						    &isp->ltm_stats_dma,
+						    GFP_KERNEL);
+		if (!isp->ltm_page || !isp->ltm_stats)
+			dev_warn(dev, "ltm buffers unavailable, falling back to the vendor's\n");
+	}
+
 	if (de3d) {
 		static const size_t sz[3] = {
 			AR_ISP_DE3D_BUF0_SIZE, AR_ISP_DE3D_BUF1_SIZE,
@@ -946,6 +1027,12 @@ static void ar_isp_tables_release(struct ar_isp *isp)
 	if (isp->hist)
 		dma_free_coherent(isp->dev, AR_ISP_HIST_SIZE, isp->hist,
 				  isp->hist_dma);
+	if (isp->ltm_page)
+		dma_free_coherent(isp->dev, AR_ISP_LTM_PAGE_SIZE, isp->ltm_page,
+				  isp->ltm_page_dma);
+	if (isp->ltm_stats)
+		dma_free_coherent(isp->dev, AR_ISP_LTM_STATS_SIZE,
+				  isp->ltm_stats, isp->ltm_stats_dma);
 	{
 		static const size_t sz[3] = {
 			AR_ISP_DE3D_BUF0_SIZE, AR_ISP_DE3D_BUF1_SIZE,
