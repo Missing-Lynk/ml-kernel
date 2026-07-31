@@ -20,6 +20,8 @@
 #ifndef AR_ISP_LTM_H
 #define AR_ISP_LTM_H
 
+#include "ar-isp-bytes.h"
+
 #define AR_ISP_LTM_BANK			0x2800
 #define AR_ISP_LTM_REG_CTRL		0x00
 #define AR_ISP_LTM_REG_DIMS		0x04
@@ -40,9 +42,9 @@
  * 0x100 slot, so the page is exactly 0x4000. Every curve starts at 0 and rises
  * monotonically to just under 1024, which is a 10-bit output range.
  *
- * The 0x4000 is not the flush size taken on trust: the captured page holds 64
- * well-formed curves and turns to unrelated data at exactly 0x4000, and the
- * producer loop writes its tile count times 0x100 into the same buffer.
+ * The captured page holds 64 well-formed curves and turns to unrelated data at
+ * exactly 0x4000, and the producer loop writes its tile count times 0x100 into
+ * the same buffer.
  *
  * All 64 curves are distinct. Their arrangement over the frame is not
  * established; 64 tiles is what the page holds, an 8x8 grid is only the obvious
@@ -71,31 +73,24 @@
 static inline u16 ar_isp_ltm_sample(const u8 *page, unsigned int tile,
 				    unsigned int sample)
 {
-	const u8 *p = page + tile * AR_ISP_LTM_CURVE_STRIDE + sample * 2;
-
-	return (u16)p[0] | ((u16)p[1] << 8);
+	return ar_isp_get_le16(page + tile * AR_ISP_LTM_CURVE_STRIDE + sample * 2);
 }
 
 static inline void ar_isp_ltm_put_sample(u8 *page, unsigned int tile,
 					 unsigned int sample, u16 value)
 {
-	u8 *p = page + tile * AR_ISP_LTM_CURVE_STRIDE + sample * 2;
-
-	p[0] = value;
-	p[1] = value >> 8;
+	ar_isp_put_le16(page + tile * AR_ISP_LTM_CURVE_STRIDE + sample * 2, value);
 }
 
 /*
  * An identity page: every tile mapped to a straight ramp over the sample range.
- * This is a legitimate open starting point, not a reconstruction of what the
- * vendor computes, and it leaves the stage tone-neutral rather than dark.
+ * Not a reconstruction of what the vendor computes; it leaves the stage
+ * tone-neutral rather than dark.
  */
 static inline void ar_isp_ltm_fill_identity(u8 *page)
 {
-	unsigned int tile, i;
-
-	for (tile = 0; tile < AR_ISP_LTM_TILES; tile++)
-		for (i = 0; i < AR_ISP_LTM_CURVE_SAMPLES; i++)
+	for (unsigned int tile = 0; tile < AR_ISP_LTM_TILES; tile++)
+		for (unsigned int i = 0; i < AR_ISP_LTM_CURVE_SAMPLES; i++)
 			ar_isp_ltm_put_sample(page, tile, i,
 					      i * AR_ISP_LTM_SAMPLE_MAX /
 					      (AR_ISP_LTM_CURVE_SAMPLES - 1));

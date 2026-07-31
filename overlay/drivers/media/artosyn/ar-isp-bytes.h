@@ -24,6 +24,11 @@ static inline void ar_isp_put_le32(u8 *p, u32 v)
 	p[3] = v >> 24;
 }
 
+static inline u16 ar_isp_get_le16(const u8 *p)
+{
+	return (u16)p[0] | ((u16)p[1] << 8);
+}
+
 static inline void ar_isp_put_le16(u8 *p, u16 v)
 {
 	p[0] = v;
