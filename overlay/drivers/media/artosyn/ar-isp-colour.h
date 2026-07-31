@@ -11,10 +11,10 @@
  * Recovered from the module code in libmpp_service.so (isp_sub_ccm1_creat
  * 0x187a50, isp_sub_ccm2_creat 0x1af6e8, isp_sub_lut3d_creat 0x1c3400; each
  * module's second registered handler maps its register bank, its third is the
- * command handler that fills it) and validated word-for-word against the vendor
- * MMIO trace in out/au-mmiotrace/mmio-isp.log. The runnable proof is
- * kernel/scripts/gen-ccm.py, which packs the tuning-file matrix with this
- * format and refuses to emit if it stops matching the traced registers.
+ * command handler that fills it) and validated word-for-word against the
+ * vendor MMIO trace. The runnable proof is kernel/scripts/gen-ccm.py, which
+ * packs the tuning-file matrix with this format and refuses to emit if it
+ * stops matching the traced registers.
  *
  * Pure data transforms: no register access and no kernel API beyond the integer
  * types, so the same source can be compiled host-side against the captures.
@@ -22,6 +22,8 @@
 
 #ifndef AR_ISP_COLOUR_H
 #define AR_ISP_COLOUR_H
+
+#include "ar-isp-bytes.h"
 
 /*
  * CCM register banks. Each is 0x50 bytes: a packed matrix at +0x00, a second
@@ -77,29 +79,14 @@
 #define AR_ISP_LUT3D_PAYLOAD		0x2680
 #define AR_ISP_LUT3D_FLUSH		0x2800
 
-static inline u32 ar_isp_colour_get_le32(const u8 *p)
-{
-	return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) |
-	       ((u32)p[3] << 24);
-}
-
-static inline void ar_isp_colour_put_le32(u8 *p, u32 v)
-{
-	p[0] = v;
-	p[1] = v >> 8;
-	p[2] = v >> 16;
-	p[3] = v >> 24;
-}
-
 /*
  * A CCM coefficient from an IEEE-754 single, in integer arithmetic.
  *
  * The vendor converts with fcvtzs #8, so the magnitude is Q8 truncated toward
  * zero, and encodes the sign separately: a negative coefficient v becomes
  * 0x8000 + |v|. Sign-magnitude, not two's complement; 0x8040 is -0.25.
- * Truncation is measured, not assumed: every one of the nine traced ccm1
- * coefficients matches truncation and three of them (-0.1, -0.05, -0.2, among
- * others) would differ under rounding.
+ * Truncation, not rounding: all nine traced ccm1 coefficients match it, and
+ * several (-0.1, -0.05, -0.2) would differ under rounding.
  *
  * Valid tuning matrices stay well inside +/-4, so the clamp exists only so a
  * corrupt file cannot spill the sign bit.
@@ -143,20 +130,18 @@ static inline u16 ar_isp_f32_q8sm(u32 bits)
  * matrix; they are zero in both init templates and in every traced write, so
  * writing whole words with zero high halves reproduces the register file.
  *
- * @bits: the nine row-major coefficients as float32 bit patterns, e.g. read
- * straight out of a tuning-file bank with ar_isp_colour_get_le32.
+ * bits holds the nine row-major coefficients as float32 bit patterns, read
+ * straight out of a tuning-file bank.
  */
 static inline void ar_isp_ccm_pack(u8 *dst, const u32 *bits)
 {
-	unsigned int row;
-
-	for (row = 0; row < 3; row++) {
+	for (unsigned int row = 0; row < 3; row++) {
 		u16 a = ar_isp_f32_q8sm(bits[3 * row + 0]);
 		u16 b = ar_isp_f32_q8sm(bits[3 * row + 1]);
 		u16 c = ar_isp_f32_q8sm(bits[3 * row + 2]);
 
-		ar_isp_colour_put_le32(dst + 8 * row, (u32)a | ((u32)b << 16));
-		ar_isp_colour_put_le32(dst + 8 * row + 4, c);
+		ar_isp_put_le32(dst + 8 * row, (u32)a | ((u32)b << 16));
+		ar_isp_put_le32(dst + 8 * row + 4, c);
 	}
 }
 
@@ -170,10 +155,9 @@ static inline void ar_isp_ccm_from_blob(u8 *dst, const u8 *blob,
 	const u8 *src = blob + AR_ISP_CCM_BLOB_BANKS +
 			bank * AR_ISP_CCM_BLOB_BANK_STRIDE;
 	u32 bits[9];
-	unsigned int i;
 
-	for (i = 0; i < 9; i++)
-		bits[i] = ar_isp_colour_get_le32(src + i * 4);
+	for (unsigned int i = 0; i < 9; i++)
+		bits[i] = ar_isp_get_le32(src + i * 4);
 
 	ar_isp_ccm_pack(dst, bits);
 }

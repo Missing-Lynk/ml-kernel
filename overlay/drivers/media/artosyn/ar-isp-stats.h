@@ -25,6 +25,8 @@
 #ifndef AR_ISP_STATS_H
 #define AR_ISP_STATS_H
 
+#include "ar-isp-bytes.h"
+
 /*
  * RRO: the zone metering engine behind auto-exposure.
  *
@@ -90,14 +92,8 @@
 #define AR_ISP_HIST_LANE_G		1
 #define AR_ISP_HIST_LANE_B		2
 
-static inline u32 ar_isp_stats_get_le32(const u8 *p)
-{
-	return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) |
-	       ((u32)p[3] << 24);
-}
-
 /*
- * The accumulated sum for one zone and channel. @col is 0 to 35 and @row is
+ * The accumulated sum for one zone and channel. col is 0 to 35 and row is
  * 0 to 15, indexing the grid as the hardware lays it out.
  */
 static inline u32 ar_isp_rro_sum(const u8 *buf, unsigned int col,
@@ -105,8 +101,7 @@ static inline u32 ar_isp_rro_sum(const u8 *buf, unsigned int col,
 {
 	const u8 *block = buf + col * AR_ISP_RRO_COL_STRIDE + AR_ISP_RRO_BLOCK;
 
-	return ar_isp_stats_get_le32(block + (row * AR_ISP_RRO_CHANNELS +
-					      channel) * 4);
+	return ar_isp_get_le32(block + (row * AR_ISP_RRO_CHANNELS + channel) * 4);
 }
 
 /*
@@ -117,7 +112,7 @@ static inline u32 ar_isp_rro_sum(const u8 *buf, unsigned int col,
  */
 static inline u32 ar_isp_rro_count(const u8 *buf, unsigned int col)
 {
-	return ar_isp_stats_get_le32(buf + col * AR_ISP_RRO_COL_STRIDE);
+	return ar_isp_get_le32(buf + col * AR_ISP_RRO_COL_STRIDE);
 }
 
 /*
@@ -138,7 +133,7 @@ static inline u32 ar_isp_rro_mean(const u8 *buf, unsigned int col,
 static inline u32 ar_isp_hist_bin(const u8 *buf, unsigned int lane,
 				  unsigned int bin)
 {
-	return ar_isp_stats_get_le32(buf + (bin * AR_ISP_HIST_LANES + lane) * 4);
+	return ar_isp_get_le32(buf + (bin * AR_ISP_HIST_LANES + lane) * 4);
 }
 
 #endif /* AR_ISP_STATS_H */
