@@ -7,10 +7,8 @@
  * 0x472600, so unlike gamma and DRC it has no tuning-file source and no runtime
  * generator. Byte-identical to the page captured off a streaming vendor unit.
  *
- * Only the two regions that carry content are here. The zero span at 0x900 and the
- * repeated unity record from 0x1800 are rebuilt by ar_isp_compander_fill.
- *
- * Source library sha256 4cfc8e6cfb42d8c821137993b95b152f1aaad7c53ce425e6a0493c4dd453936c.
+ * Only the two regions that carry content are here. The zero span at 0x900 and
+ * the repeated unity record from 0x1800 are rebuilt by ar_isp_compander_fill.
  */
 
 #ifndef AR_ISP_COMPANDER_H
