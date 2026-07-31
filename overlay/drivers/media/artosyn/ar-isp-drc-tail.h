@@ -7,8 +7,6 @@
  * service library loads through its ISP-init descriptor array. Neither curve appears
  * in the tuning file in any form, so unlike the first two banks they cannot be
  * generated and are carried here instead.
- *
- * Source library sha256 4cfc8e6cfb42d8c821137993b95b152f1aaad7c53ce425e6a0493c4dd453936c.
  */
 
 #ifndef AR_ISP_DRC_TAIL_H
