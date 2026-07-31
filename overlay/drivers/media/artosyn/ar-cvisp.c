@@ -5,21 +5,14 @@
  * CVISP is the block at 0x08e00000, ISP base + 0x200000. It is absent from the
  * vendor device tree; the name comes from the cvisp_* stack exported by the
  * vendor's unstripped libmpp_service.so. It is not the DTS scaler@08840000 or
- * gdc@08848000, which are different addresses.
- *
- * It matters because in the vendor's design this block, not the ISP, writes
- * frames to DRAM. That resolves the standing contradiction in the ISP work: the
- * ISP is configured to match the vendor register for register, measurably
- * receives pixels, reaches the same master-control value, and still writes
- * nothing. It was never the writer. Every earlier trace had narrowed the tracer
- * window to one block at a time, while the vendor maps all 256 MiB of register
- * space in a single call, so CVISP was driven throughout and never recorded.
+ * gdc@08848000. In the vendor's design this block, not the ISP, writes frames
+ * to DRAM; the ISP feeds it and CVISP owns the output queue.
  *
  * This driver applies the recovered configuration and exposes the output queue.
  * Like ar-isp.c it allocates no buffers and offers no V4L2 interface: the tables
  * carry the vendor's own DRAM addresses and the device tree reserves that range
  * no-map so they can be replayed as they are. That is enough to answer whether
- * the block produces a frame, which is what this driver is for.
+ * the block produces a frame.
  *
  * Cadences, from the trace and reflected in the tables:
  *
@@ -31,15 +24,13 @@
  * Not implemented here:
  *
  *  - Automatic queueing. The vendor rotates the ring once per frame; here it is
- *    driven by hand through debugfs. A first frame needs no rotation at all,
- *    because the setup table leaves ring set 0 armed.
- *  - The interrupt. libmpp_service.so has cvisp_device_irq_process and
- *    cvisp_dispatch_irq, so the block has its own completion path, but the
- *    hardware IRQ number and its acknowledge register are still behind the
- *    vendor's generic event layer. No interrupt is claimed and none is asserted
- *    in the device tree.
+ *    driven by hand through debugfs. A first frame needs no rotation, because
+ *    the setup table leaves ring set 0 armed.
+ *  - The interrupt. The block has its own completion path (cvisp_dispatch_irq
+ *    in libmpp_service.so), but the IRQ number and acknowledge register are
+ *    still behind the vendor's generic event layer. None is claimed.
  *  - A reset line. No CVISP reset write appears in the trace and no reset leaf
- *    has been identified, so none is declared rather than inventing one.
+ *    has been identified, so none is declared.
  *
  * Configuration provenance is in ar-cvisp-defaults.h. See
  * ../../../../docs/camera-stack.md.
@@ -56,9 +47,9 @@
 
 /*
  * Output control. The vendor stages this 0x00800800 -> 0x00800802 -> 0x00800806
- * at the end of setup and never writes it again; bits 1 and 2 are the launch
- * candidates. The staging is embedded in the setup table rather than driven
- * separately, so that the table alone reproduces the vendor's sequence.
+ * at the end of setup and never writes it again; bits 1 and 2 are undecoded.
+ * The staging is embedded in the setup table so the table alone reproduces the
+ * vendor's sequence.
  */
 #define AR_CVISP_CONTROL		0x8000
 
@@ -127,9 +118,7 @@ static const struct {
 static void ar_cvisp_apply(struct ar_cvisp *cv, const struct ar_cvisp_reg *tbl,
 			   size_t n)
 {
-	size_t i;
-
-	for (i = 0; i < n; i++)
+	for (size_t i = 0; i < n; i++)
 		writel(tbl[i].val, cv->base + tbl[i].off);
 }
 
@@ -146,10 +135,9 @@ static void ar_cvisp_arm(struct ar_cvisp *cv, unsigned int slot)
 /*
  * Advance the output queue by one frame, matching the vendor's cadence: a plane
  * triplet every frame, and the tick group once per wrap of the five-slot ring.
- *
- * The vendor runs this from its own completion path. Here it is manual, so the
- * timing is wrong by construction; what it establishes is whether rotation is
- * needed for a second frame at all, not that this is how a driver should do it.
+ * The vendor runs this from its completion path; here it is manual, so the
+ * timing is wrong by construction. It establishes whether rotation is needed
+ * for a second frame, nothing more.
  */
 static void ar_cvisp_queue(struct ar_cvisp *cv)
 {
@@ -162,15 +150,10 @@ static void ar_cvisp_queue(struct ar_cvisp *cv)
 }
 
 /*
- * Apply the whole recovered configuration.
- *
- * The setup table runs in write order and ends with the staged enable, so the
- * block is live once it returns, with ring set 0 armed. The late table is what
- * the vendor writes immediately afterwards, with its first frames already in
- * flight: the arbitration table on page 0x0000 and the channel geometry on page
- * 0x4000. Whether that ordering is required or merely what the vendor's
- * threading produced is not established, which is why the tables are separate
- * and the late one can be held back.
+ * Apply the whole recovered configuration. The setup table ends with the staged
+ * enable, so the block is live once it returns, with ring set 0 armed. The late
+ * table follows with frames already in flight; whether that ordering is
+ * required is not established, which is why it can be held back.
  */
 static void ar_cvisp_configure(struct ar_cvisp *cv, bool late)
 {
@@ -243,9 +226,8 @@ DEFINE_DEBUGFS_ATTRIBUTE(ar_cvisp_queue_fops, ar_cvisp_queue_get,
 static int ar_cvisp_regs_show(struct seq_file *s, void *unused)
 {
 	struct ar_cvisp *cv = s->private;
-	unsigned int i;
 
-	for (i = 0; i < ARRAY_SIZE(ar_cvisp_dump_regs); i++)
+	for (unsigned int i = 0; i < ARRAY_SIZE(ar_cvisp_dump_regs); i++)
 		seq_printf(s, "%-12s 0x%04x 0x%08x\n", ar_cvisp_dump_regs[i].name,
 			   ar_cvisp_dump_regs[i].off,
 			   readl(cv->base + ar_cvisp_dump_regs[i].off));
@@ -271,20 +253,16 @@ static int ar_cvisp_probe(struct platform_device *pdev)
 		return PTR_ERR(cv->base);
 
 	/*
-	 * cgu_rsz_clk, referenced but deliberately NOT enabled by default.
+	 * cgu_rsz_clk, referenced but deliberately NOT enabled by default. The
+	 * vendor never enables it: no clock request in the CVISP path of
+	 * libmpp_service.so, no CGU write in the trace, and stock-A baselines
+	 * read 0x12011100 at 0x0a104014 with gate bit 12 already set by the
+	 * boot firmware.
 	 *
-	 * The evidence says the vendor never enables it: there is no clock
-	 * request anywhere in the CVISP path in libmpp_service.so, the trace
-	 * contains no CGU write for this block, and stock-A baselines read
-	 * 0x12011100 at 0x0a104014 with gate bit 12 already set. The boot
-	 * firmware leaves it on and the vendor inherits it.
-	 *
-	 * Taking ownership would be actively harmful on the way out: the leaf is
+	 * Taking ownership would be harmful on the way out: the leaf is
 	 * gate-modelled, so clk_disable_unprepare on remove would clear a gate
-	 * the boot had set and leave the block unclocked for whatever touches it
-	 * next. Register access with the clock gated hangs the SoC on this
-	 * family. So the reference is kept as an annotated hypothesis, and
-	 * asserting it is opt-in.
+	 * the boot had set, and register access with the clock gated hangs the
+	 * SoC on this family. Asserting it is opt-in.
 	 */
 	cv->clk = devm_clk_get_optional(dev, "rsz");
 	if (IS_ERR(cv->clk))
@@ -308,9 +286,9 @@ static int ar_cvisp_probe(struct platform_device *pdev)
 
 	/*
 	 * Deliberately no register read here. If the clock assumption above is
-	 * wrong, the first access hangs the SoC into a watchdog reset, and a
-	 * probe-time read would make that unavoidable on every boot. Reading
-	 * debugfs regs is the first touch, and it is a deliberate one.
+	 * wrong, the first access hangs the SoC, and a probe-time read would
+	 * make that unavoidable on every boot. Reading debugfs regs is the
+	 * first touch, and it is a deliberate one.
 	 */
 	dev_info(dev, "probed, %zu setup + %zu late registers, %zu ring slots\n",
 		 ARRAY_SIZE(ar_cvisp_setup), ARRAY_SIZE(ar_cvisp_late),
