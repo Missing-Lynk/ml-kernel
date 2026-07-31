@@ -8,9 +8,8 @@
  * userspace; these are the packing formats it uses.
  *
  * Recovered from libmpp_service.so and validated byte-for-byte against buffers
- * captured off a streaming vendor unit. The reference implementations, and the
- * commands that check a candidate against a capture, are glue/isp/gamma-codec.py
- * and glue/isp/drc-codec.py in the wrapper repository.
+ * captured off a streaming vendor unit. Reference implementations and capture
+ * checks: glue/isp/gamma-codec.py and glue/isp/drc-codec.py.
  *
  * Pure data transforms: no register access and no kernel API beyond the integer
  * types, so the same source can be compiled host-side against the captures.
@@ -125,16 +124,13 @@ static inline void ar_isp_put_le16(u8 *p, u16 v)
  *	word3        = 0
  *
  * The last record has no next sample inside the page, so its forward field is
- * passed in as @tail. It is not cosmetic and must not be left zero: the hardware
- * interpolates the top segment of the curve towards it, so a zero there maps the
- * brightest inputs to black. That is not a guess, it is what a bring-up with this
- * field zeroed produced, wrapping every highlight in the frame.
+ * passed in as @tail. It must not be left zero: the hardware interpolates the
+ * top curve segment towards it, and a zero maps the brightest inputs to black
+ * (hardware-observed as every highlight in the frame wrapping).
  */
 static inline void ar_isp_gamma_pack_page(u8 *dst, const u16 *samples, u16 tail)
 {
-	unsigned int i;
-
-	for (i = 0; i < AR_ISP_GAMMA_RECORDS; i++) {
+	for (unsigned int i = 0; i < AR_ISP_GAMMA_RECORDS; i++) {
 		u32 s0 = samples[4 * i + 0] & 0xfff;
 		u32 s1 = samples[4 * i + 1] & 0xfff;
 		u32 s2 = samples[4 * i + 2] & 0xfff;
@@ -159,11 +155,10 @@ static inline void ar_isp_gamma_pack_page(u8 *dst, const u16 *samples, u16 tail)
  * Build one gamma page from the tuning file.
  *
  * The decimation rounds down systematically, by at most 5 counts in 4090 and
- * typically one, always low. That is sub-LSB at the output's precision: a page
- * built this way and the vendor's own captured buffer differ by a mean of 0.047
- * on 8-bit luma, measured in one bring-up.
+ * typically one, always low: sub-LSB at the output's precision (mean 0.047 on
+ * 8-bit luma against the vendor's captured buffer).
  *
- * The clamp is not cosmetic. The hardware reads a transfer curve, and a
+ * The monotonic clamp matters: the hardware reads a transfer curve, and a
  * non-monotonic entry inverts the response over that interval.
  */
 static inline void ar_isp_gamma_from_blob(u8 *dst, const u8 *blob,
@@ -171,23 +166,22 @@ static inline void ar_isp_gamma_from_blob(u8 *dst, const u8 *blob,
 {
 	u16 samples[AR_ISP_GAMMA_SAMPLES];
 	const u8 *curve;
-	unsigned int i;
 	u16 tail;
 
 	curve = blob + AR_ISP_GAMMA_BLOB_OFFSET + index * AR_ISP_GAMMA_BLOB_STRIDE;
 
-	for (i = 0; i < AR_ISP_GAMMA_SAMPLES; i++)
+	for (unsigned int i = 0; i < AR_ISP_GAMMA_SAMPLES; i++)
 		samples[i] = ar_isp_get_le32(curve + i * AR_ISP_GAMMA_DECIMATE * 4) & 0xfff;
 
 	/*
-	 * The sample after the last one. Decimation puts the last stored sample at
-	 * entry 4088, so the next lands past the decimated range; the vendor uses
-	 * the curve's final entry, and matching it reproduces the vendor's own
-	 * forward field of 4093 on both curves we have captures for.
+	 * The sample after the last one. Decimation puts the last stored sample
+	 * at entry 4088, past the decimated range; the vendor uses the curve's
+	 * final entry, which reproduces its forward field of 4093 on both
+	 * captured curves.
 	 */
 	tail = ar_isp_get_le32(curve + (AR_ISP_GAMMA_BLOB_ENTRIES - 1) * 4) & 0xfff;
 
-	for (i = 1; i < AR_ISP_GAMMA_SAMPLES; i++)
+	for (unsigned int i = 1; i < AR_ISP_GAMMA_SAMPLES; i++)
 		if (samples[i] < samples[i - 1])
 			samples[i] = samples[i - 1];
 
@@ -210,16 +204,14 @@ static inline void ar_isp_gamma_from_blob(u8 *dst, const u8 *blob,
  *	sample[2i+2] = word1[31:28] | halfword[8][15:0] << 4
  *	word1[27:8]  = a second complete copy of sample[2i+1]
  *
- * Bytes 10 to 15 are left alone by the vendor packer, which is documented as
- * retaining preloaded template data. Measured across all 256 records of both
- * the static template and a live capture, that retained data is zero, so this
- * writes the whole record and needs no template to copy from.
+ * Bytes 10 to 15 are left alone by the vendor packer, retaining preloaded
+ * template data; that data is zero across all 256 records of both the static
+ * template and a live capture, so this writes the whole record and needs no
+ * template.
  */
 static inline void ar_isp_drc_pack_bank(u8 *dst, const u32 *samples)
 {
-	unsigned int i;
-
-	for (i = 0; i < AR_ISP_DRC_RECORDS; i++) {
+	for (unsigned int i = 0; i < AR_ISP_DRC_RECORDS; i++) {
 		u32 s0 = samples[2 * i + 0] & AR_ISP_DRC_LANE_MAX;
 		u32 s1 = samples[2 * i + 1] & AR_ISP_DRC_LANE_MAX;
 		u32 s2 = samples[2 * i + 2] & AR_ISP_DRC_LANE_MAX;
@@ -247,15 +239,13 @@ static inline void ar_isp_drc_from_blob(u8 *dst, const u8 *blob,
 					unsigned int profile)
 {
 	u32 samples[AR_ISP_DRC_SAMPLES];
-	const u8 *bank;
-	unsigned int b, i;
 
-	for (b = 0; b < 2; b++) {
-		bank = blob + AR_ISP_DRC_BLOB_OFFSET +
-		       profile * AR_ISP_DRC_BLOB_STRIDE +
-		       b * AR_ISP_DRC_BLOB_BANK1;
+	for (unsigned int b = 0; b < 2; b++) {
+		const u8 *bank = blob + AR_ISP_DRC_BLOB_OFFSET +
+				 profile * AR_ISP_DRC_BLOB_STRIDE +
+				 b * AR_ISP_DRC_BLOB_BANK1;
 
-		for (i = 0; i < AR_ISP_DRC_SAMPLES; i++)
+		for (unsigned int i = 0; i < AR_ISP_DRC_SAMPLES; i++)
 			samples[i] = ar_isp_get_le32(bank + i * 4);
 
 		ar_isp_drc_pack_bank(dst + b * AR_ISP_DRC_BANK, samples);
@@ -265,16 +255,14 @@ static inline void ar_isp_drc_from_blob(u8 *dst, const u8 *blob,
 /*
  * floor(f * 2048) for an IEEE-754 single, in integer arithmetic.
  *
- * The kernel has no FPU, and the tuning file stores the lens-shading grid as
- * float32, so the quantisation the vendor performs has to be reproduced from the
- * bit pattern. Truncation rather than rounding is not a guess: rounding matches
- * only 55 of the 100 grid entries against a captured page and truncation matches
- * all 100.
+ * The kernel has no FPU and the tuning file stores the lens-shading grid as
+ * float32, so the vendor's quantisation is reproduced from the bit pattern.
+ * Truncation, not rounding: rounding matches only 55 of the 100 grid entries
+ * against a captured page, truncation all 100.
  *
- * Every entry in that grid is a positive gain between 1 and 4, so the general
- * cases are absent by construction rather than by oversight. Anything outside
- * what the 16-bit field can hold is clamped, which cannot happen for a valid
- * tuning file and exists so a corrupt one cannot write past the field.
+ * Every grid entry is a positive gain between 1 and 4, so the general cases
+ * cannot occur for a valid tuning file; the clamp exists so a corrupt one
+ * cannot write past the 16-bit field.
  */
 static inline u16 ar_isp_f32_scale(u32 bits)
 {
@@ -285,13 +273,14 @@ static inline u16 ar_isp_f32_scale(u32 bits)
 
 	if (bits & 0x80000000)
 		return 0;
+
 	if (shift >= 32)
 		return 0;
+
 	if (shift <= 0)
 		return 0xffff;
 
 	v = mant >> shift;
-
 	return v > 0xffff ? 0xffff : (u16)v;
 }
 
@@ -299,24 +288,23 @@ static inline u16 ar_isp_f32_scale(u32 bits)
  * Build the LSC lens-shading grid from the tuning file.
  *
  * 100 grid points over the frame, packed two to a 16-byte record as a pair of
- * (x, x, y) triplets. The first element of each triplet is stored twice; that
- * duplication is the same redundant overlap field gamma and DRC carry, so the
- * hardware reads it and an encoder has to write it.
+ * (x, x, y) triplets. The duplicated first element is the same redundant
+ * overlap field gamma and DRC carry: the hardware reads it, so an encoder has
+ * to write it.
  *
- * 50 records hold the grid and records 50 and 51 are zero, as are the last four
+ * 50 records hold the grid; records 50 and 51 are zero, as are the last four
  * bytes of every record. Zeroing the region first covers all three.
  *
- * Only region A. The 0x2c0 of scene-adaptive state after it is left alone: it is
- * computed at runtime from image statistics and is not stored anywhere.
+ * Only region A. The 0x2c0 of scene-adaptive state after it is computed at
+ * runtime from image statistics and is not stored anywhere, so it is left
+ * alone.
  */
 static inline void ar_isp_lsc_from_blob(u8 *dst, const u8 *blob)
 {
-	unsigned int i;
-
-	for (i = 0; i < AR_ISP_LSC_REGION_A; i += 4)
+	for (unsigned int i = 0; i < AR_ISP_LSC_REGION_A; i += 4)
 		ar_isp_put_le32(dst + i, 0);
 
-	for (i = 0; i < AR_ISP_LSC_GRID; i++) {
+	for (unsigned int i = 0; i < AR_ISP_LSC_GRID; i++) {
 		u16 x = ar_isp_f32_scale(ar_isp_get_le32(blob + AR_ISP_LSC_BLOB_X + i * 4));
 		u16 y = ar_isp_f32_scale(ar_isp_get_le32(blob + AR_ISP_LSC_BLOB_Y + i * 4));
 		u8 *rec = dst + (i / 2) * 16 + (i % 2) * 6;
@@ -330,28 +318,25 @@ static inline void ar_isp_lsc_from_blob(u8 *dst, const u8 *blob)
 /*
  * Rebuild the compander page from its two carried spans.
  *
- * Unlike gamma and DRC this is not a packing: the vendor installs the page
- * verbatim from a static template and never recomputes it, so there is no curve
- * to encode. What this reconstructs is the part of the page that is constant by
- * structure rather than by content, which is three quarters of it.
+ * Not a packing: the vendor installs the page verbatim from a static template
+ * and never recomputes it, so there is no curve to encode. This reconstructs
+ * the three quarters of the page that is constant by structure.
  *
  * The unity record writes only its first two words; the remaining eight bytes
- * are zero in every one of the 1536 records in the template.
+ * are zero in all 1536 template records.
  */
 static inline void ar_isp_compander_fill(u8 *dst, const u32 *head, const u32 *mid)
 {
-	unsigned int i;
-
-	for (i = 0; i < AR_ISP_COMPANDER_HEAD / 4; i++)
+	for (unsigned int i = 0; i < AR_ISP_COMPANDER_HEAD / 4; i++)
 		ar_isp_put_le32(dst + i * 4, head[i]);
 
-	for (i = AR_ISP_COMPANDER_HEAD; i < AR_ISP_COMPANDER_MID_OFF; i += 4)
+	for (unsigned int i = AR_ISP_COMPANDER_HEAD; i < AR_ISP_COMPANDER_MID_OFF; i += 4)
 		ar_isp_put_le32(dst + i, 0);
 
-	for (i = 0; i < AR_ISP_COMPANDER_MID / 4; i++)
+	for (unsigned int i = 0; i < AR_ISP_COMPANDER_MID / 4; i++)
 		ar_isp_put_le32(dst + AR_ISP_COMPANDER_MID_OFF + i * 4, mid[i]);
 
-	for (i = AR_ISP_COMPANDER_FILL_OFF; i < AR_ISP_COMPANDER_SIZE; i += 16) {
+	for (unsigned int i = AR_ISP_COMPANDER_FILL_OFF; i < AR_ISP_COMPANDER_SIZE; i += 16) {
 		ar_isp_put_le32(dst + i + 0, AR_ISP_COMPANDER_FILL0);
 		ar_isp_put_le32(dst + i + 4, AR_ISP_COMPANDER_FILL1);
 		ar_isp_put_le32(dst + i + 8, 0);
