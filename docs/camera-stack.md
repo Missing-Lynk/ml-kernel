@@ -641,6 +641,8 @@ Validated on hardware with seeding off, so nothing in the "ours" rows came from 
 | second grid (`rro_face_stats`) | `0x6508` | `0x4800` | count 90, matching the vendor exactly |
 | Bayer histogram (`raw_hist_stats`) | `0x600c` | `0x1000` | lanes exactly 518400 / 1036800 / 518400 / 0 |
 
+`de3d`'s three working buffers are allocated and published the same way, at `0x2e3c`/`0x2e44`, `0x2e58`/`0x2e60` and `0x2e80`/`0x2e88`. These are the one case where the driver does not reproduce a vendor value but substitutes storage of its own, and the sizes `0x1db000`, `0xef000` and `0x1db000` are bounds derived from the gaps between the vendor's allocations rather than measured extents. A bring-up with `de3d=1` delivers all 24 markers on all three planes and a frame with no visible artefact, which establishes that the hardware accepts the substitution; a single still frame cannot rule out a temporal artefact, so the bound-derived sizes remain the weakest evidence in this section.
+
 Those histogram lanes are precisely a quarter, a half and a quarter of `1920 x 1080`, with the fourth lane exactly zero, read from a buffer this driver allocated. That is the Bayer population, and it is the strongest single confirmation that the layouts in `ar-isp-stats.h` are right. **AE has a working input.**
 
 **BLC is the first stage that recomputes with gain, which makes it an AE dependency rather than a table.** Sixteen registers on CVISP bank `0x4200`, filled by a verbatim 64-byte copy. The payload is five calibration entries in the tuning file at `0xb4`, selected by a ladder of five float pairs at `0x34`. A gain inside a pair's own range uses that entry alone; a gain between one pair's second bound and the next pair's first bound blends the two across that band:
@@ -668,7 +670,6 @@ Publishing has an ordering requirement that is easy to get wrong and was got wro
 | the `0x1c6c` payload past `0x800` | runtime state, no stored source |
 | LTM's coefficient page (`0x2808`) | **computed per frame**, not a table; see below |
 | `af_stats`, `ltm_stats` buffers | extents now known (`0x1200`, `0x80000`), allocation pending |
-| `de3d`'s three working buffers | implemented behind `de3d=`, off by default until a bring-up runs with it on |
 | 18 further stages | register files, not DMA pages; inventory in `plans/au-isp-module-inventory.md` |
 
 **LTM is not a table and cannot be shipped as a constant.** Measured across two bring-ups of different scenes: both pages are well formed and structurally identical, 64 tiles of a 128-sample `u16` curve at `0x100` stride, every tile monotonic from 0 to a maximum of 1003, all 64 distinct. Between the two scenes **all 64 tiles differ**, 43% of bytes, with a maximum sample delta of 21. So the vendor genuinely recomputes it per frame in response to the scene, and an open LTM has to compute it too. The magnitude is modest, about 2% of range with the curve endpoints fixed, and how much of that is scene difference rather than frame-to-frame noise is not established.

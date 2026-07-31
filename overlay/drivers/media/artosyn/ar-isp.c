@@ -319,15 +319,15 @@ MODULE_PARM_DESC(ccm_bank,
 		 "which tuning-file illuminant bank to install, 0 to 3 (default 0, the traced one)");
 
 /*
- * Off until a bring-up runs with it on. Every other ownership switch here
- * reproduces a value the vendor computes; this one hands the hardware three
- * buffers of our own instead, and the sizes are bounds derived from the gaps
- * between the vendor's allocations rather than measured extents.
+ * Unlike the other ownership switches, this one does not reproduce a value the
+ * vendor computes; it hands the hardware three working buffers of our own. The
+ * sizes are bounds derived from the gaps between the vendor's allocations
+ * rather than measured extents.
  */
-static bool de3d;
+static bool de3d = true;
 module_param(de3d, bool, 0644);
 MODULE_PARM_DESC(de3d,
-		 "own de3d's three working buffers instead of the vendor's (default off)");
+		 "own de3d's three working buffers instead of the vendor's (default on)");
 
 static bool stats = true;
 module_param(stats, bool, 0644);
