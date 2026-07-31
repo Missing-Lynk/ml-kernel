@@ -15,9 +15,6 @@
  *
  * The trace was captured writes-only, so the absence of reads below says nothing
  * about whether the vendor polls this block.
- *
- * Trace: out/au-mmiotrace/wide-sweep.log
- * sha256: 413cc6afb674613d4d7958c70c8aee211a4ca65275b916cedbb12df09192a85c
  */
 
 struct ar_cvisp_reg {
@@ -34,9 +31,8 @@ struct ar_cvisp_bufset {
 /*
  * Setup, in write order with consecutive duplicates collapsed, ending at the
  * output enable. The last entries stage 0x8000 through 0x00800800, 0x00800802,
- * 0x00800806; bits 1 and 2 are the launch candidates and their individual
- * meanings are not decoded. The plane bases this table leaves behind are ring
- * set 0, so applying it alone arms the first frame.
+ * 0x00800806; bits 1 and 2 are undecoded. The plane bases left behind are ring
+ * set 0, so applying this table alone arms the first frame.
  */
 static const struct ar_cvisp_reg ar_cvisp_setup[] = {
 	{ 0x8000, 0x00800800 },
@@ -297,13 +293,11 @@ static const struct ar_cvisp_reg ar_cvisp_setup[] = {
 };
 
 /*
- * The tail the vendor writes just after the enable, in order: the arbitration
- * table on page 0x0000, then per-channel geometry and limits on page 0x4000,
- * then the upper halves of the two tick banks. Page 0x4000 carries 0x780 x 0x438
- * (1920 x 1080), so this stage is not the scaled one.
- *
- * The vendor issues these with frames already in flight. Whether that ordering
- * matters or is just what its threading produced is not established.
+ * The tail written once just after the enable, in order: the arbitration table
+ * on page 0x0000, per-channel geometry and limits on page 0x4000, then the
+ * upper halves of the two tick banks. Page 0x4000 carries 0x780 x 0x438
+ * (1920 x 1080), so this stage is not the scaled one. Lands with frames already
+ * in flight; whether the ordering matters is not established.
  */
 static const struct ar_cvisp_reg ar_cvisp_late[] = {
 	{ 0x807c, 0x08000b33 },
@@ -411,8 +405,8 @@ static const struct ar_cvisp_reg ar_cvisp_late[] = {
 
 /*
  * The output queue: five Y/U/V buffer sets, one triplet written per frame in
- * round robin. The vendor's own DRAM addresses; a driver that allocates its own
- * buffers replaces these and must keep the relative plane spacing.
+ * round robin. Vendor DRAM addresses; a driver allocating its own buffers
+ * replaces these and must keep the relative plane spacing.
  */
 static const struct ar_cvisp_bufset ar_cvisp_ring[] = {
 	{ 0x2834c000, 0x2856a000, 0x285f3000 },
@@ -423,10 +417,8 @@ static const struct ar_cvisp_bufset ar_cvisp_ring[] = {
 };
 
 /*
- * Written once per ring wrap, not once per frame: the vendor issues this group
- * after every fifth triplet. Two banks of four registers, all taking 0x00000100.
- * Purpose undecoded; an acknowledge or a queue re-arm are both consistent with
- * the cadence.
+ * Written once per ring wrap, after every fifth triplet: two banks of four
+ * registers, all taking 0x00000100. Purpose undecoded.
  */
 static const struct ar_cvisp_reg ar_cvisp_tick[] = {
 	{ 0x4600, 0x00000100 },
