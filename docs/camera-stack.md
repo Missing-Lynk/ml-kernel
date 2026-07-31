@@ -746,6 +746,51 @@ The float region past the LSC gate holds sixteen 10x10 grids, not one pair: grou
 
 **CCM lands in registers, not a DMA page.** Both banks are `0x50` bytes: a packed 3x3 matrix at `+0x00`, a second copy at `+0x20`, a zero tail at `+0x40`. A matrix is six words, `{c0|c1<<16, c2, c3|c4<<16, c5, c6|c7<<16, c8}`, each coefficient 16-bit sign-magnitude Q8 with the magnitude truncated toward zero (`fcvtzs #8`; a negative v is encoded `0x8000 + |v|`). At init ccm1 gets an identity pair (template entry 33) and ccm2 gets the vendor's fixed matrix pair (entry 34, word-identical to the traced registers; its tuning gate at `raw + 0x2595c` reads 0, so it never moves). At runtime the AWB path packs an interpolated tuning matrix into ccm1's first copy only: gate `raw + 0x253fc` reads 1, the illuminant ladder is eight kelvins at `raw + 0x25438`, and four of eight matrix slots at `raw + 0x25470` (stride `0x24`, nine float32 row-major) hold data, matching the bank count in the selector block. The traced runtime write is bank 0 packed verbatim, which is the byte-for-byte proof: `scripts/gen-ccm.py` re-packs it and refuses to emit `ar-isp-ccm-init.h` on any mismatch. The packing functions are in `ar-isp-colour.h`. CCM enable is not a bank register: ccm2's enabled path clears bits 25 and 27 of the ISP global control word at `+0x0000` (both already 0 in the live streaming value `0xb0280052`).
 
+### Statistics: the eight per-frame addresses, and the AE input (recovered)
+
+Recovered by static analysis plus the mid-stream captures; no hardware run. The bank-attribution method from the shading and colour work settles the assignment: each `isp_sub_*_stats_creat` registers three handlers, and the second maps the module's bank with the bank offset as an immediate beside its `ar_dev_pa2va` calls.
+
+| # | Register | Module | Bank | What it is |
+| --- | --- | --- | --- | --- |
+| 1, 2 | `0x75a0`, `0x75bc` | `af_stats` | `0x7400` | autofocus, module disabled |
+| 3, 4 | `0x6440`, `0x6474` | `rro_stats` engines 0 and 1 | `0x6400` | **the AE zone grid** |
+| 5 | `0x600c` | `raw_hist_stats` | `0x6000` | **the Bayer histogram** |
+| 6 | `0x280c` | `ltm_stats` | `0x2800` | LTM statistics output |
+| 7 | `0x6508` | `rro_face_stats` | `0x64c8` | a second zone grid, smaller window |
+| 8 | `0x2808` | `ltm` / `gtm2` | `0x2800` | coefficient input, not statistics |
+
+Bank `0x6400` holds **two** independent engines at a `0x34` stride, and `rro_face` at `0x64c8` is a third instance of the same block. The vendor programs all three to the same geometry and points both `0x6400` engines at one buffer, which is why captures 3 and 4 are identical bytes.
+
+**The metering grid is in the hardware registers, not just in the algorithm.** Each engine takes columns at bank`+0x1c`, rows at `+0x20`, frame width at `+0x2c`, height at `+0x34` and the buffer address at `+0x40`. The vendor writes `36`, `16`, `1920`, `1080`. That is the same 36 by 16 the AE code loads, established independently, so `rro_stats` is the AE metering producer.
+
+**The zone buffer is `0x4800` bytes, column major, with the divisor stored inline.** 36 columns of `0x200`: a `0x100` count block then a `0x100` sum block, each 16 zones by 4 channels of `u32`. Every word of a count block holds the same value, the pixels accumulated per zone per channel. Dividing sums by it gives means spanning 4.2 to exactly 255.0, with the maximum exactly `255 * count`, which is what establishes the sums as 8-bit samples rather than the sensor's 10 bits. Channels 1 and 2 track each other across the whole grid while 0 and 3 sit either side, identifying 1 and 2 as the two greens; **which of 0 and 3 is red is not established.** In the reference capture the count is 826 for `rro_stats` and 90 for `rro_face_stats`, so the two engines meter different window sizes. The geometry that yields 826 is not derived here, so read the count from the buffer rather than computing it.
+
+**The raw histogram is 128 bins by 4 lanes, and the lane assignment is exact.** The buffer is `0x1000` with only the first `0x800` written. Lanes 0, 1 and 2 sum to exactly one quarter, one half and one quarter of `1920 * 1080`, which is the Bayer population and identifies them as red, green and blue; lane 3 is always zero. All three together account for every pixel in the frame. Bin width is not pinned down: the capture cannot separate a 10-bit input binned by 8 from any other range leaving the populated bins where they are.
+
+**Three registers are answered negatively, which is still an answer.** `af_stats` bank `0x7400` reads 0 after its last write, so autofocus is off and registers 1 and 2 address a buffer nothing writes; their captures are uninitialised DRAM, as expected for a fixed-focus FPV lens. Register 8 is not statistics at all: `ltm` and `gtm2` both publish their coefficient page to bank`+0x08`, and `ltm_stats` publishes its output to bank`+0x0c` (`str w2, [x21, #12]` with `x21` the bank base), so `0x2808` is the coefficient input and `0x280c` the statistics output, one of each. `awbs_stats` is named (bank `0x6c00`, enabled, geometry registers `36` by `64` at `+0x50`/`+0x54`, buffers `0x6c90` and `0x6d38`) but **its capture shows no statistics structure at any element width tested, so its format is not established**; it feeds AWB, not AE. `rgb_hist_stats` (`0x5c00`) and `rgb_max_stats` (`0x5400`) are never written at all.
+
+**Two vendor modules register under a duplicate name.** `isp_sub_af_stats_creat` stores the name string `isp_sub_rro_stats`, the same pointer `isp_sub_rro_stats_creat` uses, and `isp_sub_derolling_stats_creat` stores `isp_sub_raw_hist_stats`. Bank attribution is unaffected because it comes from the attach handler, but any name-keyed lookup over this module set will collide.
+
+`ar-isp-stats.h` holds the indexing and `scripts/check-stats-layout.py` is the proof: it re-derives both layouts from the captures and fails if the structure, the 255 ceiling or the Bayer populations stop holding.
+
+### LTM: the coefficient page is computed, not stored (recovered)
+
+Static analysis plus the captured page; no hardware run. Bank `0x2800` carries a module control word at `+0x00`, frame dimensions at `+0x04`, the coefficient page at `+0x08` and the `ltm_stats` output at `+0x0c`.
+
+**The page is 64 tiles of a 128-sample transfer curve.** Each curve is `u16` in a `0x100` slot, so the page is exactly `0x4000`. Every curve starts at zero and rises monotonically to just under 1024, a 10-bit output range, and all 64 are distinct. The extent is measured three ways that agree: the captured page holds 64 well-formed curves and turns to unrelated data at exactly `0x4000`, the publish site flushes `0x4000`, and the producer loop writes its tile count times `0x100` into the same buffer. **How the 64 tiles map onto the frame is not established**; an 8x8 grid is the obvious reading and nothing here proves it.
+
+**It has no stored source.** The vendor recomputes the whole page in a SIMD loop at library `0x18a4f8`, which walks a tile count from module state, shifts it by 7 for the sample count and by 8 for the `0x100` slot stride, and writes into the page's DMA buffer. The loop is bracketed by `TIME_START`/`TIME_END` profiling and its output is fanned out by `isp_memcpy` to the second buffer, which is what a per-frame producer looks like. ISP-init template entry 40 (`0x450570`, `0x1000`) holds 16 tiles of exactly the same curve shape, a quarter of a page, but shares only 46% of its bytes with the captured page and tops out at 1023 where the capture tops out at 1003. So the template is a default of the same format and **not** what the hardware is running. **Whether entry 40 seeds the page before the first computation is not established**: the init path memcpys only entry 39, the `0x3c` shared control template, and entry 40 appears in that path only as a logged length.
+
+That makes LTM a 3A-class stage. Reproducing it is a computation over `ltm_stats`, not a table lookup, and it belongs with the exposure and white-balance work rather than with the coefficient generators.
+
+**One producer double buffers it, rather than two modules sharing it.** `ltm` and `gtm2` both publish to `+0x08`, but the trace shows `0x2808` alternating strictly between `0x2b2f8c00` and `0x2b378c00` across all 4571 writes, with `0x280c` written 4573 times over the same span. A strict two-address alternation at one write per frame is double buffering; two independent modules publishing to one descriptor would not produce it.
+
+**The enable bits check out.** The control word at bank`+0x00` settles on `0x00060f70` and is rewritten with that value 917 times. Bits 4 and 11 are both set in it, and the value it passes through on the way, `0x00060770`, has bit 4 but not bit 11. That confirms the earlier claim about bits 4 and 11 against the trace rather than against the module code alone.
+
+**Buffer extents, from the vendor's allocation layout.** Each descriptor alternates between two addresses and the gap between them is the allocation: the LTM page and `ltm_stats` are both `0x80000`, `rro_stats` and `rro_face_stats` `0x8000`, `raw_hist_stats` `0x1000`, and `af_stats` `0x1200`. These are what the vendor allocates, not what it fills; the LTM page fills `0x4000` of its `0x80000` and the histogram fills `0x800` of its `0x1000`.
+
+`ar-isp-ltm.h` holds the geometry, the extents and an identity-page filler; `scripts/check-ltm-page.py` proves the geometry against the capture and reports the template divergence.
+
 ### ml-isploop flags
 
 `--cvisp` rotates the CVISP ring once per frame start and does **not** drive the per-frame ISP cycle. That is the combination recorded above as sustaining. The cycle is opt-in behind `--isp-cycle`; briefly folding it into `--cvisp` silently changed the behaviour of every existing caller.
