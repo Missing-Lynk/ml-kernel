@@ -22,7 +22,7 @@
  * The view path this driver arms is NOT how the vendor captures. A write trace
  * of the streaming vendor shows it configures the views, then sets the per-view
  * reset at 0x2bc and captures every frame through the ISP instead, re-arming an
- * ISP buffer pair from its own frame handler. Our view DMA has never written a
+ * ISP buffer pair from its own frame handler. The view DMA has never written a
  * byte to DDR. See ../../../../docs/camera-stack.md for the vendor sequence.
  */
 
@@ -70,11 +70,16 @@
 #define AR_VIF_VIEW_FIFO_BURST(v)	(0x25c + (v) * 4)
 #define AR_VIF_INTR_STATUS		0x1b0
 
-/* Bypass-path interrupt status, write-1-to-clear: the vendor acknowledges by
- * writing the read value back. Pairs with the bypass mask at 0x178. Reading it
- * requires the AXI clock: a read with the clock gated hangs the SoC.
+/* Bypass-path interrupt status words, write-1-to-clear: the vendor acknowledges
+ * by writing the read value back. Each pairs with a mask, 0x17c with 0x178 and
+ * 0x184 with 0x180. Reading them requires the AXI clock: a read with the clock
+ * gated hangs the SoC.
  */
 #define AR_VIF_BP_INTR_STATUS		0x17c
+#define AR_VIF_BP_INTR_STATUS_B		0x184
+#define AR_VIF_INTR_MASK_A		0x178
+#define AR_VIF_INTR_MASK_B		0x180
+#define AR_VIF_BP_VIEW_FULL(v)		BIT(2 + (v))
 
 /* Input-path format select in the ISP-input stage; the streaming vendor holds
  * 5 here while the init table's value is 0x27.
@@ -94,7 +99,6 @@
  * vendor strobes it after writing the stride.
  */
 #define AR_VIF_STRIDE_COMMIT		BIT(30)
-#define AR_VIF_SW_RESET			0x2bc
 
 /* Front-end input configuration. The vendor library calls this group the ISP
  * path, but it is the shared VIF input stage: it is programmed whether or not
@@ -162,44 +166,9 @@
 #define AR_VIF_VIEW_FRAME_BP(v)		(0x280 + (v) * 4)
 #define AR_VIF_FRAME_BP_COMMIT		BIT(30)
 
-/*
- * One-time block initialisation, transcribed from the vendor's own table (a
- * list of offset/value pairs walked by its vif_reg_init). This is separate
- * from the per-capture configuration below: the vendor applies it when its
- * driver loads, not when a capture starts.
- *
- * It was missed by the register diff that produced the per-capture constants,
- * because that diff compared a streaming vendor stack against an idle one on
- * the same kernel, where this had already been applied in both. Without it the
- * front end accepts no data: the line counters never advance and the CSI-2
- * receiver's IPI output backs up and reports an error.
- */
-struct ar_vif_init_reg {
-	u16 offset;
-	u32 value;
-};
-
-static const struct ar_vif_init_reg ar_vif_init_table[] = {
-	{ 0x0c0, 0x00000188 }, { 0x0c4, 0x00640064 }, { 0x0c8, 0x00002c2c },
-	{ 0x0cc, 0xaaaaaaac }, { 0x0d0, 0xaaaaaaaa }, { 0x0d4, 0x07800438 },
-	{ 0x0d8, 0x07800438 }, { 0x0dc, 0x02800280 }, { 0x0e0, 0x000000d6 },
-	{ 0x0e4, 0x00320032 }, { 0x0e8, 0x00000200 }, { 0x0ec, 0x00008000 },
-	{ 0x0f0, 0xffffffff }, { 0x13c, 0x00020002 }, { 0x190, 0x00000101 },
-	{ 0x1c0, 0x00000822 }, { 0x1c4, 0x08020010 }, { 0x1c8, 0x00000001 },
-	{ 0x1d0, 0x00000027 }, { 0x328, 0x00000002 },
-	{ 0x140, 0x86018060 }, { 0x144, 0x0c0300c0 },
-	{ 0x148, 0x86018060 }, { 0x14c, 0x0c0300c0 },
-	{ 0x150, 0x86018060 }, { 0x154, 0x0c0300c0 },
-	{ 0x158, 0x86018060 }, { 0x15c, 0x0c0300c0 },
-};
-
 /* Registers touched by the post-init and AXI-enable steps. */
 #define AR_VIF_SOFT_RESET		0x2bc
 #define AR_VIF_FRAME_CTRL		0x2b0
-#define AR_VIF_INTR_MASK_A		0x178
-#define AR_VIF_INTR_MASK_B		0x180
-#define AR_VIF_INTR_CLEAR_A		0x17c
-#define AR_VIF_INTR_CLEAR_B		0x184
 #define AR_VIF_BLOCK_ENABLE		0x194
 #define AR_VIF_AXI_CONFIG		0x190
 #define AR_VIF_LINE_INTR_CLEAR		0x420
@@ -271,6 +240,73 @@ static const struct ar_vif_init_reg ar_vif_init_table[] = {
 /* 12-bit Bayer arrives unpacked into 16-bit containers. */
 #define AR_VIF_BYTES_PER_PIXEL		2
 
+/* Input-pipe registers, written around the FIFO reset in the post-init step. */
+#define AR_VIF_INPUT_PIPE_PRESET	0x13c
+#define AR_VIF_INPUT_PIPE_CTRL		0x1c0
+#define AR_VIF_INPUT_PIPE_CONFIG	0x1c4
+#define AR_VIF_INPUT_PIPE_MODE		0x1c8
+
+/* RGB2YUV coefficient and clip bank for the bypass views, seven words. */
+#define AR_VIF_RGB2YUV(n)		(0x090 + (n) * 4)
+
+/* ISP-interface enable, in the line-buffer cluster. Bit1 gates the front end
+ * into the ISP path and is released after the view is armed.
+ */
+#define AR_VIF_ISPIF_ENABLE		0x328
+#define AR_VIF_ISPIF_RUN		BIT(1)
+
+/* Path 0 test pattern generator. */
+#define AR_VIF_TEST_PATTERN		0x0f4
+#define AR_VIF_TEST_PATTERN_ENABLE	BIT(0)
+
+/* ISP-path status registers sampled by the event census. */
+#define AR_VIF_ISP_PROBES		4
+
+/* Status polling interval. Frames arrive at 60 Hz, so this samples every
+ * frame several times over without meaningful cost.
+ */
+#define AR_VIF_POLL_INTERVAL_MS		4
+
+/*
+ * One-time block initialisation, transcribed from the vendor's own table (a
+ * list of offset/value pairs walked by its vif_reg_init). This is separate
+ * from the per-capture configuration below: the vendor applies it when its
+ * driver loads, not when a capture starts.
+ *
+ * It was missed by the register diff that produced the per-capture constants,
+ * because that diff compared a streaming vendor stack against an idle one on
+ * the same kernel, where this had already been applied in both. Without it the
+ * front end accepts no data: the line counters never advance and the CSI-2
+ * receiver's IPI output backs up and reports an error.
+ */
+struct ar_vif_init_reg {
+	u16 offset;
+	u32 value;
+};
+
+static const struct ar_vif_init_reg ar_vif_init_table[] = {
+	{ 0x0c0, 0x00000188 }, { 0x0c4, 0x00640064 }, { 0x0c8, 0x00002c2c },
+	{ 0x0cc, 0xaaaaaaac }, { 0x0d0, 0xaaaaaaaa }, { 0x0d4, 0x07800438 },
+	{ 0x0d8, 0x07800438 }, { 0x0dc, 0x02800280 }, { 0x0e0, 0x000000d6 },
+	{ 0x0e4, 0x00320032 }, { 0x0e8, 0x00000200 }, { 0x0ec, 0x00008000 },
+	{ 0x0f0, 0xffffffff }, { 0x13c, 0x00020002 }, { 0x190, 0x00000101 },
+	{ 0x1c0, 0x00000822 }, { 0x1c4, 0x08020010 }, { 0x1c8, 0x00000001 },
+	{ 0x1d0, 0x00000027 }, { 0x328, 0x00000002 },
+	{ 0x140, 0x86018060 }, { 0x144, 0x0c0300c0 },
+	{ 0x148, 0x86018060 }, { 0x14c, 0x0c0300c0 },
+	{ 0x150, 0x86018060 }, { 0x154, 0x0c0300c0 },
+	{ 0x158, 0x86018060 }, { 0x15c, 0x0c0300c0 },
+};
+
+/* RGB2YUV coefficients and clip values the running vendor block holds. The
+ * block default clip of 0 differs from the running vendor value, and the output
+ * stage first showed completion status on hardware only once these matched.
+ */
+static const u32 ar_vif_rgb2yuv[] = {
+	0x0027403f, 0x001c10bb, 0x00f98ea5, 0x00e67fd7,
+	0x000001c1, 0x00000104, 0xc0f00eb0,
+};
+
 /*
  * Frame completion source. The frame-done interrupt's status and acknowledge
  * bits are not fully understood, and the line is level triggered: a handler
@@ -300,14 +336,15 @@ static u32 census_or[3];
 static u32 census_nonzero;
 static u32 census_polls;
 
+
 /* ISP-path status registers. The vendor's vif_ispintr_process reads 0x104 and
  * 0x108 for specific status bits, and 0x10c plus 0x110 on the ISP frame event
  * (bit 24), discarding all of them. Nothing in 0x104-0x138 is ever written by
  * the vendor, so these are read-only and sampling them cannot perturb the
  * block.
  *
- * They are the only visibility we have into whether pixels cross from the VIF
- * front end into the ISP, a hop that frame-start delimiters do not prove.
+ * They are the only visibility into whether pixels cross from the VIF front end
+ * into the ISP, a hop that frame-start delimiters do not prove.
  * Whether they are clear-on-read or free-running is unestablished, so each is
  * read twice per poll and both values kept: a clear-on-read register reports
  * the accumulation since the previous poll and then near zero, while a
@@ -317,8 +354,6 @@ static u32 census_polls;
  * dev_info_ratelimited() evaluates its arguments only when the rate limiter
  * admits the message, which would make the sample interval irregular.
  */
-#define AR_VIF_ISP_PROBES	4
-
 static const u16 ar_vif_isp_probe_reg[AR_VIF_ISP_PROBES] = {
 	0x104, 0x108, 0x10c, 0x110
 };
@@ -327,8 +362,8 @@ static u32 census_isp_or[AR_VIF_ISP_PROBES];
 static u64 census_isp_sum[AR_VIF_ISP_PROBES];
 static u32 census_isp_last[AR_VIF_ISP_PROBES][2];
 
-/* Path 0 test pattern generator (0xf4 bit0): frames are fabricated inside the
- * block, independent of the sensor and receiver. Isolates the view DMA path.
+/* Path 0 test pattern generator: frames are fabricated inside the block,
+ * independent of the sensor and receiver. Isolates the view DMA path.
  */
 static bool test_pattern;
 module_param(test_pattern, bool, 0444);
@@ -343,7 +378,7 @@ static int view_format = -1;
 module_param(view_format, int, 0444);
 MODULE_PARM_DESC(view_format, "override view-control videoformat nibble [6:3] (-1 keeps 0xc068, 4 is plain RAW12)");
 
-/* The A-vs-B input-statistics measurement shows our bypass path delivers
+/* The A-vs-B input-statistics measurement shows the bypass path delivers
  * lines three times the vendor's clock count from bit-identical input:
  * unpacked pixels into a view configured for packed 3-pixel groups
  * (videoformat 13, geometry in width/3 units). With unpacked set, the view
@@ -379,11 +414,6 @@ MODULE_PARM_DESC(view_th, "program the per-view threshold nibbles instead of lea
 static bool trace_writes;
 module_param(trace_writes, bool, 0444);
 MODULE_PARM_DESC(trace_writes, "log every register write in order");
-
-/* Status polling interval. Frames arrive at 60 Hz, so this samples every
- * frame several times over without meaningful cost.
- */
-#define AR_VIF_POLL_INTERVAL_MS		4
 
 struct ar_vif_buffer {
 	struct vb2_v4l2_buffer vb;
@@ -442,12 +472,12 @@ static u32 ar_vif_read(struct ar_vif *vif, u32 offset)
 	return readl(vif->base + offset);
 }
 
-/* ar_vif_arm_buffer - point the view at a frame buffer.
+/* Point the view at a frame buffer.
  *
- * The address registers are consumed at the frame latch, so this must be
- * called once per frame. The vendor pulses the view-control latch bit only on
- * the initial arm; per-frame re-arms write the addresses alone and the
- * hardware latches them at the next frame boundary.
+ * The address registers are consumed at the frame latch, so this must be called
+ * once per frame. The vendor pulses the view-control latch bit only on the
+ * initial arm; per-frame re-arms write the addresses alone and the hardware
+ * latches them at the next frame boundary.
  */
 static void ar_vif_arm_buffer(struct ar_vif *vif, dma_addr_t addr, bool pulse)
 {
@@ -466,7 +496,7 @@ static void ar_vif_arm_buffer(struct ar_vif *vif, dma_addr_t addr, bool pulse)
 	ar_vif_write(vif, AR_VIF_VIEW_CONTROL(AR_VIF_VIEW), control);
 }
 
-/* ar_vif_update - read-modify-write, clearing then setting the given bits. */
+/* Read-modify-write, clearing then setting the given bits. */
 static void ar_vif_update(struct ar_vif *vif, u32 offset, u32 clear, u32 set)
 {
 	u32 value = ar_vif_read(vif, offset);
@@ -475,7 +505,7 @@ static void ar_vif_update(struct ar_vif *vif, u32 offset, u32 clear, u32 set)
 }
 
 /*
- * ar_vif_global_init - the block's one-time initialisation.
+ * The block's one-time initialisation.
  *
  * Reproduces the vendor's vif_reg_init table walk, then its vif_reg_init_post
  * sequence, then vif_axi_config, then the block enable that vif_init writes
@@ -484,11 +514,7 @@ static void ar_vif_update(struct ar_vif *vif, u32 offset, u32 clear, u32 set)
  */
 static void ar_vif_global_init(struct ar_vif *vif)
 {
-	unsigned int i;
-	unsigned int view;
-	u32 value;
-
-	for (i = 0; i < ARRAY_SIZE(ar_vif_init_table); i++) {
+	for (unsigned int i = 0; i < ARRAY_SIZE(ar_vif_init_table); i++) {
 		ar_vif_write(vif, ar_vif_init_table[i].offset,
 			     ar_vif_init_table[i].value);
 	}
@@ -504,8 +530,8 @@ static void ar_vif_global_init(struct ar_vif *vif)
 	ar_vif_update(vif, AR_VIF_VIEW_STABLE_CHECK, 0x0000ffff, 0);
 
 	ar_vif_write(vif, AR_VIF_VIEW_MUX, 0xffffffff);
-	ar_vif_write(vif, AR_VIF_INTR_CLEAR_A, 0xffffffff);
-	ar_vif_write(vif, AR_VIF_INTR_CLEAR_B, 0xffffffff);
+	ar_vif_write(vif, AR_VIF_BP_INTR_STATUS, 0xffffffff);
+	ar_vif_write(vif, AR_VIF_BP_INTR_STATUS_B, 0xffffffff);
 
 	ar_vif_write(vif, AR_VIF_BLOCK_ENABLE, 0x0000ffff);
 	ar_vif_write(vif, AR_VIF_BLOCK_ENABLE, 0x000000ff);
@@ -519,27 +545,17 @@ static void ar_vif_global_init(struct ar_vif *vif)
 	ar_vif_write(vif, AR_VIF_INTR_MASK_A, 0xc0000000);
 	ar_vif_write(vif, AR_VIF_INTR_MASK_B, 0x00080000);
 
-	/* RGB2YUV coefficient and clip bank for the bypass views. The block
-	 * default clip of 0 differs from the running vendor value, and the
-	 * output stage first showed completion status on hardware only once
-	 * these matched the running block.
-	 */
-	ar_vif_write(vif, 0x090, 0x0027403f);
-	ar_vif_write(vif, 0x094, 0x001c10bb);
-	ar_vif_write(vif, 0x098, 0x00f98ea5);
-	ar_vif_write(vif, 0x09c, 0x00e67fd7);
-	ar_vif_write(vif, 0x0a0, 0x000001c1);
-	ar_vif_write(vif, 0x0a4, 0x00000104);
-	ar_vif_write(vif, 0x0a8, 0xc0f00eb0);
+	for (unsigned int i = 0; i < ARRAY_SIZE(ar_vif_rgb2yuv); i++)
+		ar_vif_write(vif, AR_VIF_RGB2YUV(i), ar_vif_rgb2yuv[i]);
 
 	/* Input-pipe transient writes, issued between the init table and the
 	 * FIFO reset. The 0x1c0 bit31 write is a pulse: the running block reads
 	 * 0x822 and 0x1 here, and those values are restored below. 0x1d0 stays
 	 * at 0x22 until the capture configuration selects the input format.
 	 */
-	ar_vif_write(vif, 0x13c, 0x00020002);
-	ar_vif_write(vif, 0x1c0, 0x80000000);
-	ar_vif_update(vif, 0x1c8, 0x0000ffff, 0x00000020);
+	ar_vif_write(vif, AR_VIF_INPUT_PIPE_PRESET, 0x00020002);
+	ar_vif_write(vif, AR_VIF_INPUT_PIPE_CTRL, 0x80000000);
+	ar_vif_update(vif, AR_VIF_INPUT_PIPE_MODE, 0x0000ffff, 0x00000020);
 	ar_vif_update(vif, AR_VIF_INPUT_FORMAT_SELECT, 0x000000ff, 0x00000022);
 
 	/* Reset every view's output FIFO with a bit31 set-then-clear pulse.
@@ -547,8 +563,9 @@ static void ar_vif_global_init(struct ar_vif *vif)
 	 * the init table, and a view whose output FIFO was never reset accepts
 	 * input yet writes nothing to DDR.
 	 */
-	for (view = 0; view < 8; view++) {
-		value = ar_vif_read(vif, AR_VIF_VIEW_FIFO_BURST(view));
+	for (unsigned int view = 0; view < 8; view++) {
+		u32 value = ar_vif_read(vif, AR_VIF_VIEW_FIFO_BURST(view));
+
 		ar_vif_write(vif, AR_VIF_VIEW_FIFO_BURST(view),
 			     value | BIT(31));
 		ar_vif_write(vif, AR_VIF_VIEW_FIFO_BURST(view),
@@ -560,9 +577,9 @@ static void ar_vif_global_init(struct ar_vif *vif)
 	 * table value does not survive to a streaming readout) and reads
 	 * 0x08020010 on the running block.
 	 */
-	ar_vif_write(vif, 0x1c0, 0x00000822);
-	ar_vif_write(vif, 0x1c4, 0x08020010);
-	ar_vif_write(vif, 0x1c8, 0x00000001);
+	ar_vif_write(vif, AR_VIF_INPUT_PIPE_CTRL, 0x00000822);
+	ar_vif_write(vif, AR_VIF_INPUT_PIPE_CONFIG, 0x08020010);
+	ar_vif_write(vif, AR_VIF_INPUT_PIPE_MODE, 0x00000001);
 
 	ar_vif_write(vif, AR_VIF_EXTRA_INTR_CLEAR, 0);
 	ar_vif_write(vif, AR_VIF_LINE_INTR_CLEAR, 0);
@@ -590,7 +607,7 @@ static void ar_vif_global_init(struct ar_vif *vif)
 		 ar_vif_read(vif, 0x140));
 }
 
-/* ar_vif_configure - program the front end and view 0 for the current format. */
+/* Program the front end and view 0 for the current format. */
 static void ar_vif_configure(struct ar_vif *vif)
 {
 	u32 width = vif->format.width;
@@ -724,7 +741,8 @@ static void ar_vif_configure(struct ar_vif *vif)
 	ar_vif_write(vif, AR_VIF_FE_INTR_MASK, 0xffffffff);
 
 	if (test_pattern) {
-		ar_vif_update(vif, 0x0f4, 0, BIT(0));
+		ar_vif_update(vif, AR_VIF_TEST_PATTERN, 0,
+			      AR_VIF_TEST_PATTERN_ENABLE);
 		dev_info(vif->dev, "path 0 test pattern enabled\n");
 	}
 }
@@ -732,8 +750,6 @@ static void ar_vif_configure(struct ar_vif *vif)
 static void ar_vif_stop(struct ar_vif *vif)
 {
 	if (event_census) {
-		unsigned int i;
-
 		dev_info(vif->dev,
 			 "census summary: bp-or 0x%08x intr-or 0x%08x w184-or 0x%08x (%u nonzero of %u polls)\n",
 			 census_or[0], census_or[1], census_or[2],
@@ -742,7 +758,7 @@ static void ar_vif_stop(struct ar_vif *vif)
 		/* An all-zero sum on every probe means nothing crossed into the
 		 * ISP path for the whole session, whatever the registers count.
 		 */
-		for (i = 0; i < AR_VIF_ISP_PROBES; i++)
+		for (unsigned int i = 0; i < AR_VIF_ISP_PROBES; i++)
 			dev_info(vif->dev,
 				 "census isp 0x%03x: or 0x%08x sum %llu last 0x%08x/0x%08x\n",
 				 ar_vif_isp_probe_reg[i], census_isp_or[i],
@@ -769,7 +785,7 @@ static void ar_vif_stop(struct ar_vif *vif)
 	 */
 	ar_vif_update(vif, AR_VIF_FE_CONTROL, BIT(8), 0);
 	ar_vif_update(vif, AR_VIF_FE_EXTRA, BIT(15), 0);
-	ar_vif_update(vif, 0x328, BIT(1), 0);
+	ar_vif_update(vif, AR_VIF_ISPIF_ENABLE, AR_VIF_ISPIF_RUN, 0);
 
 	/* Stop the AXI master and assert the block reset so no write is
 	 * outstanding on the interconnect when the clock gates. An armed view
@@ -783,7 +799,7 @@ static void ar_vif_stop(struct ar_vif *vif)
 	ar_vif_update(vif, AR_VIF_SOFT_RESET, BIT(0), 0);
 }
 
-/* ar_vif_frame_done - complete the active buffer and arm the next one.
+/* Complete the active buffer and arm the next one.
  *
  * Shared by the polling work item and the interrupt handler. The caller has
  * already established that a frame completed.
@@ -823,7 +839,7 @@ static void ar_vif_frame_done(struct ar_vif *vif)
 	}
 }
 
-/* ar_vif_poll_work - detect completed frames and hand them to vb2.
+/* Detect completed frames and hand them to vb2.
  *
  * The default completion path. Completion is signalled by the W1C status at
  * 0x17c: bit view is view frame done, bit 8 + view is frame stable. The
@@ -862,20 +878,18 @@ static void ar_vif_poll_work(struct work_struct *work)
 	if (intr_status)
 		ar_vif_write(vif, AR_VIF_INTR_STATUS, intr_status);
 
-	/* Second status word: on view full (bit 2 + view), recover the view's
-	 * output FIFO with the bit31 pulse, as the vendor handler does.
+	/* Second status word: on view full, recover the view's output FIFO with
+	 * the bit31 pulse, as the vendor handler does.
 	 */
-	view_full = ar_vif_read(vif, 0x184);
+	view_full = ar_vif_read(vif, AR_VIF_BP_INTR_STATUS_B);
 
 	if (event_census) {
-		unsigned int i;
-
 		census_polls++;
 		census_or[0] |= bp_status;
 		census_or[1] |= intr_status;
 		census_or[2] |= view_full;
 
-		for (i = 0; i < AR_VIF_ISP_PROBES; i++) {
+		for (unsigned int i = 0; i < AR_VIF_ISP_PROBES; i++) {
 			u32 first = ar_vif_read(vif, ar_vif_isp_probe_reg[i]);
 			u32 second = ar_vif_read(vif, ar_vif_isp_probe_reg[i]);
 
@@ -898,8 +912,8 @@ static void ar_vif_poll_work(struct work_struct *work)
 	}
 
 	if (view_full) {
-		ar_vif_write(vif, 0x184, view_full);
-		if (view_full & BIT(2 + AR_VIF_VIEW)) {
+		ar_vif_write(vif, AR_VIF_BP_INTR_STATUS_B, view_full);
+		if (view_full & AR_VIF_BP_VIEW_FULL(AR_VIF_VIEW)) {
 			u32 fifo = ar_vif_read(vif,
 					AR_VIF_VIEW_FIFO_BURST(AR_VIF_VIEW));
 
@@ -929,7 +943,7 @@ static void ar_vif_poll_work(struct work_struct *work)
 			      msecs_to_jiffies(AR_VIF_POLL_INTERVAL_MS));
 }
 
-/* ar_vif_irq - frame done, from the interrupt. Only used when use_irq is set. */
+/* Frame done, from the interrupt. Only used when use_irq is set. */
 static irqreturn_t ar_vif_irq(int irq, void *data)
 {
 	struct ar_vif *vif = data;
@@ -996,7 +1010,7 @@ static void ar_vif_buffer_queue(struct vb2_buffer *vb)
 	spin_unlock_irqrestore(&vif->buffer_lock, flags);
 }
 
-/* ar_vif_return_buffers - hand every queued buffer back in the given state. */
+/* Hand every queued buffer back in the given state. */
 static void ar_vif_return_buffers(struct ar_vif *vif, enum vb2_buffer_state state)
 {
 	struct ar_vif_buffer *buf;
@@ -1059,7 +1073,7 @@ static int ar_vif_start_streaming(struct vb2_queue *q, unsigned int count)
 	 * to this point (the running block reads 0x08020010), while a write
 	 * made this late holds.
 	 */
-	ar_vif_write(vif, 0x1c4, 0x08020010);
+	ar_vif_write(vif, AR_VIF_INPUT_PIPE_CONFIG, 0x08020010);
 
 	/* The vendor's arming sequence: re-assert the frame-end check, strobe
 	 * the frame-backpressure commit, latch the first buffer, then write the
@@ -1101,7 +1115,7 @@ static int ar_vif_start_streaming(struct vb2_queue *q, unsigned int count)
 	ar_vif_update(vif, AR_VIF_FE_INTR_MASK, 0, BIT(0));
 	ar_vif_write(vif, AR_VIF_FE_CONTROL, AR_VIF_FE_CONTROL_VALUE);
 	ar_vif_write(vif, AR_VIF_FE_EXTRA, AR_VIF_FE_EXTRA_VALUE);
-	ar_vif_update(vif, 0x328, 0, BIT(1));
+	ar_vif_update(vif, AR_VIF_ISPIF_ENABLE, 0, AR_VIF_ISPIF_RUN);
 
 	/* The completion path is armed only now, with the block configured and
 	 * its clock running.
@@ -1191,12 +1205,11 @@ static int ar_vif_enum_fmt(struct file *file, void *priv,
 	return 0;
 }
 
-/* ar_vif_sync_format - adopt the source subdev's active frame size.
+/* Adopt the source subdev's active frame size.
  *
  * The pipeline has no userspace format negotiation: the sensor mode is chosen
- * by driver logic or a module parameter, so the capture geometry has to be
- * pulled from the source rather than assumed. A source that cannot answer
- * leaves the current format in place.
+ * by driver logic or a module parameter, so the capture geometry is pulled from
+ * the source. A source that cannot answer leaves the current format in place.
  */
 static void ar_vif_sync_format(struct ar_vif *vif)
 {
@@ -1272,7 +1285,7 @@ static const struct v4l2_file_operations ar_vif_fops = {
 	.mmap = vb2_fop_mmap,
 };
 
-/* ar_vif_notify_bound - the CSI-2 receiver has appeared; remember it.
+/* The CSI-2 receiver has appeared; remember it.
  *
  * The link to our video device cannot be created here: the video device's
  * entity is only registered with the media device by video_register_device,
@@ -1310,7 +1323,7 @@ static void ar_vif_notify_unbind(struct v4l2_async_notifier *notifier,
 	vif->source = NULL;
 }
 
-/* ar_vif_notify_complete - every subdev is present; expose the video node. */
+/* Every subdev is present; expose the video node. */
 static int ar_vif_notify_complete(struct v4l2_async_notifier *notifier)
 {
 	struct ar_vif *vif = container_of(notifier, struct ar_vif, notifier);
@@ -1407,6 +1420,13 @@ static void ar_vif_set_default_format(struct ar_vif *vif)
 	vif->format.sizeimage = vif->format.bytesperline * AR_VIF_HEIGHT;
 }
 
+/* Undo the v4l2 and media device registration, in reverse order. */
+static void ar_vif_unregister_devices(struct ar_vif *vif)
+{
+	v4l2_device_unregister(&vif->v4l2_dev);
+	media_device_cleanup(&vif->media_dev);
+}
+
 static int ar_vif_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1476,8 +1496,10 @@ static int ar_vif_probe(struct platform_device *pdev)
 	dev_info(dev, "probe: registering the v4l2 device\n");
 
 	ret = v4l2_device_register(dev, &vif->v4l2_dev);
-	if (ret)
-		goto error_media;
+	if (ret) {
+		media_device_cleanup(&vif->media_dev);
+		return ret;
+	}
 
 	q = &vif->queue;
 	q->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -1492,8 +1514,10 @@ static int ar_vif_probe(struct platform_device *pdev)
 	q->min_queued_buffers = 2;
 
 	ret = vb2_queue_init(q);
-	if (ret)
-		goto error_v4l2;
+	if (ret) {
+		ar_vif_unregister_devices(vif);
+		return ret;
+	}
 
 	vif->video_dev.fops = &ar_vif_fops;
 	vif->video_dev.ioctl_ops = &ar_vif_ioctl_ops;
@@ -1513,39 +1537,33 @@ static int ar_vif_probe(struct platform_device *pdev)
 	vif->video_dev.entity.pads = devm_kzalloc(dev, sizeof(struct media_pad),
 						  GFP_KERNEL);
 	if (!vif->video_dev.entity.pads) {
-		ret = -ENOMEM;
-		goto error_v4l2;
+		ar_vif_unregister_devices(vif);
+		return -ENOMEM;
 	}
 
 	vif->video_dev.entity.pads[0].flags = MEDIA_PAD_FL_SINK;
 
 	ret = media_entity_pads_init(&vif->video_dev.entity, 1,
 				     vif->video_dev.entity.pads);
-	if (ret)
-		goto error_v4l2;
+	if (ret) {
+		ar_vif_unregister_devices(vif);
+		return ret;
+	}
 
 	dev_info(dev, "probe: registering the async notifier for the source\n");
 
 	ret = ar_vif_register_source(vif);
-	if (ret)
-		goto error_entity;
+	if (ret) {
+		media_entity_cleanup(&vif->video_dev.entity);
+		ar_vif_unregister_devices(vif);
+		return ret;
+	}
 
 	dev_info(dev, "probe: complete\n");
 
 	platform_set_drvdata(pdev, vif);
 
 	return 0;
-
-error_entity:
-	media_entity_cleanup(&vif->video_dev.entity);
-
-error_v4l2:
-	v4l2_device_unregister(&vif->v4l2_dev);
-
-error_media:
-	media_device_cleanup(&vif->media_dev);
-
-	return ret;
 }
 
 static void ar_vif_remove(struct platform_device *pdev)
