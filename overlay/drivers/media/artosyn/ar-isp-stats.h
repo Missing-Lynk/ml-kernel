@@ -15,8 +15,8 @@
  *
  * Module-to-bank attribution comes from each isp_sub_*_creat's second
  * registered handler, which maps the module's bank with the bank offset as an
- * immediate beside its ar_dev_pa2va calls. The runnable proof of everything
- * here is kernel/scripts/check-stats-layout.py.
+ * immediate beside its ar_dev_pa2va calls. The proof is
+ * kernel/scripts/check-stats-layout.py.
  *
  * Pure indexing arithmetic: no register access, so the same source can be
  * compiled host-side against the captures.
@@ -106,9 +106,9 @@ static inline u32 ar_isp_rro_sum(const u8 *buf, unsigned int col,
 
 /*
  * The pixel count a column's sums were accumulated over. Constant across the
- * whole buffer in every capture, but read per column rather than assumed: it is
- * a function of the programmed geometry, and a driver that changes the grid
- * must not carry a stale divisor.
+ * whole buffer in every capture, but read per column because it is a function
+ * of the programmed geometry: a driver that changes the grid must not carry a
+ * stale divisor.
  */
 static inline u32 ar_isp_rro_count(const u8 *buf, unsigned int col)
 {
@@ -130,6 +130,7 @@ static inline u32 ar_isp_rro_mean(const u8 *buf, unsigned int col,
 	return ar_isp_rro_sum(buf, col, row, channel) / count;
 }
 
+/* One histogram bin for one lane. lane is 0 to 3 and bin is 0 to 127. */
 static inline u32 ar_isp_hist_bin(const u8 *buf, unsigned int lane,
 				  unsigned int bin)
 {
