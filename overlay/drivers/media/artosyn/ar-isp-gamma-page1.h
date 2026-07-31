@@ -6,13 +6,11 @@
  * Page 0 is AE-selected from the tuning file and generated at runtime. This one is
  * not in the tuning file at all, in packed or unpacked form, so it is carried: it is
  * a prepacked constant in the vendor service library, byte-identical to page 1 of
- * every capture we hold.
+ * every capture on file.
  *
  * The tail is the last record's forward field, which mirrors the sample after the
  * page and cannot be derived from the samples. Leaving it zero maps the brightest
  * inputs to black; see ar_isp_gamma_pack_page.
- *
- * Source library sha256 4cfc8e6cfb42d8c821137993b95b152f1aaad7c53ce425e6a0493c4dd453936c.
  */
 
 #ifndef AR_ISP_GAMMA_PAGE1_H
