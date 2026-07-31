@@ -13,9 +13,8 @@
  * +0x800. A four-lane link merges both cores of a pair. This board uses one
  * two-lane instance.
  *
- * The programming sequence reproduces the vendor's, and the register values it
- * produces were checked against a capture of the vendor stack streaming
- * 1920x1080 RAW12 over two lanes.
+ * Register values match a capture of the vendor stack streaming 1920x1080
+ * RAW12 over two lanes.
  */
 
 #include <linux/clk.h>
@@ -76,10 +75,6 @@
 #define DW_CSI2_IPI_VFP_LINES		0x0b8
 #define DW_CSI2_IPI_VACTIVE_LINES	0x0bc
 
-/* IPI_MODE fields. Camera timing (bit0 clear) takes line timing from the
- * incoming stream, which is what a sensor link wants; controller timing would
- * additionally need HLINE and the four V-line registers.
- */
 #define DW_CSI2_PHY_TEST_CLEAR		BIT(0)
 #define DW_CSI2_PHY_TEST_CLOCK		BIT(1)
 #define DW_CSI2_PHY_TEST_ENABLE		BIT(16)
@@ -110,6 +105,10 @@
 #define AR_CSI_PHY_LANE_VALUE		0x07
 #define AR_CSI_PHY_DESKEW_ENABLE	0x20
 
+/* IPI_MODE fields. Camera timing (bit0 clear) takes line timing from the
+ * incoming stream; controller timing would additionally need HLINE and the
+ * four V-line registers.
+ */
 #define DW_CSI2_IPI_MODE_ENABLE		BIT(24)
 #define DW_CSI2_IPI_MODE_CUT_THROUGH	BIT(16)
 #define DW_CSI2_IPI_MODE_COLOR_48BIT	BIT(8)
@@ -120,6 +119,15 @@
 
 /* Written unconditionally by the vendor and read back verbatim on hardware. */
 #define DW_CSI2_IPI_ADV_FEATURES_VALUE	0x013b0000
+
+/* IPI horizontal timings. In camera timing mode these set the blanking the IPI
+ * inserts; they are a property of the sensor mode rather than of the receiver.
+ * Vendor values for the 1920x1080 two-lane RAW12 mode, read back from
+ * hardware.
+ */
+#define AR_CSI_IPI_HSA_TIME		0x1c
+#define AR_CSI_IPI_HBP_TIME		0x1c
+#define AR_CSI_IPI_HSD_TIME		0x39
 
 /* The version this driver has been checked against. */
 #define DW_CSI2_VERSION_1_20		0x3132302a
@@ -133,6 +141,22 @@
 /* The two DesignWare cores, relative to the pair base. */
 #define AR_CSI_CORE0_OFFSET		0x400
 #define AR_CSI_CORE1_OFFSET		0x800
+
+enum ar_csi2_pads {
+	AR_CSI2_PAD_SINK,
+	AR_CSI2_PAD_SOURCE,
+	AR_CSI2_PAD_COUNT,
+};
+
+/* How long to let the link settle after stream-on, and how far apart the two
+ * counter samples sit. At 60 fps every active lane bursts thousands of times
+ * over the window, so any advance at all separates routed from unrouted.
+ */
+#define AR_CSI_LANE_TEST_SETTLE_MS	50
+#define AR_CSI_LANE_TEST_SAMPLE_MS	500
+
+/* Lets the rest of the graph finish binding before the test streams. */
+#define AR_CSI_LANE_TEST_DELAY_MS	1000
 
 /* Per-instance interrupt masks, from the vendor's init table. Every entry is
  * written as zero to mask the source, then as its real value to unmask it.
@@ -155,53 +179,27 @@ static const struct ar_csi2_irq_mask ar_csi2_irq_masks[] = {
 	{ 0x174, 0x0000001f },
 };
 
-/*
- * IPI horizontal timings. In camera timing mode these set the blanking the IPI
- * inserts; they are a property of the sensor mode rather than of the receiver.
- * These are the values the vendor programs for the 1920x1080 two-lane RAW12
- * mode, read back from hardware.
- */
-#define AR_CSI_IPI_HSA_TIME		0x1c
-#define AR_CSI_IPI_HBP_TIME		0x1c
-#define AR_CSI_IPI_HSD_TIME		0x39
-
-#define AR_CSI2_PAD_SINK		0
-#define AR_CSI2_PAD_SOURCE		1
-#define AR_CSI2_PAD_COUNT		2
-
-/*
- * Lane count override, for determining how many MIPI lanes the board actually
- * routes. The device tree declares what the vendor uses, which is a lower bound
- * rather than a measurement: lanes that are never driven read idle whether or
- * not they are connected.
+/* Lane count override. The device tree declares what the vendor uses, a lower
+ * bound rather than a measurement: undriven lanes read idle whether or not
+ * they are connected.
  */
 static int lanes;
 module_param(lanes, int, 0444);
-MODULE_PARM_DESC(lanes,
-		 "override the data lane count from the device tree (0 to use it)");
+MODULE_PARM_DESC(lanes, "override the data lane count from the device tree (0 to use it)");
 
-/*
- * Run a lane-routing test once the sensor binds, instead of waiting for a
- * capture. The receiver is configured, the sensor is told to stream, and the
- * D-PHY per-lane stop state is sampled: a lane that is not routed can never
- * leave stop state, so it never reports. The stream is stopped again
- * immediately, and nothing is written to the board that a power cycle does not
- * clear.
- *
- * Pair this with the sensor driver's force_mode so the sensor actually drives
- * the lanes being tested; testing four lanes with the sensor in a two-lane mode
- * measures nothing.
+/* Run a lane-routing test once the sensor binds: configure the receiver,
+ * stream briefly, sample per-lane activity, stop. Nothing written survives a
+ * power cycle. Pair with the sensor driver's force_mode so the sensor drives
+ * the lanes under test; a two-lane sensor mode measures nothing about lanes
+ * 2 and 3.
  */
 static bool lane_test;
 module_param(lane_test, bool, 0444);
 MODULE_PARM_DESC(lane_test,
 		 "on bind, stream briefly and report which data lanes carry HS bursts");
 
-/*
- * Overrides the D-PHY frequency range, which is otherwise derived from the
- * source subdev's reported link frequency. Present so a range can be tried
- * without rebuilding, since the derived value depends on the source getting
- * its own link frequency right.
+/* Overrides the D-PHY frequency range otherwise derived from the source
+ * subdev's link frequency, which lets a range be tried without rebuilding.
  */
 static int phy_range = -1;
 module_param(phy_range, int, 0444);
@@ -209,29 +207,16 @@ MODULE_PARM_DESC(phy_range,
 		 "D-PHY frequency range 0-7, or -1 to derive it from the source link frequency");
 
 /* HS-settle for D-PHY internal registers 0x03 and 0x0a. Not optional: the PHY
- * reset default samples the HS burst at the wrong instant, which shows up as
- * SoT sync errors on every lane (INT_ST_PHY bits 0 and 1) plus double-ECC and
+ * reset default samples the HS burst at the wrong instant, giving SoT sync
+ * errors on every lane (INT_ST_PHY bits 0 and 1), double-ECC and
  * frame-boundary errors, no measured geometry in the VIF front end, and no
- * frame starts. 0x03 is the value the streaming vendor writes, recovered from
- * its D-PHY test-interface writes in the MMIO trace, and hardware-confirmed:
- * with it the error banks read all-zero in steady state exactly like the
- * vendor, the front end measures 1924x1084, and frame starts arrive at frame
- * rate. Zero restores the old skip-the-write behaviour, for bisecting only.
+ * frame starts. 0x03 is the vendor value. Zero skips the write, for bisecting
+ * only.
  */
 static int hs_settle = 0x03;
 module_param(hs_settle, int, 0444);
 MODULE_PARM_DESC(hs_settle,
 		 "D-PHY HS-settle byte for internal registers 0x03/0x0a (vendor value 0x03; 0 skips the write and breaks the link)");
-
-/* How long to let the link settle after stream-on, and how far apart the two
- * counter samples sit. At 60 fps every active lane bursts thousands of times
- * over the window, so any advance at all separates routed from unrouted.
- */
-#define AR_CSI_LANE_TEST_SETTLE_MS	50
-#define AR_CSI_LANE_TEST_SAMPLE_MS	500
-
-/* Lets the rest of the graph finish binding before the test streams. */
-#define AR_CSI_LANE_TEST_DELAY_MS	1000
 
 struct ar_csi2 {
 	struct v4l2_subdev sd;
@@ -270,24 +255,16 @@ static u32 ar_csi2_read(void __iomem *base, u32 offset)
 	return readl(base + offset);
 }
 
-/* ar_csi2_set_irq_masks - write every interrupt mask, or zero to mask all. */
+/* Write every interrupt mask, or zero to mask all. */
 static void ar_csi2_set_irq_masks(struct ar_csi2 *csi2, bool unmask)
 {
-	for (int i = 0; i < ARRAY_SIZE(ar_csi2_irq_masks); i++) {
+	for (unsigned int i = 0; i < ARRAY_SIZE(ar_csi2_irq_masks); i++) {
 		ar_csi2_write(csi2->core, ar_csi2_irq_masks[i].offset,
 			      unmask ? ar_csi2_irq_masks[i].value : 0);
 	}
 }
 
-/* ar_csi2_phy_power_on - bring the D-PHY out of reset.
- *
- * The DesignWare sequence: hold the core and PHY in reset with the test
- * interface cleared, release the test interface, then power the PHY and
- * release its reset. The vendor reaches the same end state through its own
- * PHY vtable; the register values below match a hardware capture of a running
- * link.
- */
-/* ar_csi2_update - read-modify-write a single register bit. */
+/* Read-modify-write a single register bit. */
 static void ar_csi2_update(void __iomem *base, u32 offset, u32 bit, bool set)
 {
 	u32 value = ar_csi2_read(base, offset);
@@ -300,12 +277,9 @@ static void ar_csi2_update(void __iomem *base, u32 offset, u32 bit, bool set)
 	ar_csi2_write(base, offset, value);
 }
 
-/*
- * ar_csi2_phy_test_write - write one D-PHY internal register.
- *
- * The D-PHY has no memory-mapped registers of its own. They are reached
- * through a two-phase test interface: the address is clocked in with testen
- * asserted, then the data with testen clear.
+/* Write one D-PHY internal register. The D-PHY has no memory-mapped registers;
+ * the address is clocked in with testen asserted, then the data with testen
+ * clear.
  */
 static void ar_csi2_phy_test_write(void __iomem *core, u8 code, u8 value)
 {
@@ -320,7 +294,7 @@ static void ar_csi2_phy_test_write(void __iomem *core, u8 code, u8 value)
 	ar_csi2_update(core, DW_CSI2_PHY_TEST_CTRL0, DW_CSI2_PHY_TEST_CLOCK, false);
 }
 
-/* ar_csi2_phy_test_read - read one D-PHY internal register. */
+/* Read one D-PHY internal register. */
 static u8 ar_csi2_phy_test_read(void __iomem *core, u8 code)
 {
 	u32 value;
@@ -338,7 +312,7 @@ static u8 ar_csi2_phy_test_read(void __iomem *core, u8 code)
 	return (value >> DW_CSI2_PHY_TEST_DOUT_SHIFT) & DW_CSI2_PHY_TEST_DOUT_MASK;
 }
 
-/* ar_csi2_phy_write_setup - the fixed D-PHY setup registers for one core. */
+/* Write the fixed D-PHY setup registers for one core. */
 static void ar_csi2_phy_write_setup(void __iomem *core)
 {
 	ar_csi2_phy_test_write(core, AR_CSI_PHY_REG_SETUP_A, AR_CSI_PHY_SETUP_A_VALUE);
@@ -347,11 +321,9 @@ static void ar_csi2_phy_write_setup(void __iomem *core)
 	ar_csi2_phy_test_write(core, AR_CSI_PHY_REG_SETUP_D, AR_CSI_PHY_SETUP_D_VALUE);
 }
 
-/*
- * ar_csi2_phy_range_code - pick the D-PHY frequency range for a lane rate.
- *
- * The receiver selects one of eight coarse ranges rather than the finer
- * standard encoding. Rates are megabits per second on a single data lane.
+/* Pick the D-PHY frequency range for a lane rate. The receiver selects one of
+ * eight coarse ranges rather than the finer standard encoding. Rates are
+ * megabits per second on a single data lane.
  */
 static int ar_csi2_phy_range_code(unsigned int rate_mbps)
 {
@@ -378,16 +350,12 @@ static int ar_csi2_phy_range_code(unsigned int rate_mbps)
 	return -ERANGE;
 }
 
-/*
- * ar_csi2_phy_lane_rate_mbps - the sensor's per-lane bit rate.
- *
- * Taken from the source subdev's link frequency control, which is half the
- * per-lane bit rate because the D-PHY clocks data on both edges.
- *
- * This has to be the rate the source's PLL actually drives the lanes at, not
- * the average implied by the frame rate. The link idles between lines, so the
- * average is lower and selects too low a frequency range, which shows up as
- * unrecoverable header ECC errors rather than as an obviously dead link.
+/* The sensor's per-lane bit rate, from the source subdev's link frequency
+ * control: half the per-lane bit rate, the D-PHY clocks data on both edges.
+ * This must be the rate the source's PLL drives the lanes at, not the average
+ * implied by the frame rate. The link idles between lines, so the average
+ * selects too low a range, which shows up as unrecoverable header ECC errors
+ * rather than a dead link.
  */
 static int ar_csi2_phy_lane_rate_mbps(struct ar_csi2 *csi2)
 {
@@ -405,15 +373,11 @@ static int ar_csi2_phy_lane_rate_mbps(struct ar_csi2 *csi2)
 	return div_u64(2 * link_freq, 1000000);
 }
 
-/*
- * ar_csi2_phy_power_on - bring the D-PHY up.
- *
- * Reproduces the vendor's PHY object: hold the PHY in reset, pulse the test
- * interface clear, program the internal setup registers and the frequency
- * range, then release shutdown and reset. Programming the range is the part
- * that matters. A PHY released without it samples against whatever its default
- * range implies, which corrupts packet headers and shows up as ECC and frame
- * errors rather than as an obviously dead link.
+/* Bring one core's D-PHY up: hold the PHY in reset, pulse the test interface
+ * clear, program the internal setup registers and the frequency range, then
+ * release shutdown and reset. A PHY released without the range write samples
+ * against its default range, which corrupts packet headers and shows up as
+ * ECC and frame errors rather than a dead link.
  */
 static void ar_csi2_phy_power_on_core(struct ar_csi2 *csi2, void __iomem *core)
 {
@@ -474,9 +438,7 @@ static void ar_csi2_phy_power_on_core(struct ar_csi2 *csi2, void __iomem *core)
 	if (code >= 0)
 		ar_csi2_phy_test_write(core, AR_CSI_PHY_REG_FREQ_RANGE, code);
 
-	/* HS-settle, immediately after the range write and before the deskew
-	 * writes, which is where the vendor places it.
-	 */
+	/* HS-settle, after the range write and before the deskew writes. */
 	if (hs_settle > 0) {
 		ar_csi2_phy_test_write(core, 0x03, hs_settle);
 		ar_csi2_phy_test_write(core, 0x0a, hs_settle);
@@ -493,24 +455,20 @@ static void ar_csi2_phy_power_on_core(struct ar_csi2 *csi2, void __iomem *core)
 	ar_csi2_write(core, DW_CSI2_DPHY_RSTZ, 1);
 }
 
-/*
- * ar_csi2_phy_power_on - bring up every D-PHY the link uses.
- *
- * Each core of the pair owns its own two-lane PHY; a link wider than two lanes
- * merges both, and the vendor runs the full power-up once per core. Powering
- * only the first core leaves lanes 2 and 3 physically shut down no matter what
- * the sensor drives.
+/* Bring up every D-PHY the link uses. Each core of the pair owns its own
+ * two-lane PHY; a link wider than two lanes merges both. Powering only the
+ * first core leaves lanes 2 and 3 physically shut down no matter what the
+ * sensor drives.
  */
 static void ar_csi2_phy_power_on(struct ar_csi2 *csi2)
 {
 	ar_csi2_phy_power_on_core(csi2, csi2->core);
 
 	if (csi2->num_data_lanes > 2)
-		ar_csi2_phy_power_on_core(csi2,
-					  csi2->base + AR_CSI_CORE1_OFFSET);
+		ar_csi2_phy_power_on_core(csi2, csi2->base + AR_CSI_CORE1_OFFSET);
 }
 
-/* ar_csi2_phy_set_deskew_core - set or clear the deskew bit on one core. */
+/* Set or clear the deskew bit on one core. */
 static void ar_csi2_phy_set_deskew_core(void __iomem *core, bool enable)
 {
 	u8 value = ar_csi2_phy_test_read(core, AR_CSI_PHY_REG_DESKEW_A);
@@ -531,26 +489,18 @@ static void ar_csi2_phy_set_deskew_core(void __iomem *core, bool enable)
 	ar_csi2_phy_test_write(core, AR_CSI_PHY_REG_DESKEW_B, value);
 }
 
-/*
- * ar_csi2_phy_enable_deskew - set the deskew bit in two D-PHY registers.
- *
- * The vendor performs this as a separate step after the PHY has been released,
- * not as part of the power-up sequence, so the ordering is kept. On a merged
- * link it runs once per core.
+/* Set the deskew bit in two D-PHY registers. A separate step after the PHY is
+ * released, not part of the power-up sequence; on a merged link it runs once
+ * per core.
  */
 static void ar_csi2_phy_enable_deskew(struct ar_csi2 *csi2)
 {
 	ar_csi2_phy_set_deskew_core(csi2->core, true);
 	if (csi2->num_data_lanes > 2)
-		ar_csi2_phy_set_deskew_core(csi2->base + AR_CSI_CORE1_OFFSET,
-					    true);
+		ar_csi2_phy_set_deskew_core(csi2->base + AR_CSI_CORE1_OFFSET, true);
 }
 
-/*
- * ar_csi2_phy_disable_deskew - clear the deskew bit again.
- *
- * The vendor's receiver init ends by clearing the bit it set during PHY
- * bring-up; the enabled state exists only for the duration of initialisation.
+/* Clear the deskew bit again; it is enabled only for the duration of init.
  * Left set, the receiver re-acquires the clock lane on every frame, which
  * corrupts the first packet header after each re-entry. The first packet of a
  * frame is frame start, so every frame is lost before it opens: the IPI FIFO
@@ -561,8 +511,7 @@ static void ar_csi2_phy_disable_deskew(struct ar_csi2 *csi2)
 {
 	ar_csi2_phy_set_deskew_core(csi2->core, false);
 	if (csi2->num_data_lanes > 2)
-		ar_csi2_phy_set_deskew_core(csi2->base + AR_CSI_CORE1_OFFSET,
-					    false);
+		ar_csi2_phy_set_deskew_core(csi2->base + AR_CSI_CORE1_OFFSET, false);
 }
 
 static void ar_csi2_phy_power_off(struct ar_csi2 *csi2)
@@ -572,18 +521,15 @@ static void ar_csi2_phy_power_off(struct ar_csi2 *csi2)
 	ar_csi2_write(csi2->core, DW_CSI2_PHY_TEST_CTRL0, 1);
 }
 
-/* ar_csi2_configure - program the wrapper and the core for one CSI-2 link.
- *
- * @data_type: the CSI-2 data type the sensor emits (0x2c for RAW12).
+/* Program the wrapper and the core for one CSI-2 link. data_type is the CSI-2
+ * data type the sensor emits (0x2c for RAW12).
  */
 static void ar_csi2_configure(struct ar_csi2 *csi2, u8 data_type)
 {
 	u32 scenario;
-	u32 mode;
 
-	/* Core reset, held briefly. An earlier revision forced register 0xcc
-	 * to 0 here, from an idle-vendor observation; the streaming-vendor
-	 * state capture reads 0xcc = 1, so the register is left alone.
+	/* Core reset, held briefly. Register 0xcc reads 1 on a streaming
+	 * vendor capture; leave it alone.
 	 */
 	ar_csi2_write(csi2->core, DW_CSI2_RESETN, 0);
 	udelay(AR_CSI_RESET_SETTLE_US);
@@ -609,8 +555,8 @@ static void ar_csi2_configure(struct ar_csi2 *csi2, u8 data_type)
 	ar_csi2_phy_power_on(csi2);
 
 	/* A merged link also resets the second core's protocol layer and turns
-	 * the wrapper's merge on, in the vendor's order: after the PHYs are up,
-	 * before the deskew step.
+	 * the wrapper's merge on: after the PHYs are up, before the deskew
+	 * step.
 	 */
 	if (csi2->num_data_lanes > 2) {
 		void __iomem *core1 = csi2->base + AR_CSI_CORE1_OFFSET;
@@ -624,15 +570,13 @@ static void ar_csi2_configure(struct ar_csi2 *csi2, u8 data_type)
 
 	ar_csi2_phy_enable_deskew(csi2);
 
-	/* IPI output: camera timing, cut-through, 48-bit colour, enabled. */
-	mode = DW_CSI2_IPI_MODE_ENABLE | DW_CSI2_IPI_MODE_CUT_THROUGH;
-	ar_csi2_write(csi2->core, DW_CSI2_IPI_MODE, mode);
-	ar_csi2_write(csi2->core, DW_CSI2_IPI_ADV_FEATURES,
-		      DW_CSI2_IPI_ADV_FEATURES_VALUE);
+	/* IPI output: camera timing, cut-through, enabled. */
+	ar_csi2_write(csi2->core, DW_CSI2_IPI_MODE,
+		      DW_CSI2_IPI_MODE_ENABLE | DW_CSI2_IPI_MODE_CUT_THROUGH);
+	ar_csi2_write(csi2->core, DW_CSI2_IPI_ADV_FEATURES, DW_CSI2_IPI_ADV_FEATURES_VALUE);
 	ar_csi2_write(csi2->core, DW_CSI2_IPI_VCID, 0);
 	ar_csi2_write(csi2->core, DW_CSI2_IPI_DATA_TYPE, data_type);
-	ar_csi2_write(csi2->core, DW_CSI2_IPI_MEM_FLUSH,
-		      DW_CSI2_IPI_MEM_AUTO_FLUSH);
+	ar_csi2_write(csi2->core, DW_CSI2_IPI_MEM_FLUSH, DW_CSI2_IPI_MEM_AUTO_FLUSH);
 	ar_csi2_write(csi2->core, DW_CSI2_IPI_HSA_TIME, AR_CSI_IPI_HSA_TIME);
 	ar_csi2_write(csi2->core, DW_CSI2_IPI_HBP_TIME, AR_CSI_IPI_HBP_TIME);
 	ar_csi2_write(csi2->core, DW_CSI2_IPI_HSD_TIME, AR_CSI_IPI_HSD_TIME);
@@ -646,8 +590,8 @@ static void ar_csi2_configure(struct ar_csi2 *csi2, u8 data_type)
 	ar_csi2_set_irq_masks(csi2, true);
 	ar_csi2_write(csi2->base, AR_CSI_WRAP_IRQ_MASK, 0);
 
-	/* The last step of the vendor's receiver init: the deskew bit set during
-	 * PHY bring-up is cleared before the link carries traffic.
+	/* The deskew bit set during PHY bring-up is cleared before the link
+	 * carries traffic.
 	 */
 	ar_csi2_phy_disable_deskew(csi2);
 }
@@ -660,12 +604,30 @@ static void ar_csi2_stop(struct ar_csi2 *csi2)
 	ar_csi2_write(csi2->core, DW_CSI2_RESETN, 0);
 }
 
-/* ar_csi2_report_lanes - log the per-lane D-PHY stop state.
- *
- * PHY_STOPSTATE carries one bit per data lane. A lane that is configured but
- * never leaves stop state is either not driven by the sensor or not routed on
- * the board, which is otherwise a difficult failure to tell apart from a
- * timing problem.
+static int ar_csi2_clks_enable(struct ar_csi2 *csi2)
+{
+	int ret;
+
+	ret = clk_prepare_enable(csi2->csi_clk);
+	if (ret)
+		return ret;
+
+	ret = clk_prepare_enable(csi2->pcs_clk);
+	if (ret)
+		clk_disable_unprepare(csi2->csi_clk);
+
+	return ret;
+}
+
+static void ar_csi2_clks_disable(struct ar_csi2 *csi2)
+{
+	clk_disable_unprepare(csi2->pcs_clk);
+	clk_disable_unprepare(csi2->csi_clk);
+}
+
+/* Log the per-lane D-PHY stop state. PHY_STOPSTATE carries one bit per data
+ * lane. A configured lane that never leaves stop state is either not driven by
+ * the sensor or not routed on the board.
  */
 static void ar_csi2_report_lanes(struct ar_csi2 *csi2)
 {
@@ -693,19 +655,14 @@ static int ar_csi2_set_stream(struct v4l2_subdev *sd, int enable)
 	if (!enable) {
 		v4l2_subdev_call(csi2->sensor, video, s_stream, 0);
 		ar_csi2_stop(csi2);
-		clk_disable_unprepare(csi2->pcs_clk);
-		clk_disable_unprepare(csi2->csi_clk);
+		ar_csi2_clks_disable(csi2);
 
 		return 0;
 	}
 
-	ret = clk_prepare_enable(csi2->csi_clk);
+	ret = ar_csi2_clks_enable(csi2);
 	if (ret)
 		return ret;
-
-	ret = clk_prepare_enable(csi2->pcs_clk);
-	if (ret)
-		goto error_csi_clk;
 
 	/* RAW12 is the only format the sensor emits, so the data type is
 	 * fixed; a multi-format sensor would derive it from the pad format.
@@ -713,21 +670,16 @@ static int ar_csi2_set_stream(struct v4l2_subdev *sd, int enable)
 	ar_csi2_configure(csi2, MIPI_CSI2_DT_RAW12);
 
 	ret = v4l2_subdev_call(csi2->sensor, video, s_stream, 1);
-	if (ret)
-		goto error_stop;
+	if (ret) {
+		ar_csi2_stop(csi2);
+		ar_csi2_clks_disable(csi2);
+
+		return ret;
+	}
 
 	ar_csi2_report_lanes(csi2);
 
 	return 0;
-
-error_stop:
-	ar_csi2_stop(csi2);
-	clk_disable_unprepare(csi2->pcs_clk);
-
-error_csi_clk:
-	clk_disable_unprepare(csi2->csi_clk);
-
-	return ret;
 }
 
 /* The receiver does not transform the stream, so both pads carry the sensor's
@@ -790,8 +742,7 @@ static int ar_csi2_get_pad_format(struct v4l2_subdev *sd,
 
 	if (fmt->which == V4L2_SUBDEV_FORMAT_ACTIVE && csi2->sensor) {
 		sensor_format.pad = csi2->sensor_source_pad;
-		ret = v4l2_subdev_call_state_active(csi2->sensor, pad, get_fmt,
-						    &sensor_format);
+		ret = v4l2_subdev_call_state_active(csi2->sensor, pad, get_fmt, &sensor_format);
 		if (ret == 0) {
 			fmt->format = sensor_format.format;
 			return 0;
@@ -819,13 +770,15 @@ static const struct v4l2_subdev_internal_ops ar_csi2_internal_ops = {
 	.init_state = ar_csi2_init_state,
 };
 
-/* ar_csi2_notify_bound - the sensor subdev has appeared; link it to our sink. */
+/* The sensor subdev has appeared; link it to our sink pad. */
 static int ar_csi2_notify_bound(struct v4l2_async_notifier *notifier,
 				struct v4l2_subdev *subdev,
 				struct v4l2_async_connection *asc)
 {
 	struct ar_csi2 *csi2 = container_of(notifier, struct ar_csi2, notifier);
-	int pad = media_entity_get_fwnode_pad(&subdev->entity, subdev->fwnode,
+	int pad;
+
+	pad = media_entity_get_fwnode_pad(&subdev->entity, subdev->fwnode,
 					  MEDIA_PAD_FL_SOURCE);
 	if (pad < 0) {
 		dev_err(csi2->dev, "%s has no source pad\n", subdev->name);
@@ -855,17 +808,20 @@ static void ar_csi2_notify_unbind(struct v4l2_async_notifier *notifier,
 {
 	struct ar_csi2 *csi2 = container_of(notifier, struct ar_csi2, notifier);
 
+	/* A pending lane test would otherwise fire against the gone sensor. */
+	cancel_delayed_work_sync(&csi2->lane_test_work);
+
 	csi2->sensor = NULL;
 }
 
-/* ar_csi2_run_lane_test - stream briefly and report which lanes are alive.
- *
- * Samples PHY_STOPSTATE repeatedly and combines the results: a routed lane
- * reports stop state whenever it is between high-speed bursts, while an
- * unrouted one never does. The error status is reported alongside, because a
- * lane count the board cannot support shows up there too.
+/* Measure lane activity from the wrapper's per-PHY HS counters: a counter that
+ * advances between two samples means that lane carries high-speed bursts.
+ * PHY_RX cannot answer this (clock-lane status bits, identical at any lane
+ * count), nor can PHY_STOPSTATE on the first core (only that core's two lanes,
+ * ceiling 0x3 regardless of wiring). The error status is reported alongside,
+ * because a lane count the board cannot support shows up there too.
  */
-static void ar_csi2_run_lane_test(struct ar_csi2 *csi2)
+static void ar_csi2_measure_lanes(struct ar_csi2 *csi2)
 {
 	static const u32 counter_offsets[] = {
 		AR_CSI_WRAP_PHY0_HS_D0,		/* lane 0 */
@@ -876,51 +832,15 @@ static void ar_csi2_run_lane_test(struct ar_csi2 *csi2)
 	u32 expected = GENMASK(csi2->num_data_lanes - 1, 0);
 	u32 before[ARRAY_SIZE(counter_offsets)];
 	u32 seen = 0;
-	unsigned int i;
-	int ret;
-
-	dev_info(csi2->dev, "lane test: configuring %u lanes\n",
-		 csi2->num_data_lanes);
-
-	ret = clk_prepare_enable(csi2->csi_clk);
-	if (ret)
-		return;
-
-	ret = clk_prepare_enable(csi2->pcs_clk);
-	if (ret)
-		goto error_csi_clk;
-
-	ar_csi2_configure(csi2, MIPI_CSI2_DT_RAW12);
-
-	/*
-	 * Stream, then measure lane activity from the wrapper's per-PHY HS
-	 * counters. Each PHY of the pair owns two physical lanes; a counter
-	 * whose value advances between two samples means that lane is routed
-	 * and carrying high-speed bursts, one that stays put means it is not.
-	 *
-	 * This replaces two earlier methods that could not answer the
-	 * question. Sampling PHY_RX reads the clock lane's status bits, which
-	 * look identical at any lane count. Sampling PHY_STOPSTATE on the
-	 * first core reads only that core's two lanes, so its ceiling is 0x3
-	 * regardless of how the board is wired, and an idle sensor has not
-	 * been given the mode's lane configuration yet in any case.
-	 */
-	ret = v4l2_subdev_call(csi2->sensor, video, s_stream, 1);
-	if (ret) {
-		dev_err(csi2->dev, "lane test: the sensor refused to stream (%d)\n",
-			ret);
-		goto error_stop;
-	}
 
 	msleep(AR_CSI_LANE_TEST_SETTLE_MS);
 
-	for (i = 0; i < ARRAY_SIZE(counter_offsets); i++)
+	for (unsigned int i = 0; i < ARRAY_SIZE(counter_offsets); i++)
 		before[i] = ar_csi2_read(csi2->base, counter_offsets[i]);
 
 	msleep(AR_CSI_LANE_TEST_SAMPLE_MS);
 
-	seen = 0;
-	for (i = 0; i < ARRAY_SIZE(counter_offsets); i++) {
+	for (unsigned int i = 0; i < ARRAY_SIZE(counter_offsets); i++) {
 		if (ar_csi2_read(csi2->base, counter_offsets[i]) != before[i])
 			seen |= BIT(i);
 	}
@@ -943,18 +863,34 @@ static void ar_csi2_run_lane_test(struct ar_csi2 *csi2)
 		dev_info(csi2->dev,
 			 "lane test: lanes 0x%x carried no data; not routed, or the sensor does not drive them in this mode\n",
 			 expected & ~seen);
-
-	v4l2_subdev_call(csi2->sensor, video, s_stream, 0);
-
-error_stop:
-	ar_csi2_stop(csi2);
-	clk_disable_unprepare(csi2->pcs_clk);
-
-error_csi_clk:
-	clk_disable_unprepare(csi2->csi_clk);
 }
 
-/* ar_csi2_lane_test_work - run the lane test away from the binding callbacks. */
+/* Stream briefly and report which lanes carry data. */
+static void ar_csi2_run_lane_test(struct ar_csi2 *csi2)
+{
+	int ret;
+
+	dev_info(csi2->dev, "lane test: configuring %u lanes\n", csi2->num_data_lanes);
+
+	ret = ar_csi2_clks_enable(csi2);
+	if (ret)
+		return;
+
+	ar_csi2_configure(csi2, MIPI_CSI2_DT_RAW12);
+
+	ret = v4l2_subdev_call(csi2->sensor, video, s_stream, 1);
+	if (ret) {
+		dev_err(csi2->dev, "lane test: the sensor refused to stream (%d)\n", ret);
+	} else {
+		ar_csi2_measure_lanes(csi2);
+		v4l2_subdev_call(csi2->sensor, video, s_stream, 0);
+	}
+
+	ar_csi2_stop(csi2);
+	ar_csi2_clks_disable(csi2);
+}
+
+/* Run the lane test away from the binding callbacks. */
 static void ar_csi2_lane_test_work(struct work_struct *work)
 {
 	struct ar_csi2 *csi2 = container_of(to_delayed_work(work), struct ar_csi2,
@@ -971,7 +907,7 @@ static const struct v4l2_async_notifier_operations ar_csi2_notify_ops = {
 	.unbind = ar_csi2_notify_unbind,
 };
 
-/* ar_csi2_parse_and_register_sensor - bind the sensor on the port 0 endpoint. */
+/* Bind the sensor on the port 0 endpoint. */
 static int ar_csi2_parse_and_register_sensor(struct ar_csi2 *csi2)
 {
 	struct v4l2_fwnode_endpoint bus_cfg = {
@@ -982,8 +918,7 @@ static int ar_csi2_parse_and_register_sensor(struct ar_csi2 *csi2)
 	unsigned int declared;
 	int ret;
 
-	endpoint = fwnode_graph_get_endpoint_by_id(dev_fwnode(csi2->dev),
-						   AR_CSI2_PAD_SINK, 0,
+	endpoint = fwnode_graph_get_endpoint_by_id(dev_fwnode(csi2->dev), AR_CSI2_PAD_SINK, 0,
 						   FWNODE_GRAPH_ENDPOINT_NEXT);
 	if (!endpoint) {
 		dev_err(csi2->dev, "no sink endpoint in the device tree node\n");
@@ -1073,13 +1008,9 @@ static int ar_csi2_probe(struct platform_device *pdev)
 	 * identifies the core; a mismatch means the register map below does
 	 * not describe this hardware.
 	 */
-	dev_info(dev, "probe: enabling the csi clock\n");
-
 	ret = clk_prepare_enable(csi2->csi_clk);
 	if (ret)
 		return ret;
-
-	dev_info(dev, "probe: reading the version register\n");
 
 	version = ar_csi2_read(csi2->core, DW_CSI2_VERSION);
 	clk_disable_unprepare(csi2->csi_clk);
@@ -1095,47 +1026,46 @@ static int ar_csi2_probe(struct platform_device *pdev)
 	csi2->sd.dev = dev;
 	csi2->sd.flags = V4L2_SUBDEV_FL_HAS_DEVNODE;
 	csi2->sd.entity.function = MEDIA_ENT_F_VID_IF_BRIDGE;
-	snprintf(csi2->sd.name, sizeof(csi2->sd.name), "ar-csi2");
+	strscpy(csi2->sd.name, "ar-csi2", sizeof(csi2->sd.name));
 	v4l2_set_subdevdata(&csi2->sd, csi2);
 
 	csi2->pads[AR_CSI2_PAD_SINK].flags = MEDIA_PAD_FL_SINK;
 	csi2->pads[AR_CSI2_PAD_SOURCE].flags = MEDIA_PAD_FL_SOURCE;
 
-	ret = media_entity_pads_init(&csi2->sd.entity, AR_CSI2_PAD_COUNT,
-				     csi2->pads);
+	ret = media_entity_pads_init(&csi2->sd.entity, AR_CSI2_PAD_COUNT, csi2->pads);
 	if (ret)
 		return ret;
 
 	ret = v4l2_subdev_init_finalize(&csi2->sd);
-	if (ret)
-		goto error_media_entity;
+	if (ret) {
+		media_entity_cleanup(&csi2->sd.entity);
+
+		return ret;
+	}
 
 	ret = ar_csi2_parse_and_register_sensor(csi2);
-	if (ret)
-		goto error_subdev;
+	if (ret) {
+		v4l2_subdev_cleanup(&csi2->sd);
+		media_entity_cleanup(&csi2->sd.entity);
+
+		return ret;
+	}
 
 	ret = v4l2_async_register_subdev(&csi2->sd);
-	if (ret)
-		goto error_notifier;
+	if (ret) {
+		v4l2_async_nf_unregister(&csi2->notifier);
+		v4l2_async_nf_cleanup(&csi2->notifier);
+		v4l2_subdev_cleanup(&csi2->sd);
+		media_entity_cleanup(&csi2->sd.entity);
+
+		return ret;
+	}
 
 	platform_set_drvdata(pdev, csi2);
 
-	dev_info(dev, "DesignWare CSI-2 host 1.20 up on %u data lanes\n",
-		 csi2->num_data_lanes);
+	dev_info(dev, "DesignWare CSI-2 host 1.20 up on %u data lanes\n", csi2->num_data_lanes);
 
 	return 0;
-
-error_notifier:
-	v4l2_async_nf_unregister(&csi2->notifier);
-	v4l2_async_nf_cleanup(&csi2->notifier);
-
-error_subdev:
-	v4l2_subdev_cleanup(&csi2->sd);
-
-error_media_entity:
-	media_entity_cleanup(&csi2->sd.entity);
-
-	return ret;
 }
 
 static void ar_csi2_remove(struct platform_device *pdev)
