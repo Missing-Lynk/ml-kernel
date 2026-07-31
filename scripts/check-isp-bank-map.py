@@ -9,9 +9,14 @@ bank offset to an ar_dev_pa2va return value. Only immediates that reach a
 pa2va result count as banks; every other immediate in the handler is noise, and
 counting them produces banks the write trace rejects.
 
-A descriptor belongs to the largest mapped bank at or below it. Four
-descriptors attributed by earlier work are asserted as control cases, so a
-regression in the extraction fails here rather than silently renaming a page.
+A descriptor belongs to the largest mapped bank at or below it. Six descriptors
+attributed by earlier work are asserted as control cases, so a regression in the
+extraction fails here rather than silently renaming a page.
+
+Banks live on one of two blocks. A module selects the CVISP block by adding
+0x200000 to the physical base before translating it, and the bank offset is
+added afterwards, so the two have to be tracked per call rather than per
+handler.
 
 The library and the traces are proprietary and are not in the repository.
 
@@ -49,6 +54,10 @@ BANKR_RE = re.compile(r"add\tx\d+, x0, x(\d+)$")
 BANKI_RE = re.compile(r"add\tx\d+, x0, #0x([0-9a-f]+)$")
 BANKL_RE = re.compile(r"add\tx\d+, x0, #0x([0-9a-f]+), lsl #12$")
 STOREX0_RE = re.compile(r"st(r|p)\tx0[,\s]")
+SELECT_RE = re.compile(r"add\tw0, w\d+, #0x([0-9a-f]+), lsl #12")
+
+# The CVISP block sits this far above the ISP physical base.
+CVISP_SELECT = 0x200000
 
 ATTACH_SLOT = 472
 
@@ -79,16 +88,20 @@ def disassemble(lib):
     return lines
 
 
-def constructors(lib):
+def symbols(lib):
     out = subprocess.run([binutil("nm"), "-nD", "--defined-only", lib],
                          capture_output=True, text=True, check=True).stdout
     found = {}
     for line in out.splitlines():
         parts = line.split()
-        if len(parts) == 3 and parts[1] in ("T", "t") and CREAT_RE.match(parts[2]):
+        if len(parts) == 3 and parts[1] in ("T", "t"):
             found[parts[2]] = int(parts[0], 16)
 
     return found
+
+
+def constructors(syms):
+    return {n: a for n, a in syms.items() if CREAT_RE.match(n)}
 
 
 def attach_handler(lines, creat):
@@ -120,10 +133,22 @@ def attach_handler(lines, creat):
     return None
 
 
-def banks(lines, attach):
-    """Immediates added to an ar_dev_pa2va result, in order."""
-    imms, out, pending = {}, [], False
-    for addr in range(attach, attach + 0x400, 4):
+def banks(lines, attach, limit):
+    """(block, bank) pairs, one per ar_dev_pa2va call that gets an offset.
+
+    The block is chosen before the call by adding a selector to the physical
+    base, and the bank is added to the translated result after it. A module can
+    map banks on both blocks, so the selector has to be tracked per call and
+    reset after each one: dpc adds 0xc00 to an unselected call and keeps a
+    separate CVISP pointer with no bank, so a per-handler selector would put
+    dpc's bank on the wrong block.
+
+    The scan stops at limit, the next symbol. Handlers sit close together, so a
+    fixed window runs into the neighbour: a 0x400 window gives digigain2 ccm2's
+    0x3800.
+    """
+    imms, out, pending, block = {}, [], False, 0
+    for addr in range(attach, min(attach + 0x400, limit), 4):
         ins = lines.get(addr)
         if ins is None:
             continue
@@ -131,6 +156,11 @@ def banks(lines, attach):
         m = MOV_RE.search(ins)
         if m:
             imms[int(m.group(1))] = int(m.group(2), 16)
+            continue
+
+        m = SELECT_RE.search(ins)
+        if m:
+            block = int(m.group(1), 16) << 12
             continue
 
         if "ar_dev_pa2va" in ins:
@@ -144,27 +174,31 @@ def banks(lines, attach):
         if m:
             pending = False
             if int(m.group(1)) in imms:
-                out.append(imms[int(m.group(1))])
+                out.append((block, imms[int(m.group(1))]))
+            block = 0
             continue
 
         m = BANKL_RE.search(ins)
         if m:
             pending = False
-            out.append(int(m.group(1), 16) << 12)
+            out.append((block, int(m.group(1), 16) << 12))
+            block = 0
             continue
 
         m = BANKI_RE.search(ins)
         if m:
             pending = False
-            out.append(int(m.group(1), 16))
+            out.append((block, int(m.group(1), 16)))
+            block = 0
             continue
 
         # The window ends when x0, the pa2va result, is itself stored. Stores of
         # unrelated fields sit between the call and the add and must not end it.
         if STOREX0_RE.match(ins):
             pending = False
+            block = 0
 
-    return sorted({v for v in out if v > 4})
+    return sorted({p for p in out if p[1] > 4})
 
 
 def written(trace):
@@ -188,9 +222,12 @@ def main():
     args = ap.parse_args()
 
     lines = disassemble(args.lib)
-    creats = constructors(args.lib)
+    syms = symbols(args.lib)
+    creats = constructors(syms)
     if not creats:
         sys.exit("no isp_sub_*_creat symbols: is the library stripped?")
+
+    bounds = sorted(set(syms.values()))
 
     owners = {}
     missing = []
@@ -200,11 +237,16 @@ def main():
             missing.append(name)
             continue
 
-        for bank in banks(lines, attach):
-            owners.setdefault(bank, []).append(name)
+        after = [a for a in bounds if a > attach]
+        limit = after[0] if after else attach + 0x400
+        for block, bank in banks(lines, attach, limit):
+            owners.setdefault((block, bank), []).append(name)
 
-    order = sorted(owners)
-    print(f"{len(creats)} constructors, {len(order)} distinct banks")
+    order = sorted(b for blk, b in owners if blk != CVISP_SELECT)
+    cvisp = sorted(b for blk, b in owners if blk == CVISP_SELECT)
+    print(f"{len(creats)} constructors, {len(order)} ISP banks, "
+          f"{len(cvisp)} CVISP banks")
+    print("      CVISP: " + ", ".join(f"{b:#x}" for b in cvisp))
     if missing:
         print(f"      no attach handler recovered for: {', '.join(sorted(missing))}")
 
@@ -213,7 +255,7 @@ def main():
         if not below:
             sys.exit(f"{desc:#x}: no bank at or below it")
 
-        got = owners[below[-1]]
+        got = owners[(0, below[-1])]
         if want not in got:
             sys.exit(f"{desc:#x}: bank {below[-1]:#x} maps to {got}, expected {want}")
     print(f"      {len(CONTROL)} control descriptors attributed as recorded")

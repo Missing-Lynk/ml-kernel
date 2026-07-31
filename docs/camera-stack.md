@@ -356,7 +356,7 @@ pipeline position alone are not proof of a module mapping.
 
 The vendor modules `gtm2` and `ltm` named here share register bank `0x2800` and
 publish to it at `+0x08`. They are **not** the descriptors this document calls
-GTM2 (`0x1c6c`) and LSC (`0x4c34`); see the naming note under the ownership
+the HDR page (`0x1c6c`) and LSC (`0x4c34`); see the naming note under the ownership
 table below. Their own descriptors are still unowned.
 
 GTM2 and LTM are **enabled** in the NT99235 FPV preview configuration. Their
@@ -616,20 +616,68 @@ The heuristic was wrong, not the pages. These are packed multi-lane formats: a c
 
 `ar-isp.c` now allocates and publishes its own gamma and DRC buffers, and produces every byte the hardware fetches from either. Gamma page 0 and the dynamic half of the DRC page come from the tuning file; gamma page 1 and the static half of the DRC page are not in that file in any form and are carried as decoded curves, extracted from the service library by `scripts/gen-gamma-page1.py` and `scripts/gen-drc-tail.py`. Neither table inherits anything.
 
-**Current ownership of the tone and shading path**, validated on hardware with seeding off, so nothing came from the vendor's residual DRAM:
+## What the driver owns
+
+Validated on hardware with seeding off, so nothing in the "ours" rows came from the vendor's residual DRAM.
+
+**Coefficient tables the block fetches:**
 
 | Table | Descriptor | Source | Status |
 |---|---|---|---|
 | gamma | `0x0030`/`0x0040`/`0x0050` | tuning file + carried page 1 | every fetched byte ours |
 | DRC | `0x0060` | tuning file + carried tail | every fetched byte ours |
-| compander | `0x0020` | library template, verbatim | every fetched byte ours |
-| GTM2 | `0x1c6c` | nothing to generate | ours; payload is runtime state, left zero |
+| compander | `0x0020` | library template entry 6, verbatim | every fetched byte ours, byte-exact |
+| HDR page | `0x1c6c` | nothing to generate | ours; zero over its whole extent, matching the vendor |
 | LSC region A | `0x4c34` | tuning file, two float32 arrays | every byte ours, exact |
-| LSC region B | `0x4c34` | none exists | scene-adaptive, left to the seed path |
+| LSC region B | `0x4c34` | none exists | scene-adaptive runtime state, follows the seed path |
+| CCM | registers `0x3400`/`0x3800`, no DMA | tuning file, packed Q8 sign-magnitude | ours; all six words match the trace exactly |
+| BLC | CVISP registers `0x4200`, no DMA | tuning file, gain-blended calibration entries | ours; reproduces the traced registers exactly |
 
-The only unowned bytes here are LSC's region B and GTM2's payload, and neither is recoverable from any file. Reproducing them means running the vendor's algorithms against live ISP statistics, which is 3A work.
+**Statistics buffers the hardware writes**, allocated and published by the driver, confirmed on silicon:
 
-Two of these names are this driver's, not the vendor's, and the distinction matters because the vendor has its own modules by those names on other banks. `0x4c34` is owned by `isp_sub_lsc` on bank `0x4c00`, so the driver calls it LSC; it was called LTM until the bank attribution below settled it. `0x1c6c` sits on bank `0x1c00`, which has no attributed owner, and keeps the name GTM2 for continuity with the captures and the harness. The vendor's own `gtm2` and `ltm` modules share bank `0x2800` and their descriptors `0x2808`/`0x280c` are still unowned.
+| Buffer | Register | Size | Validation |
+|---|---|---|---|
+| zone grid (`rro_stats`) | `0x6440`, `0x6474` | `0x4800` | count 826, matching the vendor exactly |
+| second grid (`rro_face_stats`) | `0x6508` | `0x4800` | count 90, matching the vendor exactly |
+| Bayer histogram (`raw_hist_stats`) | `0x600c` | `0x1000` | lanes exactly 518400 / 1036800 / 518400 / 0 |
+
+Those histogram lanes are precisely a quarter, a half and a quarter of `1920 x 1080`, with the fourth lane exactly zero, read from a buffer this driver allocated. That is the Bayer population, and it is the strongest single confirmation that the layouts in `ar-isp-stats.h` are right. **AE has a working input.**
+
+**BLC is the first stage that recomputes with gain, which makes it an AE dependency rather than a table.** Sixteen registers on CVISP bank `0x4200`, filled by a verbatim 64-byte copy. The payload is five calibration entries in the tuning file at `0xb4`, selected by a ladder of five float pairs at `0x34`. A gain inside a pair's own range uses that entry alone; a gain between one pair's second bound and the next pair's first bound blends the two across that band:
+
+	t   = (gain - ladder[lo].second) / (ladder[hi].first - ladder[lo].second)
+	out = entry[hi] * t + entry[lo] * (1 - t)
+
+with the first group of four shifted left by 6 on its way to the registers and the second group unshifted. Recovered from the selection at `0x1bfef8` and the blend at `0x1c0048`.
+
+The vendor's operating point is pinned exactly: at gain **187** the band is 130 to 510, `t` is 0.150000, and all four lanes come out at 961 and 272, which are the `0xf040` and `0x110` the trace holds. An earlier note suggested those values came from a static fallback rather than the blob blend; that was wrong, and the blend reproducing both registers on all four lanes from the tuning file is what disproves it.
+
+`lnr` and `de3d` trigger off the same gain through the same machinery and are still frozen at one operating point, so **auto-exposure moving gain will make those two stages wrong** until they are recovered too. That is a prerequisite for AE being any good, not a completeness item.
+
+**CCM was not merely unowned, it was inactive.** The register replay does carry the vendor's runtime colour matrix, but at entry 1718 of the setup table, while the camera harness applies a 1475-entry prefix. Every bring-up before this one therefore ran with ccm1 holding the identity that earlier entries wrote, so colour correction was switched off and it was not obvious, because an identity CCM yields a plausible picture rather than a broken one. The driver now installs the matrix itself, after the prefix. Generated from the tuning file, the six words reproduce the traced vendor registers exactly.
+
+Without AWB there is nothing to interpolate between, so one illuminant bank is installed verbatim; bank 0 is the one the vendor was traced writing, which makes this reproduce the traced state rather than approximate it. `ccm_bank=` selects another. ccm2 is installed from its static init block and never moves, because its tuning gate reads 0.
+
+Publishing has an ordering requirement that is easy to get wrong and was got wrong once. The setup table carries the vendor's own statistics addresses at entries around 1417 to 1425, so publishing only from `ar_isp_tables_apply` is overwritten by the table or by any prefix past that point. The driver therefore publishes **twice**, the second time from `ar_isp_arm_output`, after the table has run. The symptom of getting this wrong is a buffer that stays all zero while everything else looks healthy.
+
+**Not owned, and why:**
+
+| Item | Why not |
+|---|---|
+| LSC region B | scene-adaptive runtime state, no stored source |
+| the `0x1c6c` payload past `0x800` | runtime state, no stored source |
+| LTM's coefficient page (`0x2808`) | **computed per frame**, not a table; see below |
+| `af_stats`, `ltm_stats` buffers | extents now known (`0x1200`, `0x80000`), allocation pending |
+| `de3d`'s three working buffers | implemented behind `de3d=`, off by default until a bring-up runs with it on |
+| 18 further stages | register files, not DMA pages; inventory in `plans/au-isp-module-inventory.md` |
+
+**LTM is not a table and cannot be shipped as a constant.** Measured across two bring-ups of different scenes: both pages are well formed and structurally identical, 64 tiles of a 128-sample `u16` curve at `0x100` stride, every tile monotonic from 0 to a maximum of 1003, all 64 distinct. Between the two scenes **all 64 tiles differ**, 43% of bytes, with a maximum sample delta of 21. So the vendor genuinely recomputes it per frame in response to the scene, and an open LTM has to compute it too. The magnitude is modest, about 2% of range with the curve endpoints fixed, and how much of that is scene difference rather than frame-to-frame noise is not established.
+
+`ltm_stats` fills its **entire `0x80000`**, measured at 99.8% nonzero right to the last byte, so the half-megabyte figure is a real fill extent and not just an allocation.
+
+**Two naming corrections, both caught by module-to-bank attribution.** Descriptor `0x4c34` belongs to `isp_sub_lsc` and was shipped as LTM; descriptor `0x1c6c` belongs to `isp_sub_hdr` and was shipped as GTM2. Neither changed a byte, because in both cases the driver was already producing what the hardware wanted. Both were renamed, because the vendor has its own `ltm` and `gtm2` modules on bank `0x2800` whose descriptors are still unowned, and leaving our pages under those names would collide with whoever opens them. The general lesson: **a descriptor's name is worth nothing until its bank is attributed to a module**, and the attribution method is in the shading and colour section below.
+
+Both driver-side names were wrong and both are now fixed. `0x4c34` is owned by `isp_sub_lsc` on bank `0x4c00`, so the driver calls it LSC; it was called LTM. `0x1c6c` is owned by `isp_sub_hdr` on bank `0x1c00`, so the driver calls it the HDR page; it was called GTM2. The vendor's own `gtm2` and `ltm` modules share bank `0x2800` and their descriptors `0x2808`/`0x280c` are still unowned.
 
 Compander is now generated too, and it needed no generator at all. **It has no runtime producer and no tuning-file source**: the `0x7800` page is installed verbatim at ISP init from entry 6 of the descriptor array at VMA `0x472600`, a list of `{u64 source, u64 length}` pairs, whose body at VMA `0x46a3b0` is byte-identical to the page captured off a streaming vendor unit and to the page resident in DRAM on a RAM-booted unit. `scripts/gen-compander.py` extracts it and `ar_isp_compander_fill` rebuilds it. The bilinear at `0x186920` that an earlier note named as its generator produces something else; the `0x7800` size match was a coincidence.
 
@@ -653,15 +701,15 @@ An earlier note here said no part of this page had a stored source. That was wro
 
 Measured, zero differing bytes in both directions:
 
-	GTM2       0x2b2e0200   fetches 0x1000, holds 0xa00 of content
-	compander  0x2b2e0c00 = GTM2 + 0xa00
+	HDR page   0x2b2e0200   fetches 0x1000, holds 0xa00 of content
+	compander  0x2b2e0c00 = HDR page + 0xa00
 	LSC        0x2b2e8600 = compander + 0x7a00
 
-So GTM2's `0xa00..0xfff` **is** the compander table's first `0x600` bytes, read because GTM2 over-fetches past its own content, and a `0x8000` dump of the compander runs into the LSC page. GTM2's real payload is only the 512 bytes at `0x800..0x9ff`; `0x000..0x7ff` is zero.
+So the HDR page's `0xa00..0xfff` **is** the compander table's first `0x600` bytes, read because it over-fetches past its own content, and a `0x8000` dump of the compander runs into the LSC page. Its real payload is only the 512 bytes at `0x800..0x9ff`; `0x000..0x7ff` is zero.
 
-`ar-isp.c` reproduces this rather than working around it: GTM2 and the compander share **one allocation**, GTM2 at offset 0 and the compander at `+0xa00`, and the two descriptors are published into the same block. That reproduces the fetched bytes for both without copying the shared `0x600` twice. The compander span is the `0xf000` its length field at `0x0024` implies rather than the `0x7800` the table occupies: in gamma's proven 32-byte units that is a fetch the vendor cannot satisfy either, since `0xf000` past its compander runs into the gamma page, so the excess is ignored by the block and allocating it only keeps the DMA inside memory we own.
+`ar-isp.c` reproduces this rather than working around it: the HDR page and the compander share **one allocation**, the HDR page at offset 0 and the compander at `+0xa00`, and the two descriptors are published into the same block. That reproduces the fetched bytes for both without copying the shared `0x600` twice. The compander span is the `0xf000` its length field at `0x0024` implies rather than the `0x7800` the table occupies: in gamma's proven 32-byte units that is a fetch the vendor cannot satisfy either, since `0xf000` past its compander runs into the gamma page, so the excess is ignored by the block and allocating it only keeps the DMA inside memory we own.
 
-### GTM2 needs nothing generated
+### The HDR page needs nothing generated
 
 Its `0x1000` fetch is `0x800` of zeros, then `0x200` of payload, then `0x600` of compander. The payload has no stored source: absent from the tuning file, from the service library, and from all 53 non-null entries of the ISP-init template array, and a float-correlation scan of the kind that located the LSC shading grid finds nothing above `r = 0.24` at 256, 128 or 64-value windows.
 
@@ -685,13 +733,13 @@ Two consequences. The `0x4000` memcpy in the vendor handler is the size of its s
 
 Our replay already programs the streaming length: `0x80` appears at `ar_isp_setup_1080p60` indices 470, 472 and 474, inside the 1475-entry prefix the harness applies. Only pages 0 and 1 need to be correct.
 
-### GTM2 and LSC do not use the 0x0014 commit at all
+### The HDR page and LSC do not use the 0x0014 commit at all
 
 They are module-local descriptor records, not entries in the global table selector. There is no `0x0014` bit for either; the only global commits are compander bit 0, DRC bit 4 and gamma bits 1 to 3.
 
 | | pointer | length | valid |
 |---|---|---|---|
-| GTM2 | `0x1c6c` = `0x2b2e0200` | `0x1c74` = `0x80`, so `0x1000` fetched | `0x1c60` |
+| HDR page | `0x1c6c` = `0x2b2e0200` | `0x1c74` = `0x80`, so `0x1000` fetched | `0x1c60` |
 | LSC | `0x4c34` = `0x2b2e8600` | `0x4c28` = `0x34`, so `0x680` fetched | `0x4c3c` |
 
 Recovered from the vendor write trace and independently confirmed against a live register read of a streaming vendor unit; the pointers agree exactly. Both valid bits read `0` mid-stream, so like the `0x0014` commit they appear to self-clear after the fetch.
@@ -738,7 +786,7 @@ Recovered by static analysis of the module code in `libmpp_service.so` plus the 
 | `isp_sub_gtm2`, `isp_sub_ltm` | `0x2800` | descriptors `0x2808`/`0x280c`, both publish sites verified at `+0x08` |
 | `isp_sub_digigain2` | CVISP `+0x4700` | register file, no DMA |
 
-**The page this document calls LTM belongs to the vendor's `isp_sub_lsc`.** Its command handler publishes the DMA address to bank `+0x34`, sets valid at `+0x3c` and writes length `0x34`, exactly the known `0x4c34` record, and its tuning path reads the enable at `raw + 0x9090`, the known LSC gate. So the lens-shading grid already generated by `ar_isp_lsc_from_blob` is the LSC stage's table, and this handoff item was closed by the tone path before it was opened. The labels GTM2 and LTM used elsewhere in this document name the hardware descriptors, not the vendor modules: the modules the vendor calls `gtm2` and `ltm` sit together on bank `0x2800` (descriptors `0x2808`/`0x280c`), and the owner of bank `0x1c00` (descriptor `0x1c6c`) is unattributed. The descriptor-level facts recorded elsewhere are unaffected; only the vendor-side names move.
+**The page this document calls LTM belongs to the vendor's `isp_sub_lsc`.** Its command handler publishes the DMA address to bank `+0x34`, sets valid at `+0x3c` and writes length `0x34`, exactly the known `0x4c34` record, and its tuning path reads the enable at `raw + 0x9090`, the known LSC gate. So the lens-shading grid already generated by `ar_isp_lsc_from_blob` is the LSC stage's table, and this handoff item was closed by the tone path before it was opened. The modules the vendor calls `gtm2` and `ltm` sit together on bank `0x2800` (descriptors `0x2808`/`0x280c`). Bank `0x1c00`, descriptor `0x1c6c`, was unattributed when this was written and has since been resolved to `isp_sub_hdr`. The descriptor-level facts recorded elsewhere are unaffected; only the vendor-side names move.
 
 The float region past the LSC gate holds sixteen 10x10 grids, not one pair: groups at `raw + 0x910c`, `0x9784`, `0x9dfc`, `0xa474`, stride `0x678`, four back-to-back `0x190` grids per group behind a `0x38` header. Every grid correlates with the shipped pair at r > 0.997. The shipped pair is byte-exact against two captures, so the static bring-up choice is proven; the other grids are per-illuminant or per-channel variants for the runtime path (inference, not measured). The `0x2c0` region B stays scene-varying runtime state: it does not decode as the grid's triplet format, correlates with nothing in the tuning file at any window size, and carries the established runtime signature (top bytes clustering on `0xc3`/`0xc6`).
 

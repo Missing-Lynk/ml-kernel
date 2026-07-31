@@ -25,14 +25,21 @@
  * buffer is not obviously wrong; on a cold boot it would be. Formats are in
  * ar-isp-codec.h.
  *
+ * The AE statistics buffers are owned here too. The zone grid, its second
+ * smaller-window instance and the Bayer histogram are allocated and published
+ * at addresses this driver owns, so their contents can be read; debugfs "stats"
+ * decodes the grid. Layouts are in ar-isp-stats.h.
+ *
  * Not implemented here:
  *
- *  - The per-frame loop. The vendor re-arms seven statistics buffer addresses
- *    and runs three indirect-port transactions on every frame, driven by the
- *    VIF frame-start interrupt that ar-vif.c already owns. The output planes
- *    are programmed once during setup and are not part of that loop, so the
- *    first frame should land without it. Later frames will overwrite the same
- *    buffer and the statistics will go stale.
+ *  - The per-frame loop. The vendor re-arms the statistics buffer addresses and
+ *    runs three indirect-port transactions on every frame, driven by the VIF
+ *    frame-start interrupt that ar-vif.c already owns. The output planes are
+ *    programmed once during setup and are not part of that loop, so the first
+ *    frame lands without it. Until that loop moves in here, ml-isploop drives
+ *    it from userspace and re-arms the vendor's statistics addresses over the
+ *    ones published here, so owning them only holds with the cycle disabled.
+ *  - Auto-exposure itself. The statistics are readable; nothing consumes them.
  *  - Buffer allocation, geometry other than 1920x1080, and any V4L2 interface.
  *
  * Configuration provenance is in ar-isp-defaults.h. Two thirds of it comes
@@ -54,9 +61,12 @@
 
 #include "ar-isp-defaults.h"
 #include "ar-isp-codec.h"
+#include "ar-isp-stats.h"
 #include "ar-isp-drc-tail.h"
 #include "ar-isp-gamma-page1.h"
 #include "ar-isp-compander.h"
+#include "ar-isp-colour.h"
+#include "ar-isp-ccm-init.h"
 
 /*
  * Master control. The block is brought up by a staged sequence of writes to
@@ -81,17 +91,40 @@
 #define AR_ISP_INTR_MASK		0x00b8
 
 /*
- * Output plane addresses, identified by their placeholder values in the
- * vendor's static defaults: the block ships with implausible addresses which
- * the runtime replaces with real buffers. Listed for the register dump; the
- * setup table programs them.
+ * de3d's working buffers, on its bank 0x2e00. These were called output planes
+ * here on the strength of their placeholder values; they are not. The ISP does
+ * not write frames at all, CVISP does, and the bank belongs to isp_sub_de3d.
+ *
+ * Three distinct addresses, each published to two registers, each register
+ * written twice as placeholder then address, so they are armed once and never
+ * re-armed. The captures rule out raster content: adjacent-byte correlation is
+ * +0.03, row correlation is flat from stride 16 to 3840 with no peak at any
+ * width, and the autocorrelation peak is at lag 4 with lag 2 anti-correlated,
+ * which is a 32-bit record array. What they hold beyond that is not
+ * established, so they are named for the module that owns them.
  */
-#define AR_ISP_OUT_PLANE0_SET0		0x2e3c
-#define AR_ISP_OUT_PLANE1_SET0		0x2e44
-#define AR_ISP_OUT_PLANE0_SET1		0x2e58
-#define AR_ISP_OUT_PLANE1_SET1		0x2e60
-#define AR_ISP_OUT_PLANE2_SET0		0x2e80
-#define AR_ISP_OUT_PLANE2_SET1		0x2e88
+#define AR_ISP_DE3D_BUF0_A		0x2e3c
+#define AR_ISP_DE3D_BUF1_A		0x2e44
+#define AR_ISP_DE3D_BUF0_B		0x2e58
+#define AR_ISP_DE3D_BUF1_B		0x2e60
+#define AR_ISP_DE3D_BUF2_A		0x2e80
+#define AR_ISP_DE3D_BUF2_B		0x2e88
+
+/*
+ * Sizes, and the honest state of them. The vendor packs the three at
+ * 0x2b439200, 0x2b614200 and 0x2b703200, so the gaps bound the first two at
+ * 0x1db000 and 0xef000: it cannot have used more without overlapping. Nothing
+ * sits above the third, so its gap says nothing and the size here is a guess
+ * carried at the larger of the two measured bounds.
+ *
+ * Getting this wrong is a hardware DMA writing past a buffer we own. The
+ * isp_cma reservation is no-map, so an overrun stays inside the reserved region
+ * and cannot reach kernel memory, but it would quietly corrupt our own tables.
+ * A dump of the vendor's layout above 0x2b703200 would settle it.
+ */
+#define AR_ISP_DE3D_BUF0_SIZE		0x1db000
+#define AR_ISP_DE3D_BUF1_SIZE		0xef000
+#define AR_ISP_DE3D_BUF2_SIZE		0x1db000
 
 /* Output stage geometry and commit. */
 #define AR_ISP_OUT_SIZE			0x2e04
@@ -140,13 +173,13 @@
 #define AR_ISP_TABLE_DRC_BIT		0x00000010
 
 /*
- * GTM2 and the compander share one allocation, in the vendor's own layout.
+ * The HDR page and the compander share one allocation, in the vendor's layout.
  *
  * On the vendor these are not independent buffers: the compander sits at
- * 0x2b2e0c00 and GTM2 at 0x2b2e0200, exactly 0xa00 lower, and GTM2's descriptor
- * length makes it fetch 0x1000. So GTM2's last 0x600 bytes ARE the compander's
- * first 0x600, read because the fetch overruns GTM2's own content. Measured on
- * captured pages: zero differing bytes across all 1536.
+ * 0x2b2e0c00 and the HDR page at 0x2b2e0200, exactly 0xa00 lower, and the HDR
+ * descriptor length makes it fetch 0x1000. So its last 0x600 bytes ARE the
+ * compander's first 0x600, read because the fetch overruns its own content.
+ * Measured on captured pages: zero differing bytes across all 1536.
  *
  * Allocating one block in that relationship reproduces the fetched bytes for
  * both descriptors without copying anything twice, and makes the overlap
@@ -159,20 +192,23 @@
  * excess is therefore ignored, and allocating it only keeps the DMA inside
  * memory we own.
  */
-#define AR_ISP_GTM2_SIZE		0x1000
-#define AR_ISP_GTM2_COMPANDER		0xa00
+#define AR_ISP_HDR_SIZE		0x1000
+#define AR_ISP_HDR_COMPANDER		0xa00
 #define AR_ISP_COMPANDER_ALLOC		0xf000
-#define AR_ISP_TONE_ALLOC		(AR_ISP_GTM2_COMPANDER + AR_ISP_COMPANDER_ALLOC)
+#define AR_ISP_TONE_ALLOC		(AR_ISP_HDR_COMPANDER + AR_ISP_COMPANDER_ALLOC)
 
 /*
  * The descriptor on bank 0x1c00. Like LSC's it is module-local, with its own
  * valid bit and no 0x0014 commit. Unlike LSC's, the block does not clear it
- * after fetching. GTM2 is this driver's name for the descriptor: the vendor
- * module of that name sits on bank 0x2800, and bank 0x1c00 has no attributed
- * owner.
+ * after fetching. Bank 0x1c00 belongs to the vendor's isp_sub_hdr: its attach
+ * handler at 0x196900 maps 0x1c00, 0x1f98, 0x1fc0 and 0x1fe0, and the trace's
+ * writes in that range stop before hdr_rro_0_stats at 0x1d20. The driver called
+ * this GTM2 until that was settled; the vendor's gtm2 is a different module on
+ * bank 0x2800. No bytes change with the name: the page is zero over its whole
+ * extent on the vendor and this driver writes zero too.
  */
-#define AR_ISP_TABLE_GTM2		0x1c6c
-#define AR_ISP_TABLE_GTM2_VALID		0x1c60
+#define AR_ISP_TABLE_HDR		0x1c6c
+#define AR_ISP_TABLE_HDR_VALID		0x1c60
 
 /*
  * The addresses the replayed configuration arms, inside the isp_cma reservation.
@@ -191,6 +227,23 @@
  */
 #define AR_ISP_TABLE_LSC		0x4c34
 #define AR_ISP_TABLE_LSC_VALID		0x4c3c
+
+/*
+ * Statistics buffer addresses, derived from the bank map in ar-isp-stats.h
+ * rather than carried as literals. The two RRO engines sit on one bank at a
+ * 0x34 stride and rro_face is a third instance of the same block, so all four
+ * fall out of a base plus the engine's own address register. They match the
+ * addresses the vendor's per-frame cycle writes, which is the check that the
+ * bank map is right.
+ *
+ * These are DMA targets the hardware writes, not tables it fetches, so there is
+ * no commit and no valid bit: publishing an address is the whole protocol.
+ */
+#define AR_ISP_STATS_RRO0	(AR_ISP_RRO_BANK + AR_ISP_RRO_REG_ADDR)
+#define AR_ISP_STATS_RRO1	(AR_ISP_RRO_BANK + AR_ISP_RRO_ENGINE_STRIDE + \
+				 AR_ISP_RRO_REG_ADDR)
+#define AR_ISP_STATS_RRO_FACE	(AR_ISP_RRO_FACE_BANK + AR_ISP_RRO_REG_ADDR)
+#define AR_ISP_STATS_HIST	(AR_ISP_HIST_BANK + AR_ISP_HIST_REG_ADDR)
 
 /*
  * The vendor tuning file, verbatim. Its length is checked because the vendor
@@ -245,15 +298,41 @@ module_param(compander, bool, 0644);
 MODULE_PARM_DESC(compander,
 		 "own the compander page and fill it from the carried template (default on)");
 
-static bool gtm2 = true;
-module_param(gtm2, bool, 0644);
-MODULE_PARM_DESC(gtm2,
-		 "own the GTM2 page, which shares an allocation with the compander (default on)");
+static bool hdr = true;
+module_param(hdr, bool, 0644);
+MODULE_PARM_DESC(hdr,
+		 "own the HDR page, which shares an allocation with the compander (default on)");
 
 static bool lsc = true;
 module_param(lsc, bool, 0644);
 MODULE_PARM_DESC(lsc,
 		 "own the LSC page and generate its lens-shading grid (default on)");
+
+static bool ccm = true;
+module_param(ccm, bool, 0644);
+MODULE_PARM_DESC(ccm,
+		 "own the CCM register banks and pack the tuning matrix (default on)");
+
+static unsigned int ccm_bank;
+module_param(ccm_bank, uint, 0644);
+MODULE_PARM_DESC(ccm_bank,
+		 "which tuning-file illuminant bank to install, 0 to 3 (default 0, the traced one)");
+
+/*
+ * Off until a bring-up runs with it on. Every other ownership switch here
+ * reproduces a value the vendor computes; this one hands the hardware three
+ * buffers of our own instead, and the sizes are bounds derived from the gaps
+ * between the vendor's allocations rather than measured extents.
+ */
+static bool de3d;
+module_param(de3d, bool, 0644);
+MODULE_PARM_DESC(de3d,
+		 "own de3d's three working buffers instead of the vendor's (default off)");
+
+static bool stats = true;
+module_param(stats, bool, 0644);
+MODULE_PARM_DESC(stats,
+		 "own the AE statistics buffers instead of the vendor's (default on)");
 
 struct ar_isp {
 	struct device *dev;
@@ -271,6 +350,31 @@ struct ar_isp {
 	dma_addr_t tone_dma;
 	void *lsc;
 	dma_addr_t lsc_dma;
+
+	/*
+	 * Statistics targets. rro is the AE zone grid and both bank-0x6400
+	 * engines are pointed at it, reproducing the vendor, which publishes
+	 * one buffer to both. rro_face is the second, smaller-window grid and
+	 * hist is the Bayer histogram.
+	 *
+	 * af_stats and ltm_stats are deliberately absent: af_stats is disabled
+	 * on this sensor so nothing writes its buffer, and neither module's
+	 * length is established, so both keep the vendor's addresses rather
+	 * than being given a guessed allocation.
+	 */
+	void *rro;
+	dma_addr_t rro_dma;
+	void *rro_face;
+	dma_addr_t rro_face_dma;
+	void *hist;
+	dma_addr_t hist_dma;
+
+	/*
+	 * de3d's three working buffers. Hardware-written, armed once, and until
+	 * now left pointing at the vendor's own memory across the RAM-boot.
+	 */
+	void *de3d[3];
+	dma_addr_t de3d_dma[3];
 };
 
 static const struct {
@@ -282,12 +386,12 @@ static const struct {
 	{ AR_ISP_INTR_STATUS,		"intr_status" },
 	{ AR_ISP_INTR_MASK,		"intr_mask" },
 	{ AR_ISP_OUT_SIZE,		"out_size" },
-	{ AR_ISP_OUT_PLANE0_SET0,	"out_plane0_set0" },
-	{ AR_ISP_OUT_PLANE1_SET0,	"out_plane1_set0" },
-	{ AR_ISP_OUT_PLANE2_SET0,	"out_plane2_set0" },
-	{ AR_ISP_OUT_PLANE0_SET1,	"out_plane0_set1" },
-	{ AR_ISP_OUT_PLANE1_SET1,	"out_plane1_set1" },
-	{ AR_ISP_OUT_PLANE2_SET1,	"out_plane2_set1" },
+	{ AR_ISP_DE3D_BUF0_A,		"de3d_buf0_a" },
+	{ AR_ISP_DE3D_BUF1_A,		"de3d_buf1_a" },
+	{ AR_ISP_DE3D_BUF2_A,		"de3d_buf2_a" },
+	{ AR_ISP_DE3D_BUF0_B,		"de3d_buf0_b" },
+	{ AR_ISP_DE3D_BUF1_B,		"de3d_buf1_b" },
+	{ AR_ISP_DE3D_BUF2_B,		"de3d_buf2_b" },
 	{ AR_ISP_OUT_COMMIT,		"out_commit" },
 	{ AR_ISP_IN_GEOMETRY,		"in_geometry" },
 	{ AR_ISP_IN_LINETIME,		"in_linetime" },
@@ -416,6 +520,145 @@ static bool ar_isp_seed_from_vendor(struct ar_isp *isp, void *dst,
 }
 
 /*
+ * Point the statistics engines at buffers this driver owns.
+ *
+ * The setup table arms the vendor's addresses, inside the vendor's carveout,
+ * which is memory we neither allocated nor can read. Re-publishing after the
+ * table has run redirects the writes without disturbing anything else: these
+ * are plain DMA targets, so an address is the whole protocol and the engines
+ * pick it up on the next frame they complete.
+ *
+ * Both bank-0x6400 engines get the same buffer, because that is what the vendor
+ * does and the two captures are byte-identical because of it.
+ *
+ * Called from ar_isp_tables_apply, so a reconfigure re-points them too. The
+ * per-frame cycle re-arms these same registers; until that cycle moves into
+ * this driver, ml-isploop keeps writing the vendor's addresses over ours every
+ * frame, so stats=1 only holds for a run with the cycle disabled.
+ */
+/*
+ * Point de3d at buffers this driver owns.
+ *
+ * Each buffer goes to two registers, which is how the vendor arms them: the
+ * pair takes one address, not two halves of a range. Published after the setup
+ * table for the same reason the statistics buffers are, since that table also
+ * carries the vendor's addresses for these.
+ *
+ * The buffers are handed over zeroed rather than seeded. de3d is temporal, so
+ * whatever it accumulates it rebuilds from the frames it sees; starting from
+ * zero means the first frames run against an empty history instead of against
+ * the vendor's, which is the honest cold-boot behaviour rather than inherited
+ * state that happens to look right.
+ */
+static void ar_isp_de3d_publish(struct ar_isp *isp)
+{
+	static const u16 reg[3][2] = {
+		{ AR_ISP_DE3D_BUF0_A, AR_ISP_DE3D_BUF0_B },
+		{ AR_ISP_DE3D_BUF1_A, AR_ISP_DE3D_BUF1_B },
+		{ AR_ISP_DE3D_BUF2_A, AR_ISP_DE3D_BUF2_B },
+	};
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(reg); i++) {
+		if (!isp->de3d[i])
+			continue;
+		writel(lower_32_bits(isp->de3d_dma[i]), isp->base + reg[i][0]);
+		writel(lower_32_bits(isp->de3d_dma[i]), isp->base + reg[i][1]);
+	}
+
+	if (isp->de3d[0])
+		dev_info(isp->dev, "de3d: %pad, %pad, %pad\n",
+			 &isp->de3d_dma[0], &isp->de3d_dma[1], &isp->de3d_dma[2]);
+}
+
+static void ar_isp_stats_publish(struct ar_isp *isp)
+{
+	if (isp->rro) {
+		writel(lower_32_bits(isp->rro_dma), isp->base + AR_ISP_STATS_RRO0);
+		writel(lower_32_bits(isp->rro_dma), isp->base + AR_ISP_STATS_RRO1);
+	}
+
+	if (isp->rro_face)
+		writel(lower_32_bits(isp->rro_face_dma),
+		       isp->base + AR_ISP_STATS_RRO_FACE);
+
+	if (isp->hist)
+		writel(lower_32_bits(isp->hist_dma), isp->base + AR_ISP_STATS_HIST);
+
+	if (isp->rro || isp->hist)
+		dev_info(isp->dev, "stats: rro %pad, rro_face %pad, hist %pad\n",
+			 &isp->rro_dma, &isp->rro_face_dma, &isp->hist_dma);
+}
+
+/*
+ * Colour correction. Two register banks, not a DMA page: 0x50 bytes each
+ * holding two packed 3x3 matrices, one at +0x00 and a second copy at +0x20.
+ *
+ * The vendor's sequence is an identity pair installed into ccm1 at init, a
+ * fixed matrix pair installed into ccm2, and then the AWB path overwriting
+ * ccm1's FIRST copy only with an interpolated tuning-file matrix. ccm2 never
+ * moves, because its tuning gate reads 0 in this blob.
+ *
+ * Doing it here rather than leaving it to the register replay is not just
+ * ownership. The replay carries the vendor's runtime matrix, but at entry 1718
+ * of the setup table, and a bring-up that applies a prefix shorter than that
+ * stops at the identity the earlier entries wrote. The 1475-entry prefix the
+ * camera harness uses does exactly that, so every bring-up so far has run with
+ * colour correction switched off and nobody noticed, because an identity CCM
+ * produces a plausible picture rather than an obviously broken one.
+ *
+ * Without AWB there is nothing to interpolate between, so the driver installs
+ * one illuminant bank verbatim. Bank 0 is what the vendor was traced writing,
+ * which makes this reproduce the traced register state exactly rather than
+ * approximate it. When AWB exists it selects the bank and blends two of them;
+ * the packing does not change.
+ */
+static void ar_isp_ccm_apply(struct ar_isp *isp)
+{
+	u8 packed[AR_ISP_CCM_WORDS * 4];
+	const u8 *blob;
+	unsigned int i;
+
+	if (!ccm)
+		return;
+
+	for (i = 0; i < ARRAY_SIZE(ar_isp_ccm1_init); i++)
+		writel(ar_isp_ccm1_init[i], isp->base + AR_ISP_CCM1_BANK + i * 4);
+	for (i = 0; i < ARRAY_SIZE(ar_isp_ccm2_init); i++)
+		writel(ar_isp_ccm2_init[i], isp->base + AR_ISP_CCM2_BANK + i * 4);
+
+	if (!isp->tuning) {
+		dev_info(isp->dev, "ccm: init blocks only, no tuning file\n");
+		return;
+	}
+
+	blob = isp->tuning->data;
+
+	/*
+	 * The gate the vendor's AWB path checks before it touches ccm1. If the
+	 * blob has it clear, ccm1 keeps the identity, which is the vendor's own
+	 * behaviour and not a failure.
+	 */
+	if (ar_isp_get_le32(blob + AR_ISP_CCM_BLOB_GATE) != 1) {
+		dev_info(isp->dev, "ccm: tuning gate clear, ccm1 left at identity\n");
+		return;
+	}
+
+	if (ccm_bank >= AR_ISP_CCM_BLOB_BANKS_USED) {
+		dev_warn(isp->dev, "ccm: bank %u out of range, using 0\n", ccm_bank);
+		ccm_bank = 0;
+	}
+
+	ar_isp_ccm_from_blob(packed, blob, ccm_bank);
+
+	for (i = 0; i < AR_ISP_CCM_WORDS; i++)
+		writel(ar_isp_get_le32(packed + i * 4),
+		       isp->base + AR_ISP_CCM1_BANK + i * 4);
+
+	dev_info(isp->dev, "ccm: bank %u packed into ccm1 copy A\n", ccm_bank);
+}
+
+/*
  * Fill the owned buffers and hand them to the block.
  *
  * Runs after the register replay, which arms the vendor's addresses and commits
@@ -502,7 +745,7 @@ static void ar_isp_tables_apply(struct ar_isp *isp)
 		 * the same bytes on every unit and in every scene, so there is
 		 * nothing to fall back to and nothing to select.
 		 *
-		 * GTM2's own 0xa00 is left zero. Its first 0x800 is zero on the
+		 * The HDR page's own 0xa00 is left zero. Its first 0x800 is zero on the
 		 * vendor too; the 0x200 after that is scene-varying runtime state,
 		 * measured at 117 of 512 bytes differing between two captures, so
 		 * it has no stored source to reproduce. Zeroing it was measured on
@@ -510,7 +753,7 @@ static void ar_isp_tables_apply(struct ar_isp *isp)
 		 * 94.5% frame-to-frame floor from scene motion alone: no effect.
 		 */
 		memset(isp->tone, 0, AR_ISP_TONE_ALLOC);
-		ar_isp_compander_fill(isp->tone + AR_ISP_GTM2_COMPANDER,
+		ar_isp_compander_fill(isp->tone + AR_ISP_HDR_COMPANDER,
 				      ar_isp_compander_head,
 				      ar_isp_compander_mid);
 		tone_built = true;
@@ -565,15 +808,15 @@ static void ar_isp_tables_apply(struct ar_isp *isp)
 	}
 
 	if (isp->tone) {
-		writel(lower_32_bits(isp->tone_dma + AR_ISP_GTM2_COMPANDER),
+		writel(lower_32_bits(isp->tone_dma + AR_ISP_HDR_COMPANDER),
 		       isp->base + AR_ISP_TABLE_COMPANDER);
 		writel(AR_ISP_TABLE_COMMIT_ENABLE | AR_ISP_TABLE_COMPANDER_BIT,
 		       isp->base + AR_ISP_TABLE_COMMIT);
 
-		if (gtm2) {
+		if (hdr) {
 			writel(lower_32_bits(isp->tone_dma),
-			       isp->base + AR_ISP_TABLE_GTM2);
-			writel(1, isp->base + AR_ISP_TABLE_GTM2_VALID);
+			       isp->base + AR_ISP_TABLE_HDR);
+			writel(1, isp->base + AR_ISP_TABLE_HDR_VALID);
 		}
 	}
 
@@ -582,6 +825,9 @@ static void ar_isp_tables_apply(struct ar_isp *isp)
 		writel(1, isp->base + AR_ISP_TABLE_LSC_VALID);
 	}
 
+	ar_isp_stats_publish(isp);
+	ar_isp_de3d_publish(isp);
+
 	dev_info(isp->dev,
 		 "tables: gamma %pad %s, drc %pad %s, compander %pad %s, lsc %pad %s\n",
 		 &isp->gamma_dma,
@@ -589,7 +835,7 @@ static void ar_isp_tables_apply(struct ar_isp *isp)
 		 &isp->drc_dma,
 		 drc_built ? "built" : (drc_seeded ? "seeded" : "zeroed"),
 		 &isp->tone_dma,
-		 tone_built ? "gtm2+compander built" : "on the vendor's page",
+		 tone_built ? "hdr+compander built" : "on the vendor's page",
 		 &isp->lsc_dma,
 		 lsc_built ? "shading built" : (lsc_seeded ? "seeded" : "zeroed"));
 }
@@ -633,6 +879,33 @@ static void ar_isp_tables_prepare(struct ar_isp *isp)
 	    (lsc && !isp->lsc))
 		dev_warn(dev, "coefficient buffers unavailable, falling back to the vendor's\n");
 
+	if (stats) {
+		isp->rro = dma_alloc_coherent(dev, AR_ISP_RRO_SIZE,
+					      &isp->rro_dma, GFP_KERNEL);
+		isp->rro_face = dma_alloc_coherent(dev, AR_ISP_RRO_SIZE,
+						   &isp->rro_face_dma, GFP_KERNEL);
+		isp->hist = dma_alloc_coherent(dev, AR_ISP_HIST_SIZE,
+					       &isp->hist_dma, GFP_KERNEL);
+		if (!isp->rro || !isp->rro_face || !isp->hist)
+			dev_warn(dev, "statistics buffers unavailable, falling back to the vendor's\n");
+	}
+
+	if (de3d) {
+		static const size_t sz[3] = {
+			AR_ISP_DE3D_BUF0_SIZE, AR_ISP_DE3D_BUF1_SIZE,
+			AR_ISP_DE3D_BUF2_SIZE,
+		};
+		unsigned int i;
+
+		for (i = 0; i < ARRAY_SIZE(sz); i++)
+			isp->de3d[i] = dma_alloc_coherent(dev, sz[i],
+							  &isp->de3d_dma[i],
+							  GFP_KERNEL);
+
+		if (!isp->de3d[0] || !isp->de3d[1] || !isp->de3d[2])
+			dev_warn(dev, "de3d buffers unavailable, falling back to the vendor's\n");
+	}
+
 	ret = request_firmware(&isp->tuning, AR_ISP_TUNING_FIRMWARE, dev);
 	if (ret) {
 		dev_warn(dev, "no %s (%d), tables cannot be generated\n",
@@ -664,6 +937,27 @@ static void ar_isp_tables_release(struct ar_isp *isp)
 	if (isp->lsc)
 		dma_free_coherent(isp->dev, AR_ISP_LSC_SIZE, isp->lsc,
 				  isp->lsc_dma);
+	if (isp->rro)
+		dma_free_coherent(isp->dev, AR_ISP_RRO_SIZE, isp->rro,
+				  isp->rro_dma);
+	if (isp->rro_face)
+		dma_free_coherent(isp->dev, AR_ISP_RRO_SIZE, isp->rro_face,
+				  isp->rro_face_dma);
+	if (isp->hist)
+		dma_free_coherent(isp->dev, AR_ISP_HIST_SIZE, isp->hist,
+				  isp->hist_dma);
+	{
+		static const size_t sz[3] = {
+			AR_ISP_DE3D_BUF0_SIZE, AR_ISP_DE3D_BUF1_SIZE,
+			AR_ISP_DE3D_BUF2_SIZE,
+		};
+		unsigned int i;
+
+		for (i = 0; i < ARRAY_SIZE(sz); i++)
+			if (isp->de3d[i])
+				dma_free_coherent(isp->dev, sz[i], isp->de3d[i],
+						  isp->de3d_dma[i]);
+	}
 	release_firmware(isp->tuning);
 }
 
@@ -735,6 +1029,18 @@ static void ar_isp_configure(struct ar_isp *isp)
 static void ar_isp_arm_output(struct ar_isp *isp)
 {
 	ar_isp_apply(isp, ar_isp_output_arm, ARRAY_SIZE(ar_isp_output_arm));
+
+	/*
+	 * Re-publish after the setup table, not only from ar_isp_tables_apply.
+	 * The table carries the vendor's own statistics addresses and applying
+	 * it, or any prefix of it past entry 1425, overwrites ours. Measured:
+	 * publishing at table time and then running a 1475-entry prefix left
+	 * 0x6440 reading the vendor's 0x2a662200, so the engines wrote the
+	 * vendor's carveout and our buffers stayed empty.
+	 */
+	ar_isp_stats_publish(isp);
+	ar_isp_de3d_publish(isp);
+	ar_isp_ccm_apply(isp);
 
 	dev_info(isp->dev,
 		 "output arm: %zu writes, control 0x%08x, in_geometry 0x%08x\n",
@@ -848,6 +1154,56 @@ static int ar_isp_regs_show(struct seq_file *s, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(ar_isp_regs);
 
+/*
+ * The AE zone grid, decoded.
+ *
+ * Prints the per-zone luma mean as a 36-column by 16-row map, plus the frame
+ * mean and the count the sums were accumulated over. The count is read from the
+ * buffer rather than computed, because it is a function of the programmed
+ * geometry and a stale divisor would silently scale every mean.
+ *
+ * An all-zero map with a zero count means the hardware is not writing here,
+ * which is the check that matters after publishing our own address: the engines
+ * keep whatever address was last written to them, so a buffer that stays zero
+ * says the vendor's per-frame cycle overwrote the pointer.
+ *
+ * Luma is the mean of the two greens. Channels 1 and 2 are the greens, measured
+ * by their tracking across the grid; which of 0 and 3 is red is not established,
+ * so neither is used here.
+ */
+static int ar_isp_stats_show(struct seq_file *s, void *unused)
+{
+	struct ar_isp *isp = s->private;
+	unsigned int col, row;
+	u64 total = 0;
+	u32 count;
+
+	if (!isp->rro) {
+		seq_puts(s, "not owned\n");
+		return 0;
+	}
+
+	count = ar_isp_rro_count(isp->rro, 0);
+	seq_printf(s, "count %u per zone per channel\n", count);
+
+	for (row = 0; row < AR_ISP_RRO_ROWS; row++) {
+		for (col = 0; col < AR_ISP_RRO_COLS; col++) {
+			u32 g0 = ar_isp_rro_mean(isp->rro, col, row, 1);
+			u32 g1 = ar_isp_rro_mean(isp->rro, col, row, 2);
+			u32 luma = (g0 + g1) / 2;
+
+			total += luma;
+			seq_printf(s, "%4u", luma);
+		}
+		seq_putc(s, '\n');
+	}
+
+	seq_printf(s, "frame mean %llu\n", total / AR_ISP_RRO_ZONES);
+
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(ar_isp_stats);
+
 static int ar_isp_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -888,6 +1244,7 @@ static int ar_isp_probe(struct platform_device *pdev)
 	debugfs_create_file_unsafe("configure", 0600, isp->debugfs, isp,
 				   &ar_isp_configure_fops);
 	debugfs_create_file("regs", 0400, isp->debugfs, isp, &ar_isp_regs_fops);
+	debugfs_create_file("stats", 0400, isp->debugfs, isp, &ar_isp_stats_fops);
 	/*
 	 * Reading this reports the table size, so a bisect script can discover
 	 * the upper bound without hardcoding it.

@@ -38,12 +38,37 @@
 
 #include <linux/clk.h>
 #include <linux/debugfs.h>
+#include <linux/firmware.h>
 #include <linux/io.h>
+#include <linux/math64.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 
 #include "ar-cvisp-defaults.h"
+#include "ar-isp-blc.h"
+
+/*
+ * The tuning file BLC reads. Same file ar-isp loads; requested here rather than
+ * shared because the two drivers own different blocks, and it is released as
+ * soon as the 64-byte block has been built.
+ */
+#define AR_CVISP_TUNING_FIRMWARE	"artosyn/nt99235-tuning-preview-fpv.bin"
+
+static bool blc = true;
+module_param(blc, bool, 0644);
+MODULE_PARM_DESC(blc,
+		 "generate black level correction from the tuning file (default on)");
+
+/*
+ * Sensor gain in the tuning file's ladder units, which span 1 to 2100. The
+ * default is the vendor's traced operating point and reproduces its registers
+ * exactly; auto-exposure will drive this once it owns gain.
+ */
+static unsigned int blc_gain = 187;
+module_param(blc_gain, uint, 0644);
+MODULE_PARM_DESC(blc_gain,
+		 "sensor gain BLC blends for, in ladder units (default 187, the traced point)");
 
 /*
  * Output control. The vendor stages this 0x00800800 -> 0x00800802 -> 0x00800806
@@ -150,6 +175,128 @@ static void ar_cvisp_queue(struct ar_cvisp *cv)
 }
 
 /*
+ * A float32 from the tuning file as a truncated unsigned integer.
+ *
+ * The kernel has no FPU, so the ladder's bounds are decoded from their IEEE-754
+ * bit patterns. Every value in this ladder is a small positive integer, so the
+ * general cases only exist to keep a corrupt file from producing nonsense.
+ */
+static u32 ar_cvisp_f32_to_u32(u32 bits)
+{
+	u32 mant = (bits & 0x7fffff) | 0x800000;
+	int exp = (int)((bits >> 23) & 0xff) - 127;
+
+	if (bits & 0x80000000 || exp < 0)
+		return 0;
+	if (exp > 30)
+		return U32_MAX;
+	if (exp >= 23)
+		return mant << (exp - 23);
+
+	return mant >> (23 - exp);
+}
+
+/*
+ * Black level correction, from the tuning file, as a function of sensor gain.
+ *
+ * The stage is sixteen registers on this block filled by a verbatim 64-byte
+ * copy. Its payload is five calibration entries selected by a ladder of float
+ * pairs: a gain inside a pair's own range uses that entry alone, and a gain
+ * between one pair's second bound and the next pair's first bound blends the
+ * two entries across that band. Recovered from the selection at 0x1bfef8 and
+ * the blend at 0x1c0048; formats are in ar-isp-blc.h.
+ *
+ *	t = (gain - ladder[lo].second) / (ladder[hi].first - ladder[lo].second)
+ *	out = entry[hi] * t + entry[lo] * (1 - t)
+ *
+ * The default gain reproduces the vendor exactly. At 187 the band is 130 to
+ * 510, t is 0.150000, and all four lanes come out at 961 and 272, which are the
+ * 0xf040 and 0x110 the vendor was traced writing. That is the whole reason this
+ * runs after the late table rather than instead of it: the constants that table
+ * carries are the answer for one operating point, and this reproduces them from
+ * the tuning file instead of carrying them.
+ *
+ * BLC recomputes with gain on the vendor, so once auto-exposure moves gain this
+ * has to be re-applied with it. Nothing does that yet, which is safe only while
+ * gain is static.
+ */
+static void ar_cvisp_blc_apply(struct ar_cvisp *cv)
+{
+	const struct firmware *fw;
+	struct ar_isp_blc_entry lo, hi;
+	u8 block[AR_ISP_BLC_BLOCK];
+	u32 bound_lo, bound_hi, blend;
+	unsigned int i, sel = 0;
+	const u8 *ladder;
+	int ret;
+
+	if (!blc)
+		return;
+
+	ret = request_firmware(&fw, AR_CVISP_TUNING_FIRMWARE, cv->dev);
+	if (ret) {
+		dev_info(cv->dev, "blc: no %s (%d), leaving the replayed constants\n",
+			 AR_CVISP_TUNING_FIRMWARE, ret);
+		return;
+	}
+
+	if (fw->size < AR_ISP_BLC_BLOB_TABLE +
+		       AR_ISP_BLC_ENTRIES * AR_ISP_BLC_ENTRY_SIZE) {
+		dev_warn(cv->dev, "blc: tuning file too short, leaving the replayed constants\n");
+		release_firmware(fw);
+		return;
+	}
+
+	ladder = fw->data + AR_ISP_BLC_BLOB_LADDER;
+
+	/*
+	 * Find the band the gain sits in. Walking upwards and stopping at the
+	 * first pair whose second bound is above the gain puts a gain inside a
+	 * pair's own range on that pair, where the two indices coincide and the
+	 * entry is used without blending, exactly as the vendor's equal-index
+	 * case does.
+	 */
+	for (i = 0; i + 1 < AR_ISP_BLC_ENTRIES; i++) {
+		if (blc_gain < ar_cvisp_f32_to_u32(ar_isp_get_le32(ladder + i * 8 + 4)))
+			break;
+		sel = i;
+	}
+
+	bound_lo = ar_cvisp_f32_to_u32(ar_isp_get_le32(ladder + sel * 8 + 4));
+	bound_hi = ar_cvisp_f32_to_u32(ar_isp_get_le32(ladder + (sel + 1) * 8));
+
+	ar_isp_blc_entry(fw->data, sel, &lo);
+	ar_isp_blc_entry(fw->data, sel + 1, &hi);
+
+	/*
+	 * ar_isp_blc_mix weights the low entry, so it takes 1 - t. A gain below
+	 * the band uses the low entry alone and one above it the high entry,
+	 * which is what clamping the weight to the Q16 endpoints does.
+	 */
+	if (blc_gain <= bound_lo || bound_hi <= bound_lo)
+		blend = AR_ISP_BLC_BLEND_ONE;
+	else if (blc_gain >= bound_hi)
+		blend = 0;
+	else
+		blend = AR_ISP_BLC_BLEND_ONE -
+			(u32)div_u64((u64)(blc_gain - bound_lo) * AR_ISP_BLC_BLEND_ONE,
+				     bound_hi - bound_lo);
+
+	ar_isp_blc_fill(block, &lo, &hi, blend);
+
+	for (i = 0; i < AR_ISP_BLC_BLOCK; i += 4)
+		writel(ar_isp_get_le32(block + i), cv->base + AR_ISP_BLC_BANK + i);
+
+	dev_info(cv->dev,
+		 "blc: gain %u in band %u..%u, entries %u/%u, scale 0x%08x level 0x%08x\n",
+		 blc_gain, bound_lo, bound_hi, sel, sel + 1,
+		 readl(cv->base + AR_ISP_BLC_BANK + AR_ISP_BLC_REG_SCALE),
+		 readl(cv->base + AR_ISP_BLC_BANK + AR_ISP_BLC_REG_LEVEL));
+
+	release_firmware(fw);
+}
+
+/*
  * Apply the whole recovered configuration. The setup table ends with the staged
  * enable, so the block is live once it returns, with ring set 0 armed. The late
  * table follows with frames already in flight; whether that ordering is
@@ -161,6 +308,9 @@ static void ar_cvisp_configure(struct ar_cvisp *cv, bool late)
 
 	if (late)
 		ar_cvisp_apply(cv, ar_cvisp_late, ARRAY_SIZE(ar_cvisp_late));
+
+	/* After the late table, which carries the vendor's own BLC constants. */
+	ar_cvisp_blc_apply(cv);
 
 	/* Setup leaves ring set 0 armed, so the next rotation starts at 1. */
 	cv->next = 1 % ARRAY_SIZE(ar_cvisp_ring);
