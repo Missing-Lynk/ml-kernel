@@ -425,10 +425,10 @@ module_param(gib, bool, 0644);
 MODULE_PARM_DESC(gib,
 		 "set gib's bypass bit as the vendor's tuning apply does (default on)");
 
-static bool use_irq;
+static bool use_irq = true;
 module_param(use_irq, bool, 0444);
 MODULE_PARM_DESC(use_irq,
-		 "service the ISP interrupt: acknowledge the status words and count events (default off)");
+		 "service the ISP interrupt: acknowledge the status words and count events (default on; the vendor has no poll mode here at all)");
 
 struct ar_isp {
 	struct device *dev;

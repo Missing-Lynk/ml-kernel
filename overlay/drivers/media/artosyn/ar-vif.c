@@ -308,20 +308,20 @@ static const u32 ar_vif_rgb2yuv[] = {
 };
 
 /*
- * Frame completion source. The frame-done interrupt's status and acknowledge
- * bits are not fully understood, and the line is level triggered: a handler
- * that fails to clear the source wedges the machine. Polling the status
- * register from a work item costs a few reads per frame, cannot storm, and is
- * sufficient to capture frames, so it is the default. The interrupt path is
- * kept behind a parameter for when the acknowledge behaviour is confirmed.
+ * Frame completion source. The interrupt is the default and the vendor's own
+ * mode: the ISR services the same three W1C words the poll path services and
+ * is validated at frame rate with no storm. Polling is kept as the debugging
+ * fallback; it also leaves the status words latched between polls, which is
+ * what an external sampler needs when chasing a status bit.
  *
  * The interrupt is requested only when this is set, so with polling the line
  * stays masked at the interrupt controller and an asserted VIF interrupt is
  * harmless.
  */
-static bool use_irq;
+static bool use_irq = true;
 module_param(use_irq, bool, 0444);
-MODULE_PARM_DESC(use_irq, "complete frames from the frame-done interrupt instead of by polling");
+MODULE_PARM_DESC(use_irq,
+		 "complete frames from the frame-done interrupt (default); 0 falls back to polling for debugging");
 
 /* Event census: the poll acknowledges the W1C status words every few
  * milliseconds, so rare events vanish before an external sampler can see
