@@ -67,6 +67,7 @@
 #include "ar-isp-compander.h"
 #include "ar-isp-colour.h"
 #include "ar-isp-ccm-init.h"
+#include "ar-isp-ladder.h"
 
 /*
  * Master control. The block is brought up by a staged sequence of writes to
@@ -379,6 +380,19 @@ static bool ltm = true;
 module_param(ltm, bool, 0644);
 MODULE_PARM_DESC(ltm,
 		 "own the LTM page and statistics buffer, publishing an identity curve (default on)");
+
+/*
+ * The ladder abscissa is 3A state the vendor computes per frame; without an AE
+ * loop the operating point stands in for it. 1.0 selects band 0 verbatim,
+ * which is byte-identical to the replayed cold bank, so the default changes no
+ * register value, only its provenance. The abscissa's physical unit is not the
+ * sensor analog multiplier (plans/au-blend-engine-and-notch.md section 2), so
+ * no value derived from the gain code is wired up until that unit is pinned.
+ */
+static int rnr_gain = 256;
+module_param(rnr_gain, int, 0644);
+MODULE_PARM_DESC(rnr_gain,
+		 "rnr ladder abscissa as a Q8 linear gain (default 256 = 1.0, the cold band; -1 leaves the replayed bank alone)");
 
 struct ar_isp {
 	struct device *dev;
@@ -724,6 +738,54 @@ static void ar_isp_ccm_apply(struct ar_isp *isp)
 		       isp->base + AR_ISP_CCM1_BANK + i * 4);
 
 	dev_info(isp->dev, "ccm: bank %u packed into ccm1 copy A\n", ccm_bank);
+}
+
+/*
+ * Noise reduction. The replay carries the vendor's cold bank; this recomputes
+ * the twelve ladder registers from the tuning file the way the vendor's rnr
+ * driver does on every gain move, so the values are derived rather than
+ * replayed. At the default abscissa of 1.0 the result is byte-identical to the
+ * replay. The bank control word stays with the replay: its mode bit mirrors
+ * the blob's header flag, and both read 0.
+ */
+static void ar_isp_rnr_apply(struct ar_isp *isp)
+{
+	u32 regs[AR_ISP_RNR_REGS];
+	const u8 *blob;
+	unsigned int i;
+
+	if (rnr_gain < 0)
+		return;
+
+	if (!isp->tuning) {
+		dev_info(isp->dev, "rnr: replayed bank only, no tuning file\n");
+		return;
+	}
+
+	blob = isp->tuning->data;
+
+	/*
+	 * The gate the vendor's rnr driver checks before it recomputes. Clear
+	 * means the stage runs on its replayed state, which is the vendor's own
+	 * behaviour and not a failure.
+	 */
+	if (ar_isp_get_le32(blob + AR_ISP_RNR_BLOB_HEADER +
+			    AR_ISP_RNR_HDR_ENABLE) != 1) {
+		dev_info(isp->dev, "rnr: tuning gate clear, bank left replayed\n");
+		return;
+	}
+
+	ar_isp_rnr_from_blob(regs, blob, (u32)rnr_gain << 8);
+
+	for (i = 0; i < AR_ISP_RNR_REGS; i++)
+		writel(regs[i], isp->base + AR_ISP_RNR_BANK +
+		       AR_ISP_RNR_LADDER + i * 4);
+
+	dev_info(isp->dev, "rnr: ladder at gain %d.%03u, 0x%04x..0x%04x = 0x%08x\n",
+		 rnr_gain >> 8, (rnr_gain & 0xff) * 1000 / 256,
+		 AR_ISP_RNR_BANK + AR_ISP_RNR_LADDER,
+		 AR_ISP_RNR_BANK + AR_ISP_RNR_LADDER + (AR_ISP_RNR_REGS - 1) * 4,
+		 regs[0]);
 }
 
 /*
@@ -1227,6 +1289,7 @@ static void ar_isp_arm_output(struct ar_isp *isp)
 	ar_isp_stats_publish(isp);
 	ar_isp_de3d_publish(isp);
 	ar_isp_ccm_apply(isp);
+	ar_isp_rnr_apply(isp);
 
 	/*
 	 * The vendor's steady state holds both hdr-path module-local valid bits

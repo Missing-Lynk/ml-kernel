@@ -450,7 +450,7 @@ The full chain, sensor through CVISP, captures processed colour frames on the op
 
 Two trace-reading facts that stay relevant: the vendor never spin-waits (no consecutive-read run on any block), and the vendor brings the pipeline up, tears it down, and brings it up again, so the head of a trace shows first-bringup behaviour, not the working path.
 
-The cold-boot dark frame is clean (see "The cold-boot dark-frame blobs"); the open image-quality items are the pre-demosaic edge notch on synthetic content, the left-edge ramp, and the gain-keyed stages running at a replayed operating point. The remaining functional gaps are the runtime 3A loops.
+The cold-boot dark frame is clean (see "The cold-boot dark-frame blobs"); the open image-quality items are the left-edge ramp and the gain-keyed stages running at a replayed operating point. The edge notch on synthetic bars is the sensor's own test-pattern generator, not an ISP stage: edge-aligned averaging over 3,400 real-scene edges shows no trace of it at optical edges, so it never affects live imagery. The remaining functional gaps are the runtime 3A loops.
 
 ## Source map
 
@@ -509,6 +509,7 @@ Validated on hardware with seeding off, so nothing in the "ours" rows came from 
 | hdr_lsc | `0x1e38` | zero page | parity: the stage ends disabled and the vendor's own page is stale heap |
 | CCM | registers `0x3400`/`0x3800`, no DMA | tuning file, packed Q8 sign-magnitude | ours; all six words match the trace exactly |
 | BLC | CVISP registers `0x4200`, no DMA | tuning file, gain-blended calibration entries | ours; reproduces the traced registers exactly |
+| rnr | registers `0x1808`-`0x1834`, no DMA | tuning file, gain-ladder blend (`ar-isp-ladder.h`) | ours; band 0 is byte-identical to the replayed cold bank, and the vendor's live bank reproduces at abscissa 13.6-14.2 (`scripts/check-rnr-ladder.py`) |
 
 **Statistics buffers the hardware writes**, allocated and published by the driver, confirmed on silicon:
 
@@ -537,12 +538,12 @@ The vendor's operating point is pinned exactly: at gain **187** the band is 130 
 
 | Stage | Table | Status |
 |---|---|---|
-| `rnr` | `0x7a6c`, stride `0x160`, 12 entries | mechanism, table and proof recovered; ordering within an entry not recoverable from this tuning file |
+| `rnr` | `0x7a6c`, stride `0x160`, 12 entries | implemented: the driver derives the twelve registers from the ladder (`ar-isp-ladder.h`), validated against both measured points |
 | `lnr` | `0x89f18`, stride `0x428`, 11 entries | table pinned, source fields known, destination registers not established |
 | `de3d` | `0x963ac`, stride `0x2f8`, 12 entries | as `lnr` |
 | `acm`, `cfa`, `cnf` | not located | carry a recomputation path that did not fire during this capture |
 
-`rnr`, `lnr` and `de3d` all blend between two adjacent entries by an AE-supplied weight, exactly as BLC does, and truncate on the way to the registers.
+`rnr`, `lnr` and `de3d` all blend between two adjacent entries by an AE-supplied weight, exactly as BLC does, and truncate on the way to the registers. The weight's abscissa is a linear gain multiplier with unity at 1.0 (rnr's band edges are powers of two), but it is not the sensor analog multiplier: the vendor's live rnr bank demands 13.6-14.2 where the analog gain was 62, the same unresolved scale error BLC shows at 2.6x. The driver therefore takes the abscissa as the `rnr_gain` module parameter (Q8, default 1.0, which is the replayed cold bank exactly) rather than deriving it from the gain code; one vendor capture of the sensor gain register and ISP `0x1808` together pins the unit.
 
 **lnr additionally lost its static curves to the prefix cut.** The applied 1475-entry prefix truncates lnr's four 64-entry strength curves (`0x3d60` onward, stride `0x40`, normalised to `0x40`) mid-block, leaving the tail zero, which is gain zero rather than neutral. `ar_isp_lnr_fix[]` in `ar-isp.c` restores the 35 affected registers with the streaming vendor's live values, applied in both configure paths after the setup replay. Found by the register-state diff (`scripts/isp-regdiff.py`), which classifies every live difference against the driver's own tables; the sweep files carry window-relative row offsets, so that tool is the only sanctioned way to read them.
 
