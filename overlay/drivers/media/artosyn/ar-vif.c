@@ -943,11 +943,22 @@ static void ar_vif_poll_work(struct work_struct *work)
 			      msecs_to_jiffies(AR_VIF_POLL_INTERVAL_MS));
 }
 
-/* Frame done, from the interrupt. Only used when use_irq is set. */
+/* Frame done, from the interrupt. Only used when use_irq is set.
+ *
+ * The line is level triggered, so every asserted W1C source must be
+ * acknowledged in the handler or the line never deasserts and the spurious
+ * detector kills it at 100000 events. The three status words serviced here
+ * are the same three the poll path services: completion is carried in 0x17c,
+ * 0x1b0 alone can read zero while 0x17c asserts, and 0x184 carries the
+ * view-full condition with its FIFO recovery.
+ */
 static irqreturn_t ar_vif_irq(int irq, void *data)
 {
 	struct ar_vif *vif = data;
-	u32 status;
+	u32 bp_status;
+	u32 intr_status;
+	u32 view_full;
+	u32 done;
 
 	/* Never touch a register outside a capture: the block's clock is off
 	 * and the line is level triggered, so a stray interrupt here would
@@ -956,12 +967,36 @@ static irqreturn_t ar_vif_irq(int irq, void *data)
 	if (!vif->streaming)
 		return IRQ_NONE;
 
-	status = ar_vif_read(vif, AR_VIF_INTR_STATUS);
-	if (!status)
+	bp_status = ar_vif_read(vif, AR_VIF_BP_INTR_STATUS);
+	intr_status = ar_vif_read(vif, AR_VIF_INTR_STATUS);
+	view_full = ar_vif_read(vif, AR_VIF_BP_INTR_STATUS_B);
+
+	if (!bp_status && !intr_status && !view_full)
 		return IRQ_NONE;
 
-	ar_vif_write(vif, AR_VIF_INTR_STATUS, status);
-	ar_vif_frame_done(vif);
+	if (bp_status)
+		ar_vif_write(vif, AR_VIF_BP_INTR_STATUS, bp_status);
+	if (intr_status)
+		ar_vif_write(vif, AR_VIF_INTR_STATUS, intr_status);
+
+	if (view_full) {
+		ar_vif_write(vif, AR_VIF_BP_INTR_STATUS_B, view_full);
+		if (view_full & AR_VIF_BP_VIEW_FULL(AR_VIF_VIEW)) {
+			u32 fifo = ar_vif_read(vif,
+					AR_VIF_VIEW_FIFO_BURST(AR_VIF_VIEW));
+
+			ar_vif_write(vif, AR_VIF_VIEW_FIFO_BURST(AR_VIF_VIEW),
+				     fifo | BIT(31));
+			ar_vif_write(vif, AR_VIF_VIEW_FIFO_BURST(AR_VIF_VIEW),
+				     fifo & ~BIT(31));
+		}
+	}
+
+	done = AR_VIF_INTR_BUFFER_DONE(AR_VIF_VIEW) |
+	       AR_VIF_INTR_FRAME_DONE(AR_VIF_VIEW);
+
+	if ((bp_status | intr_status) & done)
+		ar_vif_frame_done(vif);
 
 	return IRQ_HANDLED;
 }

@@ -243,6 +243,16 @@
 #define AR_ISP_VENDOR_HDR_LSC_PHYS	0x2b2e8c00
 
 /*
+ * Green-imbalance control word on gib's bank 0x2400. Bit 30 bypasses the
+ * stage; the vendor's tuning apply takes the flag-zero branch at 0x1bb304
+ * (the gate at blob 0x243e4 reads 0) and sets it. No replay table or sweep
+ * ever wrote the register, so before this write a cold boot ran on the
+ * hardware reset value.
+ */
+#define AR_ISP_GIB_CTRL			0x2408
+#define AR_ISP_GIB_BYPASS		BIT(30)
+
+/*
  * Statistics buffer addresses, derived from the bank map in ar-isp-stats.h
  * rather than carried as literals. The two RRO engines sit on one bank at a
  * 0x34 stride and rro_face is a third instance of the same block, so all four
@@ -393,6 +403,11 @@ static int rnr_gain = 256;
 module_param(rnr_gain, int, 0644);
 MODULE_PARM_DESC(rnr_gain,
 		 "rnr ladder abscissa as a Q8 linear gain (default 256 = 1.0, the cold band; -1 leaves the replayed bank alone)");
+
+static bool gib = true;
+module_param(gib, bool, 0644);
+MODULE_PARM_DESC(gib,
+		 "set gib's bypass bit as the vendor's tuning apply does (default on)");
 
 struct ar_isp {
 	struct device *dev;
@@ -1290,6 +1305,10 @@ static void ar_isp_arm_output(struct ar_isp *isp)
 	ar_isp_de3d_publish(isp);
 	ar_isp_ccm_apply(isp);
 	ar_isp_rnr_apply(isp);
+
+	if (gib)
+		writel(readl(isp->base + AR_ISP_GIB_CTRL) | AR_ISP_GIB_BYPASS,
+		       isp->base + AR_ISP_GIB_CTRL);
 
 	/*
 	 * The vendor's steady state holds both hdr-path module-local valid bits

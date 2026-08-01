@@ -102,6 +102,22 @@ MODULE_PARM_DESC(blc_gain,
 #define AR_CVISP_CROP_H			0x410c
 
 /*
+ * Fixed-pattern-noise control word. The stage's only writer in the vendor
+ * library clears bit 4 on every tuning apply (0x1b125c, commands 0xb10 and
+ * 0xb13) and nothing anywhere sets it, so clear is the vendor's steady state.
+ * The stage has no init fill path, its DMA correction surface is never armed,
+ * and no replay table or sweep covered the register, so before this write a
+ * cold boot ran on the hardware reset value.
+ */
+#define AR_CVISP_FPN_CTRL		0x4400
+#define AR_CVISP_FPN_ENABLE		BIT(4)
+
+static bool fpn = true;
+module_param(fpn, bool, 0644);
+MODULE_PARM_DESC(fpn,
+		 "clear fpn's enable bit as the vendor's tuning apply does (default on)");
+
+/*
  * Off by default: see the probe. The vendor never enables this clock and the
  * boot leaves its gate set, so asserting it is an experiment, not a dependency.
  */
@@ -311,6 +327,10 @@ static void ar_cvisp_configure(struct ar_cvisp *cv, bool late)
 
 	/* After the late table, which carries the vendor's own BLC constants. */
 	ar_cvisp_blc_apply(cv);
+
+	if (fpn)
+		writel(readl(cv->base + AR_CVISP_FPN_CTRL) & ~AR_CVISP_FPN_ENABLE,
+		       cv->base + AR_CVISP_FPN_CTRL);
 
 	/* Setup leaves ring set 0 armed, so the next rotation starts at 1. */
 	cv->next = 1 % ARRAY_SIZE(ar_cvisp_ring);
