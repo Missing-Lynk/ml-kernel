@@ -229,6 +229,19 @@
 #define AR_ISP_TABLE_LSC_VALID		0x4c3c
 
 /*
+ * hdr_lsc descriptor, a second shading stage on bank 0x1dd0. Module-local like
+ * LSC's: length at 0x1e2c carries the same 0x34 sixteen-byte records, address
+ * at 0x1e38, valid at 0x1e40. The replayed configuration arms the vendor's
+ * page at 0x2b2e8c00, 0x600 above the LSC page. The stage's true payload
+ * source is not established (the fourth tuning grid per illuminant group is a
+ * candidate). Filling it with the LSC grid applies shading twice, measured on
+ * hardware as blown-out corners, so the unseeded fill is zero.
+ */
+#define AR_ISP_TABLE_HDR_LSC		0x1e38
+#define AR_ISP_TABLE_HDR_LSC_VALID	0x1e40
+#define AR_ISP_VENDOR_HDR_LSC_PHYS	0x2b2e8c00
+
+/*
  * Statistics buffer addresses, derived from the bank map in ar-isp-stats.h
  * rather than carried as literals. The two RRO engines sit on one bank at a
  * 0x34 stride and rro_face is a third instance of the same block, so all four
@@ -331,6 +344,11 @@ module_param(lsc, bool, 0644);
 MODULE_PARM_DESC(lsc,
 		 "own the LSC page and generate its lens-shading grid (default on)");
 
+static bool hdr_lsc = true;
+module_param(hdr_lsc, bool, 0644);
+MODULE_PARM_DESC(hdr_lsc,
+		 "own the hdr_lsc page, zero-filled until its payload is recovered (default on)");
+
 static bool ccm = true;
 module_param(ccm, bool, 0644);
 MODULE_PARM_DESC(ccm,
@@ -378,6 +396,8 @@ struct ar_isp {
 	dma_addr_t tone_dma;
 	void *lsc;
 	dma_addr_t lsc_dma;
+	void *hdr_lsc;
+	dma_addr_t hdr_lsc_dma;
 
 	/*
 	 * Statistics targets. rro is the AE zone grid and both bank-0x6400
@@ -724,6 +744,7 @@ static void ar_isp_tables_apply(struct ar_isp *isp)
 	bool gamma_built = false, drc_built = false;
 	bool tone_built = false;
 	bool lsc_seeded = false, lsc_built = false;
+	bool hdr_lsc_seeded = false;
 	u8 *page;
 
 	if (!tables)
@@ -849,6 +870,21 @@ static void ar_isp_tables_apply(struct ar_isp *isp)
 		}
 	}
 
+	if (isp->hdr_lsc) {
+		/*
+		 * The page is owned but not built: filling it with the LSC grid
+		 * applies shading twice and was measured on hardware to blow out
+		 * the corners. The stage's real payload is unrecovered, so the
+		 * fill is zero until it is.
+		 */
+		if (seed)
+			hdr_lsc_seeded = ar_isp_seed_from_vendor(isp, isp->hdr_lsc,
+								 AR_ISP_VENDOR_HDR_LSC_PHYS,
+								 AR_ISP_LSC_SIZE);
+		else
+			memset(isp->hdr_lsc, 0, AR_ISP_LSC_SIZE);
+	}
+
 	/*
 	 * The buffers are coherent, so there is no cache to flush, but the writes
 	 * above must be visible before the address that makes the block fetch
@@ -895,6 +931,12 @@ static void ar_isp_tables_apply(struct ar_isp *isp)
 		writel(1, isp->base + AR_ISP_TABLE_LSC_VALID);
 	}
 
+	if (isp->hdr_lsc) {
+		writel(lower_32_bits(isp->hdr_lsc_dma),
+		       isp->base + AR_ISP_TABLE_HDR_LSC);
+		writel(1, isp->base + AR_ISP_TABLE_HDR_LSC_VALID);
+	}
+
 	ar_isp_stats_publish(isp);
 	ar_isp_de3d_publish(isp);
 
@@ -908,6 +950,10 @@ static void ar_isp_tables_apply(struct ar_isp *isp)
 		 tone_built ? "hdr+compander built" : "on the vendor's page",
 		 &isp->lsc_dma,
 		 lsc_built ? "shading built" : (lsc_seeded ? "seeded" : "zeroed"));
+
+	if (isp->hdr_lsc)
+		dev_info(isp->dev, "hdr_lsc: %pad %s\n", &isp->hdr_lsc_dma,
+			 hdr_lsc_seeded ? "seeded" : "zeroed");
 }
 
 /*
@@ -945,8 +991,11 @@ static void ar_isp_tables_prepare(struct ar_isp *isp)
 	if (lsc)
 		isp->lsc = dma_alloc_coherent(dev, AR_ISP_LSC_SIZE,
 					      &isp->lsc_dma, GFP_KERNEL);
+	if (hdr_lsc)
+		isp->hdr_lsc = dma_alloc_coherent(dev, AR_ISP_LSC_SIZE,
+						  &isp->hdr_lsc_dma, GFP_KERNEL);
 	if (!isp->gamma || !isp->drc || (compander && !isp->tone) ||
-	    (lsc && !isp->lsc))
+	    (lsc && !isp->lsc) || (hdr_lsc && !isp->hdr_lsc))
 		dev_warn(dev, "coefficient buffers unavailable, falling back to the vendor's\n");
 
 	if (stats) {
@@ -1018,6 +1067,9 @@ static void ar_isp_tables_release(struct ar_isp *isp)
 	if (isp->lsc)
 		dma_free_coherent(isp->dev, AR_ISP_LSC_SIZE, isp->lsc,
 				  isp->lsc_dma);
+	if (isp->hdr_lsc)
+		dma_free_coherent(isp->dev, AR_ISP_LSC_SIZE, isp->hdr_lsc,
+				  isp->hdr_lsc_dma);
 	if (isp->rro)
 		dma_free_coherent(isp->dev, AR_ISP_RRO_SIZE, isp->rro,
 				  isp->rro_dma);
@@ -1065,6 +1117,52 @@ static void ar_isp_tables_release(struct ar_isp *isp)
  * out to need a VIF or CSI-2 register at a particular point, this is where it
  * would show up.
  */
+/*
+ * The lnr strength curves the 1475-entry prefix truncates. lnr carries four
+ * 64-entry byte curves from 0x3d60 at stride 0x40, normalised to 0x40, and the
+ * prefix cut leaves everything past 0x3d7c zero, which is gain zero rather
+ * than neutral. Values are the streaming vendor's, read from the register
+ * sweep; the state diff classifies all 35 as reachable static configuration,
+ * not AE-moved state.
+ */
+static const struct ar_isp_reg ar_isp_lnr_fix[] = {
+	{ 0x3d44, 0xfffdf800 },
+	{ 0x3d60, 0x00000000 },
+	{ 0x3d80, 0x40404040 },
+	{ 0x3d84, 0x40404040 },
+	{ 0x3d88, 0x40404040 },
+	{ 0x3d8c, 0x40404040 },
+	{ 0x3d90, 0x40404040 },
+	{ 0x3d94, 0x40404040 },
+	{ 0x3d98, 0x40404040 },
+	{ 0x3d9c, 0x40404040 },
+	{ 0x3da8, 0x40404040 },
+	{ 0x3dac, 0x40404040 },
+	{ 0x3db0, 0x40404040 },
+	{ 0x3db4, 0x40404040 },
+	{ 0x3db8, 0x40404040 },
+	{ 0x3dbc, 0x40404040 },
+	{ 0x3dc0, 0x40404040 },
+	{ 0x3dc4, 0x40404040 },
+	{ 0x3dc8, 0x40404040 },
+	{ 0x3dcc, 0x40404040 },
+	{ 0x3dd0, 0x40404040 },
+	{ 0x3dd4, 0x40404040 },
+	{ 0x3dd8, 0x40404040 },
+	{ 0x3ddc, 0x40404040 },
+	{ 0x3df4, 0x40404040 },
+	{ 0x3df8, 0x40404040 },
+	{ 0x3dfc, 0x40404040 },
+	{ 0x3e00, 0x40404040 },
+	{ 0x3e04, 0x40404040 },
+	{ 0x3e08, 0x40404040 },
+	{ 0x3e0c, 0x40404040 },
+	{ 0x3e10, 0x40404040 },
+	{ 0x3e14, 0x40404040 },
+	{ 0x3e18, 0x38404040 },
+	{ 0x3e1c, 0x0c182430 },
+};
+
 static void ar_isp_configure(struct ar_isp *isp)
 {
 	ar_isp_apply(isp, ar_isp_recovered, ARRAY_SIZE(ar_isp_recovered));
@@ -1083,6 +1181,7 @@ static void ar_isp_configure(struct ar_isp *isp)
 			     ARRAY_SIZE(ar_isp_vendor_trim));
 
 	ar_isp_apply(isp, ar_isp_output_fix, ARRAY_SIZE(ar_isp_output_fix));
+	ar_isp_apply(isp, ar_isp_lnr_fix, ARRAY_SIZE(ar_isp_lnr_fix));
 
 	/*
 	 * After the replay, which arms the vendor's buffer addresses. Ours
@@ -1129,6 +1228,28 @@ static void ar_isp_arm_output(struct ar_isp *isp)
 	ar_isp_de3d_publish(isp);
 	ar_isp_ccm_apply(isp);
 
+	/*
+	 * The vendor's steady state holds both hdr-path module-local valid bits
+	 * clear: arm, fetch, de-validate. Ours stayed set after publish, which
+	 * the state diff flagged as the two hdr-path differences against the
+	 * streaming vendor.
+	 */
+	writel(0, isp->base + AR_ISP_TABLE_HDR_VALID);
+	writel(0, isp->base + AR_ISP_TABLE_HDR_LSC_VALID);
+
+	/*
+	 * The setup table carries the vendor's own LSC descriptor at entries
+	 * around 317, so the table-time publish suffers the same overwrite as
+	 * the statistics addresses: a mid-stream sweep read 0x4c34 holding the
+	 * vendor's 0x2b2e8600 with our page never fetched, which on a cold boot
+	 * is dead memory and shades the frame with zero gains. Republish after
+	 * the replay, exactly like the statistics publish above.
+	 */
+	if (isp->lsc) {
+		writel(lower_32_bits(isp->lsc_dma), isp->base + AR_ISP_TABLE_LSC);
+		writel(1, isp->base + AR_ISP_TABLE_LSC_VALID);
+	}
+
 	dev_info(isp->dev,
 		 "output arm: %zu writes, control 0x%08x, in_geometry 0x%08x\n",
 		 ARRAY_SIZE(ar_isp_output_arm),
@@ -1167,6 +1288,7 @@ static void ar_isp_configure_prefix(struct ar_isp *isp, size_t n)
 	 * which chases the setup entry that kills the input geometry at 0x7070.
 	 */
 	ar_isp_apply(isp, ar_isp_output_fix, ARRAY_SIZE(ar_isp_output_fix));
+	ar_isp_apply(isp, ar_isp_lnr_fix, ARRAY_SIZE(ar_isp_lnr_fix));
 	ar_isp_tables_apply(isp);
 
 	isp->configured = true;
