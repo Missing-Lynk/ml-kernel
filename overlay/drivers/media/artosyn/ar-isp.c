@@ -53,6 +53,7 @@
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
 #include <linux/firmware.h>
+#include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -253,6 +254,21 @@
 #define AR_ISP_GIB_BYPASS		BIT(30)
 
 /*
+ * Interrupt status words, W1C, acknowledged by writing the read value back.
+ * The vendor's handler (0x1d2c80) acks three context-held pointers; the trace
+ * resolves two of them here: 0x00cc and 0x00d4 are written about three times
+ * per frame with sparse bit patterns, 0x00d4's isolated 0x100 event is the
+ * bit-8 pre-step the vendor's router services first and alone, and on a stack
+ * that never acks, both read as the latched union of every value the vendor's
+ * acks carried. 0x00e8 mirrors 0x00cc bit for bit and is the candidate third
+ * word; the vendor reads it only under a gate that is zero in every working
+ * configuration, so it is left alone until that gate is understood.
+ */
+#define AR_ISP_INTR_STATUS0		0x00cc
+#define AR_ISP_INTR_STATUS1		0x00d4
+#define AR_ISP_INTR_STATS_EVENT		BIT(8)
+
+/*
  * Statistics buffer addresses, derived from the bank map in ar-isp-stats.h
  * rather than carried as literals. The two RRO engines sit on one bank at a
  * 0x34 stride and rro_face is a third instance of the same block, so all four
@@ -409,12 +425,24 @@ module_param(gib, bool, 0644);
 MODULE_PARM_DESC(gib,
 		 "set gib's bypass bit as the vendor's tuning apply does (default on)");
 
+static bool use_irq;
+module_param(use_irq, bool, 0444);
+MODULE_PARM_DESC(use_irq,
+		 "service the ISP interrupt: acknowledge the status words and count events (default off)");
+
 struct ar_isp {
 	struct device *dev;
 	void __iomem *base;
 	struct clk_bulk_data clks[2];
 	struct dentry *debugfs;
 	bool configured;
+
+	int irq;
+	bool irq_requested;
+	u32 irq_events;
+	u32 irq_stats_events;
+	u32 irq_seen0;
+	u32 irq_seen1;
 
 	const struct firmware *tuning;
 	void *gamma;
@@ -1289,6 +1317,39 @@ static void ar_isp_configure(struct ar_isp *isp)
  * Deliberately does not touch the recovered or setup tables, so it can follow a
  * prefix without undoing it.
  */
+/*
+ * Service the ISP interrupt the way the vendor's handler does: acknowledge
+ * every status word by unconditional write-back, then dispatch. The line is
+ * level triggered, so an unacknowledged source storms it, which is what
+ * killed the VIF line before its handler serviced the full set. Nothing is
+ * re-armed here, matching the vendor; this version acknowledges and counts,
+ * and the per-frame statistics service will hang off the bit-8 event once it
+ * exists. The clocks are on from probe, so the registers are safe to touch
+ * whenever the line fires.
+ */
+static irqreturn_t ar_isp_irq(int irq, void *data)
+{
+	struct ar_isp *isp = data;
+	u32 s0, s1;
+
+	s0 = readl(isp->base + AR_ISP_INTR_STATUS0);
+	s1 = readl(isp->base + AR_ISP_INTR_STATUS1);
+
+	if (!s0 && !s1)
+		return IRQ_NONE;
+
+	writel(s0, isp->base + AR_ISP_INTR_STATUS0);
+	writel(s1, isp->base + AR_ISP_INTR_STATUS1);
+
+	isp->irq_events++;
+	isp->irq_seen0 |= s0;
+	isp->irq_seen1 |= s1;
+	if (s1 & AR_ISP_INTR_STATS_EVENT)
+		isp->irq_stats_events++;
+
+	return IRQ_HANDLED;
+}
+
 static void ar_isp_arm_output(struct ar_isp *isp)
 {
 	ar_isp_apply(isp, ar_isp_output_arm, ARRAY_SIZE(ar_isp_output_arm));
@@ -1330,6 +1391,16 @@ static void ar_isp_arm_output(struct ar_isp *isp)
 	if (isp->lsc) {
 		writel(lower_32_bits(isp->lsc_dma), isp->base + AR_ISP_TABLE_LSC);
 		writel(1, isp->base + AR_ISP_TABLE_LSC_VALID);
+	}
+
+	/* Safe only now: the block is configured, so the status words assert
+	 * at the vendor's event rate instead of continuously.
+	 */
+	if (use_irq && isp->irq > 0 && !isp->irq_requested) {
+		if (request_irq(isp->irq, ar_isp_irq, 0, "ar-isp", isp))
+			dev_warn(isp->dev, "isp interrupt request failed, counters stay zero\n");
+		else
+			isp->irq_requested = true;
 	}
 
 	dev_info(isp->dev,
@@ -1544,6 +1615,22 @@ static int ar_isp_probe(struct platform_device *pdev)
 				   &ar_isp_prefix_fops);
 	debugfs_create_file_unsafe("arm", 0600, isp->debugfs, isp,
 				   &ar_isp_arm_fops);
+	debugfs_create_u32("irq_events", 0400, isp->debugfs, &isp->irq_events);
+	debugfs_create_u32("irq_stats_events", 0400, isp->debugfs,
+			   &isp->irq_stats_events);
+	debugfs_create_x32("irq_seen0", 0400, isp->debugfs, &isp->irq_seen0);
+	debugfs_create_x32("irq_seen1", 0400, isp->debugfs, &isp->irq_seen1);
+
+	/* Only the number here. The line is requested at output arm, never at
+	 * probe: the bring-up order is receiver first and ISP after, so between
+	 * stream start and the arm the block is unconfigured with input
+	 * arriving, its sources reassert as fast as they are acknowledged, and
+	 * a requested line livelocks the CPU in the handler. Measured as a
+	 * hard hang the moment streaming started. The vendor never has that
+	 * window because it configures the ISP before the receiver.
+	 */
+	if (use_irq)
+		isp->irq = platform_get_irq(pdev, 0);
 
 	dev_info(dev, "probed, %zu registers available to apply\n",
 		 ARRAY_SIZE(ar_isp_recovered) +
@@ -1555,6 +1642,12 @@ static int ar_isp_probe(struct platform_device *pdev)
 static void ar_isp_remove(struct platform_device *pdev)
 {
 	struct ar_isp *isp = platform_get_drvdata(pdev);
+
+	/* Before anything else: once the clocks drop, a late interrupt's
+	 * register access hangs the SoC, so the line must be gone first.
+	 */
+	if (isp->irq_requested)
+		free_irq(isp->irq, isp);
 
 	debugfs_remove_recursive(isp->debugfs);
 	ar_isp_tables_release(isp);
