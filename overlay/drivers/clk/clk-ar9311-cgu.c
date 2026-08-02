@@ -24,7 +24,10 @@
  *     high half = sel bits[26:24], gate bit28
  *     dual-bank (axi/sys/npu/cpu) = both halves, bit31 selects the active bank;
  *     cgu_cpu_clk adds bit30 (0 = 24 MHz bypass) and has no gate.
- *   Leaves have NO dividers: rate = selected parent's rate (pre-divided taps).
+ *   Leaves also carry a divider, bits[6:0] low half and bits[22:16] high, with
+ *     rate = parent / (field + 1), the same layout as cgu_cpu_clk. It is
+ *     modelled only where AR_LEAF_DIV says so; elsewhere a leaf's rate is
+ *     reported as its parent's, which is right only while the field reads zero.
  *
  * The DC pixel leaf cgu_dvp_sub_1_2x_pix_clk (id 0x29) is the one leaf with a
  * consumer (artosyn_vo's pclk, provider index 0). It is registered as a mux
@@ -271,6 +274,26 @@ enum ar9311_leaf_half {
  */
 #define AR_LEAF_GATE	BIT(0)	/* enable/disable writes the leaf's gate bit */
 #define AR_LEAF_MUX	BIT(1)	/* set_parent writes the leaf's 3-bit sel field */
+/*
+ * AR_LEAF_DIV - the leaf's divider field is modelled, so its rate is
+ * parent / (field + 1) rather than the parent's rate.
+ *
+ * The field is at bits[6:0] in the register's low half and bits[22:16] in the
+ * high half, the same positions this file already documents for cgu_cpu_clk,
+ * and it is believed to exist on every leaf. It is opted into per leaf rather
+ * than applied to all of them for the same reason the write capabilities are:
+ * a leaf whose divider reads non-zero would change reported rate for consumers
+ * that have been running on the parent's rate, and nothing in this tree has
+ * been measured against the corrected value except the camera.
+ *
+ * That the field is real was established by writing the camera leaves with the
+ * divider left at its boot value: the ISP and VIF came up at half rate and the
+ * MIPI PCS at four times, and no frame reached memory.
+ */
+#define AR_LEAF_DIV	BIT(2)
+
+/* 7-bit divider field, encoding rate = parent / (field + 1). */
+#define AR_LEAF_DIV_MASK	0x7fu
 
 struct ar9311_leaf_desc {
 	const char *name;
@@ -313,9 +336,12 @@ static const struct ar9311_leaf_desc ar9311_leaves[] = {
 	{ "cgu_sys_clk",     0x04,  1, AR_HALF_DUAL,
 	  { "cgu_oscin_clk", "adc_pll_clk300", "fix_pll_clk400", "fix_pll_clk333",
 	    "adc_pll_clk600", "adc_pll_clk400", "pixel_pll_clk", "audio_pll_clk" } },
-	{ "cgu_isp_clk",     0x0c,  1, AR_HALF_LO,   PAR_GENERIC_666, AR_LEAF_GATE },
-	{ "cgu_isp_hdr_clk", 0x0c,  1, AR_HALF_HI,   PAR_GENERIC_666, AR_LEAF_GATE },
-	{ "cgu_vif_axi_clk", 0x10,  1, AR_HALF_LO,   PAR_GENERIC_666, AR_LEAF_GATE },
+	{ "cgu_isp_clk",     0x0c,  1, AR_HALF_LO,   PAR_GENERIC_666,
+	  AR_LEAF_GATE | AR_LEAF_DIV },
+	{ "cgu_isp_hdr_clk", 0x0c,  1, AR_HALF_HI,   PAR_GENERIC_666,
+	  AR_LEAF_GATE | AR_LEAF_DIV },
+	{ "cgu_vif_axi_clk", 0x10,  1, AR_HALF_LO,   PAR_GENERIC_666,
+	  AR_LEAF_GATE | AR_LEAF_DIV },
 	{ "cgu_dla_clk",     0x10,  1, AR_HALF_HI,
 	  { "fix_pll_clk800", "fix_pll_clk666", "fix_pll_clk500", "fix_pll_clk400",
 	    "adc_pll_clk600", "adc_pll_clk400", "pixel_pll_clk", "mipi_tx_pll_div2" } },
@@ -327,9 +353,11 @@ static const struct ar9311_leaf_desc ar9311_leaves[] = {
 	{ "cgu_de_clk",      0x14,  1, AR_HALF_HI,   PAR_GENERIC_OSC },
 	{ "cgu_venc_clk",    0x18,  1, AR_HALF_LO,   PAR_GENERIC_OSC },
 	{ "cgu_jpeg_clk",    0x18,  1, AR_HALF_HI,   PAR_GENERIC_OSC },
-	{ "cgu_mipi_csi_0_clk", 0x1c, 1, AR_HALF_LO, PAR_GENERIC_OSC, AR_LEAF_GATE },
+	{ "cgu_mipi_csi_0_clk", 0x1c, 1, AR_HALF_LO, PAR_GENERIC_OSC,
+	  AR_LEAF_GATE | AR_LEAF_DIV },
 	{ "cgu_mipi_csi_1_clk", 0x1c, 1, AR_HALF_HI, PAR_GENERIC_OSC, AR_LEAF_GATE },
-	{ "cgu_mipi_pcs_clk", 0x20, 1, AR_HALF_LO,   PAR_GENERIC_OSC, AR_LEAF_GATE },
+	{ "cgu_mipi_pcs_clk", 0x20, 1, AR_HALF_LO,   PAR_GENERIC_OSC,
+	  AR_LEAF_GATE | AR_LEAF_DIV },
 	{ "cgu_sd0_fix_clk", 0x20,  1, AR_HALF_HI,   PAR_ONE("sd0_fix_clk") },
 	{ "cgu_sd0_sample_clk", 0x24, 1, AR_HALF_LO, PAR_ONE("sd0_sample_clk") },
 	{ "cgu_sd0_drv_clk", 0x24,  1, AR_HALF_HI,   PAR_ONE("sd0_drv_clk") },
@@ -361,7 +389,7 @@ static const struct ar9311_leaf_desc ar9311_leaves[] = {
 	 * this leaf needs both a settable mux and an operable gate.
 	 */
 	{ "cgu_sensor_mclk0", 0x44, 1, AR_HALF_LO,   PAR_SENSOR,
-	  AR_LEAF_GATE | AR_LEAF_MUX },
+	  AR_LEAF_GATE | AR_LEAF_MUX | AR_LEAF_DIV },
 	{ "cgu_sensor_mclk1", 0x44, 1, AR_HALF_HI,   PAR_SENSOR },
 	{ "cgu_sensor_mclk2", 0x48, 1, AR_HALF_LO,   PAR_SENSOR },
 	{ "cgu_dvp_pattern_clk", 0x48, 1, AR_HALF_HI, PAR_DVP },
@@ -591,6 +619,98 @@ static const struct clk_ops ar9311_leaf_gate_mux_ops = {
 	.is_enabled	= ar9311_leaf_is_enabled,
 	.enable		= ar9311_leaf_enable,
 	.disable	= ar9311_leaf_disable,
+};
+
+/* ar9311_leaf_div_shift - where this leaf's divider field starts.
+ *
+ * Low half bits[6:0], high half bits[22:16]. Returns -1 for the halves that do
+ * not carry one, which are never given AR_LEAF_DIV.
+ */
+static int ar9311_leaf_div_shift(const struct ar9311_leaf *leaf)
+{
+	switch (leaf->half) {
+	case AR_HALF_LO:
+		return 0;
+
+	case AR_HALF_HI:
+		return 16;
+
+	default:
+		return -1;
+	}
+}
+
+static unsigned long ar9311_leaf_recalc_rate(struct clk_hw *hw,
+					     unsigned long parent_rate)
+{
+	struct ar9311_leaf *leaf = to_ar9311_leaf(hw);
+	int shift = ar9311_leaf_div_shift(leaf);
+	u32 div;
+
+	if (shift < 0)
+		return parent_rate;
+
+	div = ((readl(leaf->reg) >> shift) & AR_LEAF_DIV_MASK) + 1;
+
+	return DIV_ROUND_UP_ULL((u64)parent_rate, div);
+}
+
+/*
+ * Read-only rate, deliberately.
+ *
+ * The divider is modelled so the tree reports the truth, but nothing here
+ * selects one: the camera's parent and divider are the vendor's exact pair,
+ * installed together by ar9311_apply_camera_defaults, and letting the rate
+ * machinery pick instead would let it choose an arithmetically equal but
+ * physically different source. 200 MHz alone is satisfied by both
+ * fix_pll_clk400 halved and adc_pll_clk600 divided by three, and which PLL
+ * feeds the MIPI receiver is not a free choice.
+ */
+static const struct clk_ops ar9311_leaf_gate_div_ops = {
+	.get_parent	= ar9311_leaf_get_parent,
+	.recalc_rate	= ar9311_leaf_recalc_rate,
+	.is_enabled	= ar9311_leaf_is_enabled,
+	.enable		= ar9311_leaf_enable,
+	.disable	= ar9311_leaf_disable,
+};
+
+/* ---------------- the camera leaves' vendor configuration ----------------- */
+
+/*
+ * Parent and divider for every leaf the camera needs, as the vendor programs
+ * them.
+ *
+ * The boot firmware does not leave these usable. It selects adc_pll_clk600
+ * halved for the ISP and the VIF where the vendor wants fix_pll_clk333 whole,
+ * and fix_pll_clk333 whole for the MIPI PCS where the vendor wants
+ * fix_pll_clk500 quartered. Run on the boot values the camera blocks are
+ * clocked but wrong: their registers read back zero, no frame ever starts, and
+ * it presents as a dead sensor.
+ *
+ * Installed here rather than left to a consumer because it is not a rate
+ * request, it is a pair. Asking the rate machinery for 200 MHz is satisfied by
+ * fix_pll_clk400 halved and by adc_pll_clk600 divided by three alike, and which
+ * PLL feeds the MIPI receiver is not something to leave to whichever the search
+ * reaches first. The pairs below are the vendor's, recovered with the rest of
+ * this register map and validated end to end by a camera bring-up.
+ *
+ * Only the mux and divider are written. The gates stay where they are, so this
+ * configures the leaves without clocking blocks nothing has asked for; the
+ * consumers still gate their own through clk_prepare_enable.
+ */
+struct ar9311_camera_default {
+	const char *name;
+	u8 sel;
+	u8 div;			/* field value; rate = parent / (div + 1) */
+};
+
+static const struct ar9311_camera_default ar9311_camera_defaults[] = {
+	{ "cgu_isp_clk",        3, 0 },	/* fix_pll_clk333 */
+	{ "cgu_isp_hdr_clk",    3, 0 },	/* fix_pll_clk333 */
+	{ "cgu_vif_axi_clk",    3, 0 },	/* fix_pll_clk333 */
+	{ "cgu_mipi_csi_0_clk", 2, 1 },	/* fix_pll_clk400 / 2 */
+	{ "cgu_mipi_pcs_clk",   1, 3 },	/* fix_pll_clk500 / 4 */
+	{ "cgu_sensor_mclk0",   0, 0 },	/* cgu_oscin_clk, 24 MHz */
 };
 
 /* ---------------- the CPU clock (the cpufreq write path) ------------------- */
@@ -826,6 +946,92 @@ static int ar9311_check_provider_indices(struct device *dev)
 	return 0;
 }
 
+/*
+ * Install the vendor's parent and divider for the camera leaves.
+ *
+ * Runs before the leaves are registered, so their first get_parent and
+ * recalc_rate report the configuration the camera will actually run on rather
+ * than the boot's. Each pair is written in one read-modify-write, leaving the
+ * gate and the other half's leaf untouched.
+ *
+ * Only on a board that has a camera. This provider serves both the air unit and
+ * the goggle, and the goggle drives a MIPI DSI panel off the same SoC; changing
+ * a MIPI leaf's parent out from under a display that nothing here knows about
+ * is not a risk worth taking for a block the board does not have. The air unit
+ * declares artosyn,vif and the goggle declares no camera node at all, so the
+ * presence of an enabled one is the discriminator, and it needs no device tree
+ * change to either board.
+ */
+static void ar9311_apply_camera_defaults(struct device *dev,
+					 void __iomem * const *bases)
+{
+	struct device_node *vif;
+
+	vif = of_find_compatible_node(NULL, NULL, "artosyn,vif");
+	if (!vif)
+		return;
+
+	if (!of_device_is_available(vif)) {
+		of_node_put(vif);
+		return;
+	}
+
+	of_node_put(vif);
+
+	for (unsigned int i = 0; i < ARRAY_SIZE(ar9311_camera_defaults); i++) {
+		const struct ar9311_camera_default *c = &ar9311_camera_defaults[i];
+		const struct ar9311_leaf_desc *d = NULL;
+		void __iomem *reg;
+		u8 sel_shift;
+		u8 div_shift;
+		u32 before;
+		u32 v;
+
+		for (unsigned int j = 0; j < ARRAY_SIZE(ar9311_leaves); j++) {
+			if (!strcmp(ar9311_leaves[j].name, c->name)) {
+				d = &ar9311_leaves[j];
+				break;
+			}
+		}
+
+		if (!d) {
+			dev_warn(dev, "camera default for unknown leaf %s\n",
+				 c->name);
+			continue;
+		}
+
+		if (d->half == AR_HALF_LO) {
+			sel_shift = 8;
+			div_shift = 0;
+		} else if (d->half == AR_HALF_HI) {
+			sel_shift = 24;
+			div_shift = 16;
+		} else {
+			dev_warn(dev, "%s has no single half to configure\n",
+				 c->name);
+			continue;
+		}
+
+		reg = bases[d->bank] + d->off;
+
+		scoped_guard(spinlock_irqsave, &ar9311_cgu_lock) {
+			before = readl(reg);
+
+			v = before;
+			v &= ~(0x7u << sel_shift);
+			v &= ~((u32)AR_LEAF_DIV_MASK << div_shift);
+			v |= (u32)(c->sel & 0x7u) << sel_shift;
+			v |= (u32)(c->div & AR_LEAF_DIV_MASK) << div_shift;
+
+			writel(v, reg);
+		}
+
+		if (v != before)
+			dev_info(dev, "%s: sel %u div %u (0x%08x -> 0x%08x)\n",
+				 c->name, c->sel, c->div, before, v);
+	}
+}
+
 static int ar9311_cgu_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -983,6 +1189,8 @@ static int ar9311_cgu_probe(struct platform_device *pdev)
 	if (!data)
 		return -ENOMEM;
 
+	ar9311_apply_camera_defaults(dev, bases);
+
 	data->num = ARRAY_SIZE(ar9311_leaves) + 3;
 	data->hws[0] = pix_hw;		/* <&cgu 0> = the pixel leaf, VO's pclk */
 	data->hws[1] = &pll->hw;	/* <&cgu 1> = pixel_pll (debug) */
@@ -1002,7 +1210,9 @@ static int ar9311_cgu_probe(struct platform_device *pdev)
 
 		li.name = d->name;
 
-		if (d->caps & AR_LEAF_MUX)
+		if (d->caps & AR_LEAF_DIV)
+			li.ops = &ar9311_leaf_gate_div_ops;
+		else if (d->caps & AR_LEAF_MUX)
 			li.ops = &ar9311_leaf_gate_mux_ops;
 		else if (d->caps & AR_LEAF_GATE)
 			li.ops = &ar9311_leaf_gate_ops;
