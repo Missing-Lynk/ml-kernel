@@ -62,6 +62,7 @@
 
 #include "ar-isp-defaults.h"
 #include "ar-isp-codec.h"
+#include "ar-isp-dpc.h"
 #include "ar-isp-stats.h"
 #include "ar-isp-drc-tail.h"
 #include "ar-isp-gamma-page1.h"
@@ -401,6 +402,11 @@ static bool stats = true;
 module_param(stats, bool, 0644);
 MODULE_PARM_DESC(stats,
 		 "own the AE statistics buffers instead of the vendor's (default on)");
+
+static bool dpc = true;
+module_param(dpc, bool, 0644);
+MODULE_PARM_DESC(dpc,
+		 "apply the carried vendor defect-correction payload over the replay (default on)");
 
 static bool ltm = true;
 module_param(ltm, bool, 0644);
@@ -781,6 +787,19 @@ static void ar_isp_ccm_apply(struct ar_isp *isp)
 		       isp->base + AR_ISP_CCM1_BANK + i * 4);
 
 	dev_info(isp->dev, "ccm: bank %u packed into ccm1 copy A\n", ccm_bank);
+}
+
+/*
+ * Defect pixel correction. The payload is a register image the vendor copies
+ * wholesale out of init_config, so it is carried rather than derived; see
+ * ar-isp-dpc.h for the two defects in the replay it supersedes.
+ */
+static void ar_isp_dpc_apply(struct ar_isp *isp)
+{
+	if (!dpc)
+		return;
+
+	ar_isp_apply(isp, ar_isp_dpc_payload, ARRAY_SIZE(ar_isp_dpc_payload));
 }
 
 /*
@@ -1366,6 +1385,7 @@ static void ar_isp_arm_output(struct ar_isp *isp)
 	ar_isp_de3d_publish(isp);
 	ar_isp_ccm_apply(isp);
 	ar_isp_rnr_apply(isp);
+	ar_isp_dpc_apply(isp);
 
 	if (gib)
 		writel(readl(isp->base + AR_ISP_GIB_CTRL) | AR_ISP_GIB_BYPASS,
