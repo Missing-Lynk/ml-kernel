@@ -28,16 +28,17 @@ config VIDEO_ARTOSYN_CSI2
 	  called ar-csi2.
 
 config VIDEO_ARTOSYN_VIF
-	tristate "Artosyn VIF capture front end"
+	tristate "Artosyn VIF input front end"
 	depends on OF && VIDEO_DEV
 	select MEDIA_CONTROLLER
 	select VIDEO_V4L2_SUBDEV_API
 	select V4L2_FWNODE
-	select VIDEOBUF2_DMA_CONTIG
 	help
-	  Capture driver for the video interface block on Artosyn Proxima SoCs,
-	  which writes frames from the CSI-2 receiver to memory. Provides a
-	  V4L2 capture device.
+	  Input driver for the video interface block on Artosyn Proxima SoCs,
+	  which receives frames from the CSI-2 receiver and hands them to the
+	  ISP. It exposes no capture device of its own: the frames leave through
+	  the CVISP output stage, which owns the V4L2 node. It hosts the media
+	  graph the sensor and receiver register their subdevs against.
 
 	  To compile this driver as a module, choose M here: the module will be
 	  called ar-vif.

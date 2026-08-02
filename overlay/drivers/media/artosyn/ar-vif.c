@@ -42,8 +42,8 @@
 #include <media/v4l2-device.h>
 #include <media/v4l2-fwnode.h>
 #include <media/v4l2-ioctl.h>
-#include <media/videobuf2-dma-contig.h>
-#include <media/videobuf2-v4l2.h>
+
+#include "ar-camera-hook.h"
 
 /* The view this driver uses. Path view numbers 2..9 map to views 0..7. */
 #define AR_VIF_VIEW			0
@@ -416,28 +416,22 @@ static bool trace_writes;
 module_param(trace_writes, bool, 0444);
 MODULE_PARM_DESC(trace_writes, "log every register write in order");
 
-struct ar_vif_buffer {
-	struct vb2_v4l2_buffer vb;
-	struct list_head list;
-	dma_addr_t addr;
-};
-
 struct ar_vif {
 	struct device *dev;
 	void __iomem *base;
 	struct clk *axi_clk;
 	int irq;
 
+	/*
+	 * A v4l2 and media device with no video node of its own. The sensor and
+	 * the CSI-2 receiver register their subdevs against it, which is what
+	 * gives userspace their controls; the frames go out through the CVISP
+	 * capture node instead.
+	 */
 	struct v4l2_device v4l2_dev;
 	struct media_device media_dev;
-	struct video_device video_dev;
-	struct vb2_queue queue;
-	struct mutex lock;		/* serialises ioctls and vb2 operations */
 
-	spinlock_t buffer_lock;		/* guards buffer_list and active */
-	struct list_head buffer_list;
-	struct ar_vif_buffer *active;
-	struct ar_vif_buffer *next;
+	spinlock_t buffer_lock;		/* guards the armed view */
 
 	/* Polling completion path: the work item samples the status register
 	 * while streaming. streaming also gates the interrupt handler, so a
@@ -448,7 +442,6 @@ struct ar_vif {
 	u32 last_status;
 
 	struct v4l2_pix_format format;
-	unsigned int sequence;
 
 	/*
 	 * Liveness counters, exported through debugfs.
@@ -466,18 +459,17 @@ struct ar_vif {
 	 * Software counters have neither problem: monotonic, owned by us, and
 	 * nothing can acknowledge them away. irq_events is the honest liveness
 	 * signal for this pipeline and is what the bring-up harness gates on.
-	 *
-	 * v4l2_completions counts buffers handed back through the v4l2 capture
-	 * path. It reads ZERO on a healthy system and that is expected: the
-	 * real pixel path is sensor to ISP to CVISP to DRAM and never reaches
-	 * this driver's buffer completion, while the bypass view that would has
-	 * never completed on this hardware. It is named for what it counts
-	 * rather than "frames" precisely so nobody reads a zero here as a dead
-	 * pipeline, which is the mistake 0x1f8 already caused once.
 	 */
 	struct dentry *debugfs;
-	u32 v4l2_completions;
 	u32 irq_events;
+	/*
+	 * Frame completions the block signalled. Nothing consumes the frame:
+	 * the view is armed at a scratch page so the block asserts at all, and
+	 * the pixels leave through the ISP. Counted because it is a second
+	 * liveness signal alongside irq_events, at frame rate rather than per
+	 * interrupt.
+	 */
+	u32 frames;
 
 	/*
 	 * A frame the block can write when no v4l2 consumer has queued one. The
@@ -493,11 +485,6 @@ struct ar_vif {
 	struct v4l2_subdev *source;
 	u16 source_pad;
 };
-
-static inline struct ar_vif_buffer *to_ar_vif_buffer(struct vb2_v4l2_buffer *vb)
-{
-	return container_of(vb, struct ar_vif_buffer, vb);
-}
 
 static void ar_vif_write(struct ar_vif *vif, u32 offset, u32 value)
 {
@@ -839,52 +826,7 @@ static void ar_vif_stop(struct ar_vif *vif)
 	ar_vif_update(vif, AR_VIF_SOFT_RESET, BIT(0), 0);
 }
 
-/* Complete the active buffer and arm the next one.
- *
- * Shared by the polling work item and the interrupt handler. The caller has
- * already established that a frame completed.
- */
-static void ar_vif_frame_done(struct ar_vif *vif)
-{
-	struct ar_vif_buffer *done;
-	struct ar_vif_buffer *next;
-	unsigned long flags;
-
-	spin_lock_irqsave(&vif->buffer_lock, flags);
-
-	/* Counted here rather than in either completion path, so the number
-	 * means the same thing under interrupts and under polling.
-	 */
-	vif->v4l2_completions++;
-
-	done = vif->active;
-	vif->active = vif->next;
-	vif->next = NULL;
-
-	/* Arm the next queued buffer, or re-arm the one just completed if the
-	 * queue has run dry, so the hardware always has somewhere to write.
-	 */
-	next = list_first_entry_or_null(&vif->buffer_list, struct ar_vif_buffer,
-					list);
-	if (next) {
-		list_del(&next->list);
-		vif->next = next;
-		ar_vif_arm_buffer(vif, next->addr, false);
-	} else if (vif->active) {
-		ar_vif_arm_buffer(vif, vif->active->addr, false);
-	}
-
-	spin_unlock_irqrestore(&vif->buffer_lock, flags);
-
-	if (done) {
-		done->vb.vb2_buf.timestamp = ktime_get_ns();
-		done->vb.sequence = vif->sequence++;
-		done->vb.field = V4L2_FIELD_NONE;
-		vb2_buffer_done(&done->vb.vb2_buf, VB2_BUF_STATE_DONE);
-	}
-}
-
-/* Detect completed frames and hand them to vb2.
+/* Detect completed frames.
  *
  * The default completion path. Completion is signalled by the W1C status at
  * 0x17c: bit view is view frame done, bit 8 + view is frame stable. The
@@ -976,12 +918,12 @@ static void ar_vif_poll_work(struct work_struct *work)
 	       AR_VIF_INTR_FRAME_DONE(AR_VIF_VIEW);
 
 	if ((bp_status | intr_status) & done) {
-		if (vif->sequence < 3)
+		if (vif->frames < 3)
 			dev_info(vif->dev,
 				 "frame done: addr 0x%08x, bank0 0x%08x, bp 0x%08x, intr 0x%08x\n",
 				 armed_address, bank0, bp_status, intr_status);
 
-		ar_vif_frame_done(vif);
+		vif->frames++;
 	}
 
 	schedule_delayed_work(&vif->poll_work,
@@ -1043,80 +985,9 @@ static irqreturn_t ar_vif_irq(int irq, void *data)
 	       AR_VIF_INTR_FRAME_DONE(AR_VIF_VIEW);
 
 	if ((bp_status | intr_status) & done)
-		ar_vif_frame_done(vif);
+		vif->frames++;
 
 	return IRQ_HANDLED;
-}
-
-static int ar_vif_queue_setup(struct vb2_queue *q, unsigned int *num_buffers,
-			      unsigned int *num_planes, unsigned int sizes[],
-			      struct device *alloc_devs[])
-{
-	struct ar_vif *vif = vb2_get_drv_priv(q);
-
-	if (*num_planes) {
-		if (*num_planes != 1 || sizes[0] < vif->format.sizeimage)
-			return -EINVAL;
-
-		return 0;
-	}
-
-	*num_planes = 1;
-	sizes[0] = vif->format.sizeimage;
-
-	return 0;
-}
-
-static int ar_vif_buffer_prepare(struct vb2_buffer *vb)
-{
-	struct ar_vif *vif = vb2_get_drv_priv(vb->vb2_queue);
-	struct ar_vif_buffer *buf = to_ar_vif_buffer(to_vb2_v4l2_buffer(vb));
-
-	if (vb2_plane_size(vb, 0) < vif->format.sizeimage)
-		return -EINVAL;
-
-	vb2_set_plane_payload(vb, 0, vif->format.sizeimage);
-	buf->addr = vb2_dma_contig_plane_dma_addr(vb, 0);
-
-	return 0;
-}
-
-static void ar_vif_buffer_queue(struct vb2_buffer *vb)
-{
-	struct ar_vif *vif = vb2_get_drv_priv(vb->vb2_queue);
-	struct ar_vif_buffer *buf = to_ar_vif_buffer(to_vb2_v4l2_buffer(vb));
-	unsigned long flags;
-
-	spin_lock_irqsave(&vif->buffer_lock, flags);
-	list_add_tail(&buf->list, &vif->buffer_list);
-	spin_unlock_irqrestore(&vif->buffer_lock, flags);
-}
-
-/* Hand every queued buffer back in the given state. */
-static void ar_vif_return_buffers(struct ar_vif *vif, enum vb2_buffer_state state)
-{
-	struct ar_vif_buffer *buf;
-	struct ar_vif_buffer *tmp;
-	unsigned long flags;
-	LIST_HEAD(pending);
-
-	spin_lock_irqsave(&vif->buffer_lock, flags);
-
-	if (vif->active)
-		list_add_tail(&vif->active->list, &pending);
-	if (vif->next)
-		list_add_tail(&vif->next->list, &pending);
-
-	vif->active = NULL;
-	vif->next = NULL;
-	list_splice_tail_init(&vif->buffer_list, &pending);
-
-	spin_unlock_irqrestore(&vif->buffer_lock, flags);
-
-	list_for_each_entry_safe(buf, tmp, &pending, list) {
-		list_del(&buf->list);
-		vb2_buffer_done(&buf->vb.vb2_buf, state);
-	}
 }
 
 static void ar_vif_sync_format(struct ar_vif *vif);
@@ -1145,7 +1016,6 @@ static struct ar_vif *ar_vif_instance;
  */
 static int ar_vif_input_on(struct ar_vif *vif)
 {
-	struct ar_vif_buffer *first;
 	unsigned long flags;
 	int ret;
 
@@ -1159,7 +1029,7 @@ static int ar_vif_input_on(struct ar_vif *vif)
 	if (ret)
 		return ret;
 
-	vif->sequence = 0;
+	vif->frames = 0;
 
 	ar_vif_sync_format(vif);
 	ar_vif_global_init(vif);
@@ -1191,19 +1061,17 @@ static int ar_vif_input_on(struct ar_vif *vif)
 	ar_vif_update(vif, AR_VIF_VIEW_FRAME_BP(AR_VIF_VIEW),
 		      AR_VIF_FRAME_BP_COMMIT, 0);
 
-	spin_lock_irqsave(&vif->buffer_lock, flags);
-
-	first = list_first_entry_or_null(&vif->buffer_list, struct ar_vif_buffer,
-					 list);
-	if (first) {
-		list_del(&first->list);
-		vif->active = first;
-		ar_vif_arm_buffer(vif, first->addr, true);
-	} else if (vif->scratch) {
+	/*
+	 * Arm the view at the scratch page. Nothing reads it, but the block
+	 * asserts no interrupt at all with no address latched and no control
+	 * pulse: measured, with the sensor powered and the front end enabled,
+	 * irq_events stays at zero indefinitely.
+	 */
+	if (vif->scratch) {
+		spin_lock_irqsave(&vif->buffer_lock, flags);
 		ar_vif_arm_buffer(vif, vif->scratch_addr, true);
+		spin_unlock_irqrestore(&vif->buffer_lock, flags);
 	}
-
-	spin_unlock_irqrestore(&vif->buffer_lock, flags);
 
 	ar_vif_write(vif, AR_VIF_VIEW_DDR_SIZE_Y(AR_VIF_VIEW),
 		     vif->format.sizeimage);
@@ -1279,26 +1147,6 @@ static void ar_vif_input_off(struct ar_vif *vif)
 	clk_disable_unprepare(vif->axi_clk);
 }
 
-static int ar_vif_start_streaming(struct vb2_queue *q, unsigned int count)
-{
-	struct ar_vif *vif = vb2_get_drv_priv(q);
-	int ret;
-
-	ret = ar_vif_input_on(vif);
-	if (ret)
-		ar_vif_return_buffers(vif, VB2_BUF_STATE_QUEUED);
-
-	return ret;
-}
-
-static void ar_vif_stop_streaming(struct vb2_queue *q)
-{
-	struct ar_vif *vif = vb2_get_drv_priv(q);
-
-	ar_vif_input_off(vif);
-	ar_vif_return_buffers(vif, VB2_BUF_STATE_ERROR);
-}
-
 /*
  * Seconds to wait for the pixel domain to come live, and the sampling interval.
  * The camera is time dependent and a first frame has been seen to take several
@@ -1371,42 +1219,6 @@ void ar_vif_input_stop(void)
 }
 EXPORT_SYMBOL_GPL(ar_vif_input_stop);
 
-static const struct vb2_ops ar_vif_vb2_ops = {
-	.queue_setup = ar_vif_queue_setup,
-	.buf_prepare = ar_vif_buffer_prepare,
-	.buf_queue = ar_vif_buffer_queue,
-	.start_streaming = ar_vif_start_streaming,
-	.stop_streaming = ar_vif_stop_streaming,
-	.wait_prepare = vb2_ops_wait_prepare,
-	.wait_finish = vb2_ops_wait_finish,
-};
-
-static int ar_vif_querycap(struct file *file, void *priv,
-			   struct v4l2_capability *cap)
-{
-	strscpy(cap->driver, "ar-vif", sizeof(cap->driver));
-	strscpy(cap->card, "Artosyn VIF", sizeof(cap->card));
-
-	return 0;
-}
-
-static int ar_vif_enum_fmt(struct file *file, void *priv,
-			   struct v4l2_fmtdesc *f)
-{
-	if (f->index > 0)
-		return -EINVAL;
-
-	f->pixelformat = V4L2_PIX_FMT_SRGGB12;
-
-	return 0;
-}
-
-/* Adopt the source subdev's active frame size.
- *
- * The pipeline has no userspace format negotiation: the sensor mode is chosen
- * by driver logic or a module parameter, so the capture geometry is pulled from
- * the source. A source that cannot answer leaves the current format in place.
- */
 static void ar_vif_sync_format(struct ar_vif *vif)
 {
 	struct v4l2_subdev_format source_format = {
@@ -1430,56 +1242,6 @@ static void ar_vif_sync_format(struct ar_vif *vif)
 	vif->format.bytesperline = vif->format.width * AR_VIF_BYTES_PER_PIXEL;
 	vif->format.sizeimage = vif->format.bytesperline * vif->format.height;
 }
-
-static int ar_vif_get_fmt(struct file *file, void *priv, struct v4l2_format *f)
-{
-	struct ar_vif *vif = video_drvdata(file);
-
-	ar_vif_sync_format(vif);
-	f->fmt.pix = vif->format;
-
-	return 0;
-}
-
-/* The capture geometry follows the source's active mode; requests for any
- * other size are answered with that geometry rather than accepted, because
- * nothing in the pipeline can scale.
- */
-static int ar_vif_try_fmt(struct file *file, void *priv, struct v4l2_format *f)
-{
-	struct ar_vif *vif = video_drvdata(file);
-
-	ar_vif_sync_format(vif);
-	f->fmt.pix = vif->format;
-
-	return 0;
-}
-
-static const struct v4l2_ioctl_ops ar_vif_ioctl_ops = {
-	.vidioc_querycap = ar_vif_querycap,
-	.vidioc_enum_fmt_vid_cap = ar_vif_enum_fmt,
-	.vidioc_g_fmt_vid_cap = ar_vif_get_fmt,
-	.vidioc_s_fmt_vid_cap = ar_vif_try_fmt,
-	.vidioc_try_fmt_vid_cap = ar_vif_try_fmt,
-	.vidioc_reqbufs = vb2_ioctl_reqbufs,
-	.vidioc_querybuf = vb2_ioctl_querybuf,
-	.vidioc_qbuf = vb2_ioctl_qbuf,
-	.vidioc_dqbuf = vb2_ioctl_dqbuf,
-	.vidioc_expbuf = vb2_ioctl_expbuf,
-	.vidioc_create_bufs = vb2_ioctl_create_bufs,
-	.vidioc_prepare_buf = vb2_ioctl_prepare_buf,
-	.vidioc_streamon = vb2_ioctl_streamon,
-	.vidioc_streamoff = vb2_ioctl_streamoff,
-};
-
-static const struct v4l2_file_operations ar_vif_fops = {
-	.owner = THIS_MODULE,
-	.open = v4l2_fh_open,
-	.release = vb2_fop_release,
-	.poll = vb2_fop_poll,
-	.unlocked_ioctl = video_ioctl2,
-	.mmap = vb2_fop_mmap,
-};
 
 /* The CSI-2 receiver has appeared; remember it.
  *
@@ -1519,7 +1281,7 @@ static void ar_vif_notify_unbind(struct v4l2_async_notifier *notifier,
 	vif->source = NULL;
 }
 
-/* Every subdev is present; expose the video node. */
+/* Every subdev is present; expose their nodes and the media graph. */
 static int ar_vif_notify_complete(struct v4l2_async_notifier *notifier)
 {
 	struct ar_vif *vif = container_of(notifier, struct ar_vif, notifier);
@@ -1529,41 +1291,15 @@ static int ar_vif_notify_complete(struct v4l2_async_notifier *notifier)
 	if (ret)
 		return ret;
 
-	dev_info(vif->dev, "graph complete: registering the video device\n");
-
-	ret = video_register_device(&vif->video_dev, VFL_TYPE_VIDEO, -1);
-	if (ret) {
-		dev_err(vif->dev, "failed to register the video device (%d)\n",
-			ret);
-		return ret;
-	}
-
-	/* Both entities are registered with the media device now, so the link
-	 * between the source's pad and our video node can be created.
+	/* No pad link to create: there is no video node at this end, and the
+	 * receiver's sink is the ISP, which is not a media entity.
 	 */
-	if (vif->source) {
-		ret = media_create_pad_link(&vif->source->entity,
-					    vif->source_pad,
-					    &vif->video_dev.entity, 0,
-					    MEDIA_LNK_FL_ENABLED |
-					    MEDIA_LNK_FL_IMMUTABLE);
-		if (ret) {
-			dev_err(vif->dev, "failed to link %s (%d)\n",
-				vif->source->name, ret);
-			video_unregister_device(&vif->video_dev);
-			return ret;
-		}
-	}
-
 	ret = media_device_register(&vif->media_dev);
-	if (ret) {
-		video_unregister_device(&vif->video_dev);
+	if (ret)
 		return ret;
-	}
 
-	dev_info(vif->dev, "capture ready on %s: %ux%u SRGGB12\n",
-		 video_device_node_name(&vif->video_dev), vif->format.width,
-		 vif->format.height);
+	dev_info(vif->dev, "graph complete: input ready, %ux%u SRGGB12\n",
+		 vif->format.width, vif->format.height);
 
 	return 0;
 }
@@ -1627,7 +1363,6 @@ static int ar_vif_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct ar_vif *vif;
-	struct vb2_queue *q;
 	int ret;
 
 	/* Capture buffers must come from the low-RAM pool the AXI write master
@@ -1645,9 +1380,7 @@ static int ar_vif_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	vif->dev = dev;
-	mutex_init(&vif->lock);
 	spin_lock_init(&vif->buffer_lock);
-	INIT_LIST_HEAD(&vif->buffer_list);
 	ar_vif_set_default_format(vif);
 
 	vif->base = devm_platform_ioremap_resource(pdev, 0);
@@ -1697,68 +1430,17 @@ static int ar_vif_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	q = &vif->queue;
-	q->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-	q->io_modes = VB2_MMAP | VB2_DMABUF;
-	q->drv_priv = vif;
-	q->buf_struct_size = sizeof(struct ar_vif_buffer);
-	q->ops = &ar_vif_vb2_ops;
-	q->mem_ops = &vb2_dma_contig_memops;
-	q->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
-	q->lock = &vif->lock;
-	q->dev = dev;
-	q->min_queued_buffers = 2;
-
-	ret = vb2_queue_init(q);
-	if (ret) {
-		ar_vif_unregister_devices(vif);
-		return ret;
-	}
-
-	vif->video_dev.fops = &ar_vif_fops;
-	vif->video_dev.ioctl_ops = &ar_vif_ioctl_ops;
-	vif->video_dev.v4l2_dev = &vif->v4l2_dev;
-	vif->video_dev.queue = q;
-	vif->video_dev.lock = &vif->lock;
-	vif->video_dev.release = video_device_release_empty;
-	vif->video_dev.device_caps = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_STREAMING;
-	vif->video_dev.vfl_dir = VFL_DIR_RX;
-	strscpy(vif->video_dev.name, "ar-vif", sizeof(vif->video_dev.name));
-	video_set_drvdata(&vif->video_dev, vif);
-
-	vif->video_dev.entity.name = vif->video_dev.name;
-	vif->video_dev.entity.function = MEDIA_ENT_F_IO_V4L;
-	vif->video_dev.entity.flags |= MEDIA_ENT_FL_DEFAULT;
-
-	vif->video_dev.entity.pads = devm_kzalloc(dev, sizeof(struct media_pad),
-						  GFP_KERNEL);
-	if (!vif->video_dev.entity.pads) {
-		ar_vif_unregister_devices(vif);
-		return -ENOMEM;
-	}
-
-	vif->video_dev.entity.pads[0].flags = MEDIA_PAD_FL_SINK;
-
-	ret = media_entity_pads_init(&vif->video_dev.entity, 1,
-				     vif->video_dev.entity.pads);
-	if (ret) {
-		ar_vif_unregister_devices(vif);
-		return ret;
-	}
-
 	dev_info(dev, "probe: registering the async notifier for the source\n");
 
 	ret = ar_vif_register_source(vif);
 	if (ret) {
-		media_entity_cleanup(&vif->video_dev.entity);
 		ar_vif_unregister_devices(vif);
 		return ret;
 	}
 
 	vif->debugfs = debugfs_create_dir("ar-vif", NULL);
-	debugfs_create_u32("v4l2_completions", 0400, vif->debugfs,
-			   &vif->v4l2_completions);
 	debugfs_create_u32("irq_events", 0400, vif->debugfs, &vif->irq_events);
+	debugfs_create_u32("frames", 0400, vif->debugfs, &vif->frames);
 
 	/* Allocated once here rather than on the streaming path, so a bring-up
 	 * cannot fail on an allocation. It comes from the same reservation the
@@ -1798,10 +1480,8 @@ static void ar_vif_remove(struct platform_device *pdev)
 	debugfs_remove_recursive(vif->debugfs);
 
 	media_device_unregister(&vif->media_dev);
-	video_unregister_device(&vif->video_dev);
 	v4l2_async_nf_unregister(&vif->notifier);
 	v4l2_async_nf_cleanup(&vif->notifier);
-	media_entity_cleanup(&vif->video_dev.entity);
 	v4l2_device_unregister(&vif->v4l2_dev);
 	media_device_cleanup(&vif->media_dev);
 }
