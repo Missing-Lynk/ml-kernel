@@ -287,6 +287,26 @@
 #define AR_ISP_STATS_HIST	(AR_ISP_HIST_BANK + AR_ISP_HIST_REG_ADDR)
 
 /*
+ * Statistics ping-pong. The vendor keeps one reference index per statistics
+ * block in its private context (privctx[0x12948 + id * 4]) and flips it on
+ * subcommand 0x2c02, which its interrupt handler issues once per frame gated on
+ * a single status bit. The consumer then reads whichever half the index does
+ * not name, so a reader never races the engine writing the next frame.
+ *
+ * The mechanism is what is reproduced here, not the vendor's block ids: an
+ * index per buffer this driver owns, flipped from the frame's statistics event,
+ * with each buffer allocated at twice its geometry so the two halves are one
+ * allocation. The vendor's 0x8000 stride is its own allocation granularity and
+ * carries no meaning for buffers of our sizes.
+ *
+ * ltm_stats is deliberately single-buffered. Nothing reads it while the LTM
+ * page is a fixed identity, so doubling its measured 0x80000 extent would spend
+ * half a megabyte of coherent memory to serve no consumer. It joins the
+ * ping-pong when the CLAHE port gives it one.
+ */
+#define AR_ISP_STATS_HALVES		2
+
+/*
  * Bank 0x2800, shared by the vendor's gtm2 and ltm modules. 0x2808 is the
  * coefficient page the block fetches: 64 tiles of a 128-sample u16 curve at a
  * 0x100 stride, every tile monotonic from 0 to a measured maximum of 1003.
@@ -408,6 +428,11 @@ module_param(dpc, bool, 0644);
 MODULE_PARM_DESC(dpc,
 		 "apply the carried vendor defect-correction payload over the replay (default on)");
 
+static bool pingpong = true;
+module_param(pingpong, bool, 0644);
+MODULE_PARM_DESC(pingpong,
+		 "republish the statistics buffers per frame from the interrupt, alternating halves (default on)");
+
 static bool ltm = true;
 module_param(ltm, bool, 0644);
 MODULE_PARM_DESC(ltm,
@@ -487,6 +512,18 @@ struct ar_isp {
 	dma_addr_t ltm_stats_dma;
 	void *hist;
 	dma_addr_t hist_dma;
+
+	/*
+	 * Ping-pong state. stats_cur is the half the hardware is writing now,
+	 * so it is the half published to the address registers. stats_done is
+	 * the half the previous frame finished, which is what a consumer may
+	 * read; it means nothing until stats_valid, because before the first
+	 * flip no frame has completed into either half.
+	 */
+	unsigned int stats_cur;
+	unsigned int stats_done;
+	bool stats_valid;
+	u32 stats_flips;
 
 	/*
 	 * de3d's three working buffers. Hardware-written, armed once, and until
@@ -690,19 +727,54 @@ static void ar_isp_de3d_publish(struct ar_isp *isp)
 			 &isp->de3d_dma[0], &isp->de3d_dma[1], &isp->de3d_dma[2]);
 }
 
-static void ar_isp_stats_publish(struct ar_isp *isp)
+/*
+ * Point the statistics engines at one half of each buffer. Register writes
+ * only: this runs in hard interrupt context on every frame, so it must not log,
+ * sleep or touch anything the reader also writes.
+ *
+ * The two 0x6400 engines are given the same address, which is what the vendor
+ * publishes, so both halves stay a single pair rather than four buffers.
+ */
+static void ar_isp_stats_arm(struct ar_isp *isp, unsigned int half)
 {
 	if (isp->rro) {
-		writel(lower_32_bits(isp->rro_dma), isp->base + AR_ISP_STATS_RRO0);
-		writel(lower_32_bits(isp->rro_dma), isp->base + AR_ISP_STATS_RRO1);
+		dma_addr_t a = isp->rro_dma + half * AR_ISP_RRO_SIZE;
+
+		writel(lower_32_bits(a), isp->base + AR_ISP_STATS_RRO0);
+		writel(lower_32_bits(a), isp->base + AR_ISP_STATS_RRO1);
 	}
 
 	if (isp->rro_face)
-		writel(lower_32_bits(isp->rro_face_dma),
+		writel(lower_32_bits(isp->rro_face_dma + half * AR_ISP_RRO_SIZE),
 		       isp->base + AR_ISP_STATS_RRO_FACE);
 
 	if (isp->hist)
-		writel(lower_32_bits(isp->hist_dma), isp->base + AR_ISP_STATS_HIST);
+		writel(lower_32_bits(isp->hist_dma + half * AR_ISP_HIST_SIZE),
+		       isp->base + AR_ISP_STATS_HIST);
+}
+
+/* The half a consumer may read, and whether reading it means anything yet. */
+static const void *ar_isp_stats_ready(struct ar_isp *isp, const void *buf,
+				      size_t size)
+{
+	if (!buf)
+		return NULL;
+
+	if (!pingpong)
+		return buf;
+
+	if (!READ_ONCE(isp->stats_valid))
+		return NULL;
+
+	return (const u8 *)buf + READ_ONCE(isp->stats_done) * size;
+}
+
+static void ar_isp_stats_publish(struct ar_isp *isp)
+{
+	isp->stats_cur = 0;
+	isp->stats_done = 0;
+	isp->stats_valid = false;
+	ar_isp_stats_arm(isp, isp->stats_cur);
 
 	if (isp->ltm_page)
 		writel(lower_32_bits(isp->ltm_page_dma),
@@ -1123,11 +1195,21 @@ static void ar_isp_tables_prepare(struct ar_isp *isp)
 		dev_warn(dev, "coefficient buffers unavailable, falling back to the vendor's\n");
 
 	if (stats) {
-		isp->rro = dma_alloc_coherent(dev, AR_ISP_RRO_SIZE,
+		/*
+		 * Two halves per buffer in one allocation, so a half is an
+		 * offset rather than a second address to keep track of. The
+		 * halves are allocated even with pingpong off, which costs
+		 * 40 KiB and keeps the parameter a pure behaviour switch: the
+		 * A/B then differs only in whether the interrupt flips.
+		 */
+		isp->rro = dma_alloc_coherent(dev,
+					      AR_ISP_RRO_SIZE * AR_ISP_STATS_HALVES,
 					      &isp->rro_dma, GFP_KERNEL);
-		isp->rro_face = dma_alloc_coherent(dev, AR_ISP_RRO_SIZE,
+		isp->rro_face = dma_alloc_coherent(dev,
+						   AR_ISP_RRO_SIZE * AR_ISP_STATS_HALVES,
 						   &isp->rro_face_dma, GFP_KERNEL);
-		isp->hist = dma_alloc_coherent(dev, AR_ISP_HIST_SIZE,
+		isp->hist = dma_alloc_coherent(dev,
+					       AR_ISP_HIST_SIZE * AR_ISP_STATS_HALVES,
 					       &isp->hist_dma, GFP_KERNEL);
 		if (!isp->rro || !isp->rro_face || !isp->hist)
 			dev_warn(dev, "statistics buffers unavailable, falling back to the vendor's\n");
@@ -1195,14 +1277,17 @@ static void ar_isp_tables_release(struct ar_isp *isp)
 		dma_free_coherent(isp->dev, AR_ISP_LSC_SIZE, isp->hdr_lsc,
 				  isp->hdr_lsc_dma);
 	if (isp->rro)
-		dma_free_coherent(isp->dev, AR_ISP_RRO_SIZE, isp->rro,
-				  isp->rro_dma);
+		dma_free_coherent(isp->dev,
+				  AR_ISP_RRO_SIZE * AR_ISP_STATS_HALVES,
+				  isp->rro, isp->rro_dma);
 	if (isp->rro_face)
-		dma_free_coherent(isp->dev, AR_ISP_RRO_SIZE, isp->rro_face,
-				  isp->rro_face_dma);
+		dma_free_coherent(isp->dev,
+				  AR_ISP_RRO_SIZE * AR_ISP_STATS_HALVES,
+				  isp->rro_face, isp->rro_face_dma);
 	if (isp->hist)
-		dma_free_coherent(isp->dev, AR_ISP_HIST_SIZE, isp->hist,
-				  isp->hist_dma);
+		dma_free_coherent(isp->dev,
+				  AR_ISP_HIST_SIZE * AR_ISP_STATS_HALVES,
+				  isp->hist, isp->hist_dma);
 	if (isp->ltm_page)
 		dma_free_coherent(isp->dev, AR_ISP_LTM_PAGE_SIZE, isp->ltm_page,
 				  isp->ltm_page_dma);
@@ -1363,8 +1448,28 @@ static irqreturn_t ar_isp_irq(int irq, void *data)
 	isp->irq_events++;
 	isp->irq_seen0 |= s0;
 	isp->irq_seen1 |= s1;
-	if (s1 & AR_ISP_INTR_STATS_EVENT)
+
+	if (s1 & AR_ISP_INTR_STATS_EVENT) {
 		isp->irq_stats_events++;
+
+		/*
+		 * The frame that just ended wrote stats_cur, so that half is
+		 * now the readable one and the engines are pointed at the
+		 * other for the frame starting now. Arming before publishing
+		 * the index is what keeps a reader off the live half: the
+		 * moment stats_done names a half, the hardware has already
+		 * been sent elsewhere.
+		 */
+		if (pingpong) {
+			unsigned int next = isp->stats_cur ^ 1;
+
+			ar_isp_stats_arm(isp, next);
+			WRITE_ONCE(isp->stats_done, isp->stats_cur);
+			isp->stats_cur = next;
+			WRITE_ONCE(isp->stats_valid, true);
+			isp->stats_flips++;
+		}
+	}
 
 	return IRQ_HANDLED;
 }
@@ -1556,6 +1661,7 @@ DEFINE_SHOW_ATTRIBUTE(ar_isp_regs);
 static int ar_isp_stats_show(struct seq_file *s, void *unused)
 {
 	struct ar_isp *isp = s->private;
+	const void *rro;
 	unsigned int col, row;
 	u64 total = 0;
 	u32 count;
@@ -1565,13 +1671,19 @@ static int ar_isp_stats_show(struct seq_file *s, void *unused)
 		return 0;
 	}
 
-	count = ar_isp_rro_count(isp->rro, 0);
+	rro = ar_isp_stats_ready(isp, isp->rro, AR_ISP_RRO_SIZE);
+	if (!rro) {
+		seq_puts(s, "no completed frame\n");
+		return 0;
+	}
+
+	count = ar_isp_rro_count(rro, 0);
 	seq_printf(s, "count %u per zone per channel\n", count);
 
 	for (row = 0; row < AR_ISP_RRO_ROWS; row++) {
 		for (col = 0; col < AR_ISP_RRO_COLS; col++) {
-			u32 g0 = ar_isp_rro_mean(isp->rro, col, row, 1);
-			u32 g1 = ar_isp_rro_mean(isp->rro, col, row, 2);
+			u32 g0 = ar_isp_rro_mean(rro, col, row, 1);
+			u32 g1 = ar_isp_rro_mean(rro, col, row, 2);
 			u32 luma = (g0 + g1) / 2;
 
 			total += luma;
@@ -1640,6 +1752,7 @@ static int ar_isp_probe(struct platform_device *pdev)
 			   &isp->irq_stats_events);
 	debugfs_create_x32("irq_seen0", 0400, isp->debugfs, &isp->irq_seen0);
 	debugfs_create_x32("irq_seen1", 0400, isp->debugfs, &isp->irq_seen1);
+	debugfs_create_u32("stats_flips", 0400, isp->debugfs, &isp->stats_flips);
 
 	/* Only the number here. The line is requested at output arm, never at
 	 * probe: the bring-up order is receiver first and ISP after, so between
