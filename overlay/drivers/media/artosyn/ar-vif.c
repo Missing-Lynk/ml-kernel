@@ -27,6 +27,7 @@
  */
 
 #include <linux/clk.h>
+#include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
 #include <linux/io.h>
@@ -449,6 +450,35 @@ struct ar_vif {
 	struct v4l2_pix_format format;
 	unsigned int sequence;
 
+	/*
+	 * Liveness counters, exported through debugfs.
+	 *
+	 * These exist because there is no honest liveness signal in the VIF
+	 * register file. The status words a completion asserts are write-1-to
+	 * clear, so under interrupt completion the handler clears them
+	 * microseconds after they assert and an external sampler reads zero on
+	 * a perfectly healthy pipeline. 0x1f8 was used as a frame counter on
+	 * the assumption that it was one; it is not, it oscillates (0x1354,
+	 * 0x134c, 0x134e on consecutive reads while streaming), so a
+	 * strict-increase test on it both passes dead pipelines and fails live
+	 * ones. That cost a night of misdiagnosis.
+	 *
+	 * Software counters have neither problem: monotonic, owned by us, and
+	 * nothing can acknowledge them away. irq_events is the honest liveness
+	 * signal for this pipeline and is what the bring-up harness gates on.
+	 *
+	 * v4l2_completions counts buffers handed back through the v4l2 capture
+	 * path. It reads ZERO on a healthy system and that is expected: the
+	 * real pixel path is sensor to ISP to CVISP to DRAM and never reaches
+	 * this driver's buffer completion, while the bypass view that would has
+	 * never completed on this hardware. It is named for what it counts
+	 * rather than "frames" precisely so nobody reads a zero here as a dead
+	 * pipeline, which is the mistake 0x1f8 already caused once.
+	 */
+	struct dentry *debugfs;
+	u32 v4l2_completions;
+	u32 irq_events;
+
 	struct v4l2_async_notifier notifier;
 	struct v4l2_subdev *source;
 	u16 source_pad;
@@ -812,6 +842,11 @@ static void ar_vif_frame_done(struct ar_vif *vif)
 
 	spin_lock_irqsave(&vif->buffer_lock, flags);
 
+	/* Counted here rather than in either completion path, so the number
+	 * means the same thing under interrupts and under polling.
+	 */
+	vif->v4l2_completions++;
+
 	done = vif->active;
 	vif->active = vif->next;
 	vif->next = NULL;
@@ -973,6 +1008,8 @@ static irqreturn_t ar_vif_irq(int irq, void *data)
 
 	if (!bp_status && !intr_status && !view_full)
 		return IRQ_NONE;
+
+	vif->irq_events++;
 
 	if (bp_status)
 		ar_vif_write(vif, AR_VIF_BP_INTR_STATUS, bp_status);
@@ -1594,6 +1631,11 @@ static int ar_vif_probe(struct platform_device *pdev)
 		return ret;
 	}
 
+	vif->debugfs = debugfs_create_dir("ar-vif", NULL);
+	debugfs_create_u32("v4l2_completions", 0400, vif->debugfs,
+			   &vif->v4l2_completions);
+	debugfs_create_u32("irq_events", 0400, vif->debugfs, &vif->irq_events);
+
 	dev_info(dev, "probe: complete\n");
 
 	platform_set_drvdata(pdev, vif);
@@ -1611,6 +1653,8 @@ static void ar_vif_remove(struct platform_device *pdev)
 	 */
 	vif->streaming = false;
 	cancel_delayed_work_sync(&vif->poll_work);
+
+	debugfs_remove_recursive(vif->debugfs);
 
 	media_device_unregister(&vif->media_dev);
 	video_unregister_device(&vif->video_dev);
