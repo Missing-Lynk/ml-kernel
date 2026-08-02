@@ -479,6 +479,16 @@ struct ar_vif {
 	u32 v4l2_completions;
 	u32 irq_events;
 
+	/*
+	 * A frame the block can write when no v4l2 consumer has queued one. The
+	 * view must be armed for the block to assert any interrupt, and the
+	 * exported bring-up has no buffers of its own, so it points the write
+	 * master here. Nothing reads it: the real pixel path runs sensor to ISP
+	 * to CVISP and never comes back through this driver.
+	 */
+	void *scratch;
+	dma_addr_t scratch_addr;
+
 	struct v4l2_async_notifier notifier;
 	struct v4l2_subdev *source;
 	u16 source_pad;
@@ -1111,23 +1121,43 @@ static void ar_vif_return_buffers(struct ar_vif *vif, enum vb2_buffer_state stat
 
 static void ar_vif_sync_format(struct ar_vif *vif);
 
-static int ar_vif_start_streaming(struct vb2_queue *q, unsigned int count)
+/*
+ * The one VIF, for the exported input-path calls.
+ *
+ * There is a single instance: one block, one node in the device tree, and the
+ * callers are the other drivers in this camera stack rather than anything that
+ * could hold a device pointer of its own.
+ */
+static struct ar_vif *ar_vif_instance;
+
+/*
+ * Bring the input path up.
+ *
+ * Everything the block needs to receive frames. Arming a view buffer is part of
+ * the sequence rather than bracketing it: the addresses have to be latched
+ * between the frame-backpressure strobe and the plane length.
+ *
+ * That step is not optional even though this driver never reads the buffer
+ * back. Brought up with no address armed and no control latch pulsed, the block
+ * asserts no interrupt at all: measured, with the sensor powered and the front
+ * end enabled, irq_events stays at zero indefinitely. A caller with no buffers
+ * of its own supplies the scratch page for this reason.
+ */
+static int ar_vif_input_on(struct ar_vif *vif)
 {
-	struct ar_vif *vif = vb2_get_drv_priv(q);
 	struct ar_vif_buffer *first;
 	unsigned long flags;
 	int ret;
 
-	if (!vif->source) {
-		ar_vif_return_buffers(vif, VB2_BUF_STATE_QUEUED);
+	if (!vif->source)
 		return -ENODEV;
-	}
+
+	if (vif->streaming)
+		return -EBUSY;
 
 	ret = clk_prepare_enable(vif->axi_clk);
-	if (ret) {
-		ar_vif_return_buffers(vif, VB2_BUF_STATE_QUEUED);
+	if (ret)
 		return ret;
-	}
 
 	vif->sequence = 0;
 
@@ -1169,6 +1199,8 @@ static int ar_vif_start_streaming(struct vb2_queue *q, unsigned int count)
 		list_del(&first->list);
 		vif->active = first;
 		ar_vif_arm_buffer(vif, first->addr, true);
+	} else if (vif->scratch) {
+		ar_vif_arm_buffer(vif, vif->scratch_addr, true);
 	}
 
 	spin_unlock_irqrestore(&vif->buffer_lock, flags);
@@ -1216,7 +1248,6 @@ static int ar_vif_start_streaming(struct vb2_queue *q, unsigned int count)
 
 		ar_vif_stop(vif);
 		clk_disable_unprepare(vif->axi_clk);
-		ar_vif_return_buffers(vif, VB2_BUF_STATE_QUEUED);
 		return ret;
 	}
 
@@ -1227,9 +1258,11 @@ static int ar_vif_start_streaming(struct vb2_queue *q, unsigned int count)
 	return 0;
 }
 
-static void ar_vif_stop_streaming(struct vb2_queue *q)
+/* Take the input path back down, in the reverse order it came up. */
+static void ar_vif_input_off(struct ar_vif *vif)
 {
-	struct ar_vif *vif = vb2_get_drv_priv(q);
+	if (!vif->streaming)
+		return;
 
 	if (vif->source)
 		v4l2_subdev_call(vif->source, video, s_stream, 0);
@@ -1244,8 +1277,99 @@ static void ar_vif_stop_streaming(struct vb2_queue *q)
 
 	ar_vif_stop(vif);
 	clk_disable_unprepare(vif->axi_clk);
+}
+
+static int ar_vif_start_streaming(struct vb2_queue *q, unsigned int count)
+{
+	struct ar_vif *vif = vb2_get_drv_priv(q);
+	int ret;
+
+	ret = ar_vif_input_on(vif);
+	if (ret)
+		ar_vif_return_buffers(vif, VB2_BUF_STATE_QUEUED);
+
+	return ret;
+}
+
+static void ar_vif_stop_streaming(struct vb2_queue *q)
+{
+	struct ar_vif *vif = vb2_get_drv_priv(q);
+
+	ar_vif_input_off(vif);
 	ar_vif_return_buffers(vif, VB2_BUF_STATE_ERROR);
 }
+
+/*
+ * Seconds to wait for the pixel domain to come live, and the sampling interval.
+ * The camera is time dependent and a first frame has been seen to take several
+ * seconds, so this is generous; it only costs that long when the sensor is not
+ * delivering at all, which is a failure either way.
+ */
+#define AR_VIF_LIVE_TIMEOUT_MS		8000
+#define AR_VIF_LIVE_POLL_MS		20
+
+/*
+ * Bring the input path up and return only once frames are confirmed flowing.
+ *
+ * The caller's next step configures the ISP, which reads registers, and a read
+ * with the pixel domain dead hangs the SoC with no diagnostic. So this waits
+ * rather than returning as soon as the sequence has been issued.
+ *
+ * The liveness signal is irq_events, which is monotonic and cannot be
+ * acknowledged away; the status word a completion asserts is write-1-to-clear
+ * and the handler clears it microseconds later, so sampling that reads zero on
+ * a healthy pipeline. Under polling completion there is no such counter, so
+ * that mode falls back to waiting out the timeout.
+ */
+int ar_vif_input_start(void)
+{
+	struct ar_vif *vif = ar_vif_instance;
+	unsigned int waited;
+	u32 before;
+	int ret;
+
+	if (!vif)
+		return -ENODEV;
+
+	before = READ_ONCE(vif->irq_events);
+
+	ret = ar_vif_input_on(vif);
+	if (ret)
+		return ret;
+
+	for (waited = 0; waited < AR_VIF_LIVE_TIMEOUT_MS;
+	     waited += AR_VIF_LIVE_POLL_MS) {
+		msleep(AR_VIF_LIVE_POLL_MS);
+
+		if (!use_irq)
+			continue;
+
+		if (READ_ONCE(vif->irq_events) != before) {
+			dev_info(vif->dev, "input live after %u ms\n", waited);
+			return 0;
+		}
+	}
+
+	if (use_irq) {
+		dev_err(vif->dev, "no frame event in %u ms, input is not live\n",
+			AR_VIF_LIVE_TIMEOUT_MS);
+		ar_vif_input_off(vif);
+		return -ETIMEDOUT;
+	}
+
+	dev_info(vif->dev, "input settled for %u ms, polling has no counter to gate on\n",
+		 AR_VIF_LIVE_TIMEOUT_MS);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(ar_vif_input_start);
+
+void ar_vif_input_stop(void)
+{
+	if (ar_vif_instance)
+		ar_vif_input_off(ar_vif_instance);
+}
+EXPORT_SYMBOL_GPL(ar_vif_input_stop);
 
 static const struct vb2_ops ar_vif_vb2_ops = {
 	.queue_setup = ar_vif_queue_setup,
@@ -1636,9 +1760,20 @@ static int ar_vif_probe(struct platform_device *pdev)
 			   &vif->v4l2_completions);
 	debugfs_create_u32("irq_events", 0400, vif->debugfs, &vif->irq_events);
 
+	/* Allocated once here rather than on the streaming path, so a bring-up
+	 * cannot fail on an allocation. It comes from the same reservation the
+	 * capture buffers do, which the write master can reach.
+	 */
+	vif->scratch = dmam_alloc_coherent(dev, vif->format.sizeimage,
+					   &vif->scratch_addr, GFP_KERNEL);
+	if (!vif->scratch)
+		dev_warn(dev,
+			 "no scratch frame: a bring-up with no queued buffer will not arm the view\n");
+
 	dev_info(dev, "probe: complete\n");
 
 	platform_set_drvdata(pdev, vif);
+	ar_vif_instance = vif;
 
 	return 0;
 }
@@ -1646,6 +1781,12 @@ static int ar_vif_probe(struct platform_device *pdev)
 static void ar_vif_remove(struct platform_device *pdev)
 {
 	struct ar_vif *vif = platform_get_drvdata(pdev);
+
+	/* Before anything else: the exported entry points reach this instance
+	 * from another module, and one arriving during teardown would touch a
+	 * block that is losing its clock.
+	 */
+	ar_vif_instance = NULL;
 
 	/* Stop the completion path before anything is torn down. A polling work
 	 * item left scheduled here runs after the module's code has been freed,

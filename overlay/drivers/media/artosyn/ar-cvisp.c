@@ -193,6 +193,18 @@ module_param(depth, uint, 0444);
 MODULE_PARM_DESC(depth,
 		 "frame ticks a buffer is held before completion, 1 or 2 (default 1)");
 
+/*
+ * Bring the sensor, input path and ISP up from STREAMON, so opening the node is
+ * the whole bring-up and v4l2src works with nothing else driving debugfs.
+ *
+ * Off leaves the chain entirely to the caller, which is how the capture harness
+ * ran before this existed and is the fallback if self bring-up misbehaves.
+ */
+static bool chain = true;
+module_param(chain, bool, 0644);
+MODULE_PARM_DESC(chain,
+		 "bring the sensor, VIF and ISP up from STREAMON (default on)");
+
 static bool assert_clk;
 module_param(assert_clk, bool, 0444);
 MODULE_PARM_DESC(assert_clk,
@@ -230,6 +242,7 @@ struct ar_cvisp {
 	struct ar_cvisp_buffer *arming;
 	struct ar_cvisp_buffer *filling;
 	bool streaming;
+	bool chain_up;		/* the chain ahead of this block has been started */
 	unsigned int sequence;
 	u32 completions;	/* buffers handed back through the node */
 	u32 drops;		/* ticks with nothing queued to arm */
@@ -756,22 +769,74 @@ static void ar_cvisp_return_buffers(struct ar_cvisp *cv,
 }
 
 /*
- * STREAMON takes the output queue over from the vendor ring. It does NOT bring
- * the rest of the chain up: the sensor, the VIF input path and the ISP are
- * started from outside this driver, in that order, and the block has to be
- * configured and running before its ring means anything. Configure it here if
- * nobody has, so the node is self-sufficient for the part this driver owns.
+ * Bring the chain up ahead of this block, once.
+ *
+ * The order is the one every validated bring-up uses: the VIF input path and
+ * the sensor first, then the ISP. That is not the vendor's order, which starts
+ * its sinks before its source; it is this stack's, and it exists because the
+ * ISP configuration reads registers and a read with the pixel domain dead hangs
+ * the SoC. ar_vif_input_start returns only once frames are confirmed flowing,
+ * which is what makes the ISP step safe rather than a race against a sleep.
+ *
+ * Done once and never undone. A warm re-bring-up of these blocks completes
+ * without error and then never writes DRAM again, so tearing the chain down at
+ * STREAMOFF would make the second STREAMON of a boot silently produce nothing.
+ * The cost is that the sensor keeps running between streams.
+ */
+static int ar_cvisp_chain_start(struct ar_cvisp *cv)
+{
+	int ret;
+
+	if (cv->chain_up)
+		return 0;
+
+	ret = ar_vif_input_start();
+	if (ret == -EBUSY) {
+		/* Already brought up from outside, which is how the capture
+		 * harness runs. Nothing to do and not an error.
+		 */
+		dev_info(cv->dev, "input path already running\n");
+	} else if (ret) {
+		dev_err(cv->dev, "cannot start the input path (%d)\n", ret);
+		return ret;
+	}
+
+	ret = ar_isp_pipeline_start();
+	if (ret) {
+		dev_err(cv->dev, "cannot start the isp (%d)\n", ret);
+		return ret;
+	}
+
+	cv->chain_up = true;
+
+	return 0;
+}
+
+/*
+ * STREAMON takes the output queue over from the vendor ring, and brings the
+ * chain up ahead of it if nothing else has. The block itself has to be
+ * configured before its ring means anything, so that happens here too when
+ * nobody has done it.
  */
 static int ar_cvisp_start_streaming(struct vb2_queue *q, unsigned int count)
 {
 	struct ar_cvisp *cv = vb2_get_drv_priv(q);
 	struct ar_cvisp_buffer *first;
 	unsigned long flags;
+	int ret;
 
 	if (!rotate) {
 		dev_err(cv->dev, "rotate=0: nothing would advance the queue\n");
 		ar_cvisp_return_buffers(cv, VB2_BUF_STATE_QUEUED);
 		return -EINVAL;
+	}
+
+	if (chain) {
+		ret = ar_cvisp_chain_start(cv);
+		if (ret) {
+			ar_cvisp_return_buffers(cv, VB2_BUF_STATE_QUEUED);
+			return ret;
+		}
 	}
 
 	if (!cv->configured)

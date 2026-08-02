@@ -32,4 +32,22 @@
  */
 void ar_isp_set_frame_hook(void (*fn)(void *ctx), void *ctx);
 
+/*
+ * Bring the input path up: the VIF's clock and block configuration, its
+ * completion path, and the sensor. Returns once the pixel domain is confirmed
+ * live, because the ISP configuration that follows reads registers and a read
+ * with the pixel domain dead hangs the SoC.
+ *
+ * -ENODEV if the VIF has not probed or its sensor never bound, -EBUSY if the
+ * input path is already running, -ETIMEDOUT if no frame event arrives.
+ */
+int ar_vif_input_start(void);
+void ar_vif_input_stop(void);
+
+/*
+ * Configure the ISP and arm its output. Must be called with the input path
+ * already live. -ENODEV if the ISP has not probed.
+ */
+int ar_isp_pipeline_start(void);
+
 #endif /* AR_CAMERA_HOOK_H */

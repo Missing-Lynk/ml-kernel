@@ -457,6 +457,26 @@ module_param(gib, bool, 0644);
 MODULE_PARM_DESC(gib,
 		 "set gib's bypass bit as the vendor's tuning apply does (default on)");
 
+/*
+ * Setup-table entries applied when this driver brings the chain up itself.
+ *
+ * Not the whole table. The capture harness has configured every validated
+ * bring-up through configure_upto with this length, so it is the measured
+ * operating configuration rather than a bisect leftover, and it belongs to the
+ * driver rather than to whatever writes debugfs. The cut has consequences the
+ * driver covers on its own: the replay's colour correction matrix sits at entry
+ * 1718, past this, so ccm installs it directly (see the ccm bank comment), and
+ * the lnr strength curves past 0x3d7c are left at zero.
+ *
+ * The remaining entries are not merely unused, they are suspect: after the full
+ * table AR_ISP_IN_GEOMETRY reads zero, so one of them stops the block seeing
+ * its input. Which one is not established.
+ */
+static unsigned int setup_entries = 1475;
+module_param(setup_entries, uint, 0444);
+MODULE_PARM_DESC(setup_entries,
+		 "setup-table entries applied on self bring-up (default 1475)");
+
 static bool use_irq = true;
 module_param(use_irq, bool, 0444);
 MODULE_PARM_DESC(use_irq,
@@ -1636,6 +1656,37 @@ static int ar_isp_arm_set(void *data, u64 val)
 }
 DEFINE_DEBUGFS_ATTRIBUTE(ar_isp_arm_fops, NULL, ar_isp_arm_set, "%llu\n");
 
+/*
+ * The one ISP, for the exported bring-up call. Single block, single node.
+ */
+static struct ar_isp *ar_isp_instance;
+
+/*
+ * Configure the block and arm its output, as one call for a driver that is
+ * bringing the whole chain up.
+ *
+ * Uses the prefix rather than the full setup table, because the prefix is the
+ * configuration every validated bring-up has run: the capture harness has
+ * driven configure_upto with this length throughout. The full table is a
+ * different configuration and is not currently validated, so choosing it here
+ * would silently change what the camera runs.
+ *
+ * The caller must have the pixel domain live already: this reads registers back.
+ */
+int ar_isp_pipeline_start(void)
+{
+	struct ar_isp *isp = ar_isp_instance;
+
+	if (!isp)
+		return -ENODEV;
+
+	ar_isp_configure_prefix(isp, setup_entries);
+	ar_isp_arm_output(isp);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(ar_isp_pipeline_start);
+
 DEFINE_DEBUGFS_ATTRIBUTE(ar_isp_prefix_fops, ar_isp_prefix_get,
 			 ar_isp_prefix_set, "%llu\n");
 
@@ -1765,6 +1816,7 @@ static int ar_isp_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, ret, "cannot enable isp clocks\n");
 
 	platform_set_drvdata(pdev, isp);
+	ar_isp_instance = isp;
 
 	ar_isp_tables_prepare(isp);
 
@@ -1811,8 +1863,12 @@ static void ar_isp_remove(struct platform_device *pdev)
 	struct ar_isp *isp = platform_get_drvdata(pdev);
 
 	/* Before anything else: once the clocks drop, a late interrupt's
-	 * register access hangs the SoC, so the line must be gone first.
+	 * register access hangs the SoC, so the line must be gone first. The
+	 * exported bring-up call reaches this instance from another module and
+	 * is cleared for the same reason.
 	 */
+	ar_isp_instance = NULL;
+
 	if (isp->irq_requested)
 		free_irq(isp->irq, isp);
 
