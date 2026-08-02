@@ -62,6 +62,7 @@
 
 #include "ar-isp-defaults.h"
 #include "ar-isp-codec.h"
+#include "ar-camera-hook.h"
 #include "ar-isp-dpc.h"
 #include "ar-isp-stats.h"
 #include "ar-isp-drc-tail.h"
@@ -1431,6 +1432,30 @@ static void ar_isp_configure(struct ar_isp *isp)
  * exists. The clocks are on from probe, so the registers are safe to touch
  * whenever the line fires.
  */
+/*
+ * The per-frame tick handed to the output stage. See ar-camera-hook.h for why
+ * the ISP owns it rather than the VIF or the CVISP.
+ *
+ * The lock is held across the call, not just the pointer read, so a module that
+ * unregisters is guaranteed no callback is still running when it returns. The
+ * callback is short (a few register writes) so holding a spinlock across it in
+ * hard interrupt context is acceptable.
+ */
+static DEFINE_SPINLOCK(ar_isp_hook_lock);
+static void (*ar_isp_frame_hook)(void *ctx);
+static void *ar_isp_frame_hook_ctx;
+
+void ar_isp_set_frame_hook(void (*fn)(void *ctx), void *ctx)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&ar_isp_hook_lock, flags);
+	ar_isp_frame_hook = fn;
+	ar_isp_frame_hook_ctx = ctx;
+	spin_unlock_irqrestore(&ar_isp_hook_lock, flags);
+}
+EXPORT_SYMBOL_GPL(ar_isp_set_frame_hook);
+
 static irqreturn_t ar_isp_irq(int irq, void *data)
 {
 	struct ar_isp *isp = data;
@@ -1460,6 +1485,15 @@ static irqreturn_t ar_isp_irq(int irq, void *data)
 		 * moment stats_done names a half, the hardware has already
 		 * been sent elsewhere.
 		 */
+		/*
+		 * One statistics event per frame, so this is the frame tick the
+		 * output stage rotates its ring on.
+		 */
+		spin_lock(&ar_isp_hook_lock);
+		if (ar_isp_frame_hook)
+			ar_isp_frame_hook(ar_isp_frame_hook_ctx);
+		spin_unlock(&ar_isp_hook_lock);
+
 		if (pingpong) {
 			unsigned int next = isp->stats_cur ^ 1;
 

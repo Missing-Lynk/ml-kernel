@@ -38,6 +38,8 @@
 
 #include <linux/clk.h>
 #include <linux/debugfs.h>
+
+#include "ar-camera-hook.h"
 #include <linux/firmware.h>
 #include <linux/io.h>
 #include <linux/math64.h>
@@ -121,6 +123,11 @@ MODULE_PARM_DESC(fpn,
  * Off by default: see the probe. The vendor never enables this clock and the
  * boot leaves its gate set, so asserting it is an experiment, not a dependency.
  */
+static bool rotate = true;
+module_param(rotate, bool, 0644);
+MODULE_PARM_DESC(rotate,
+		 "advance the output ring once per frame from the ISP frame tick (default on)");
+
 static bool assert_clk;
 module_param(assert_clk, bool, 0444);
 MODULE_PARM_DESC(assert_clk,
@@ -132,6 +139,7 @@ struct ar_cvisp {
 	struct clk *clk;
 	bool clk_asserted;
 	struct dentry *debugfs;
+	u32 rotations;
 	bool configured;
 	unsigned int next;	/* ring slot to arm next */
 	unsigned int frames;	/* triplets written since configure */
@@ -188,6 +196,25 @@ static void ar_cvisp_queue(struct ar_cvisp *cv)
 
 	if (!cv->next)
 		ar_cvisp_apply(cv, ar_cvisp_tick, ARRAY_SIZE(ar_cvisp_tick));
+}
+
+/*
+ * The ISP's per-frame tick. Runs in hard interrupt context.
+ *
+ * Without this the block is armed once at setup and never re-armed, so it
+ * writes a single frame and then leaves the plane static. That is what made a
+ * boot yield exactly one usable capture, and it is why every later bring-up
+ * re-read the first one's frame.
+ */
+static void ar_cvisp_frame_tick(void *ctx)
+{
+	struct ar_cvisp *cv = ctx;
+
+	if (!rotate)
+		return;
+
+	ar_cvisp_queue(cv);
+	cv->rotations++;
 }
 
 /*
@@ -453,6 +480,9 @@ static int ar_cvisp_probe(struct platform_device *pdev)
 	debugfs_create_file_unsafe("queue", 0600, cv->debugfs, cv,
 				   &ar_cvisp_queue_fops);
 	debugfs_create_file("regs", 0400, cv->debugfs, cv, &ar_cvisp_regs_fops);
+	debugfs_create_u32("rotations", 0400, cv->debugfs, &cv->rotations);
+
+	ar_isp_set_frame_hook(ar_cvisp_frame_tick, cv);
 
 	/*
 	 * Deliberately no register read here. If the clock assumption above is
@@ -470,6 +500,15 @@ static int ar_cvisp_probe(struct platform_device *pdev)
 static void ar_cvisp_remove(struct platform_device *pdev)
 {
 	struct ar_cvisp *cv = platform_get_drvdata(pdev);
+
+	/*
+	 * First, and before the clock is dropped. The hook runs from the ISP's
+	 * interrupt and writes this block's registers, so a tick arriving after
+	 * teardown would touch a clock-gated block and hang the SoC. The ISP
+	 * holds its lock across the call, so this returns only once no callback
+	 * is still running.
+	 */
+	ar_isp_set_frame_hook(NULL, NULL);
 
 	debugfs_remove_recursive(cv->debugfs);
 
