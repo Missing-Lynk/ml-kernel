@@ -133,10 +133,26 @@ MODULE_PARM_DESC(blc_gain,
 #define AR_CVISP_C_SIZE			(AR_CVISP_C_STRIDE * (AR_CVISP_HEIGHT / 2))
 
 /*
+ * Rows the buffers hold, above the rows the block writes.
+ *
+ * The wave5 encoder rounds its raw height up to W5_ENC_RAW_STEP_HEIGHT, 16, and
+ * refuses an imported plane shorter than its stride times that height: 1080 rows
+ * becomes 1088 and a buffer sized to the frame is 8 luma and 4 chroma rows short.
+ * Allocating those rows is what lets a capture buffer be handed to the encoder
+ * with no copy.
+ *
+ * Only the allocation grows. The block still writes AR_CVISP_HEIGHT rows, which
+ * is what the payload reports, so nothing reads the padding as image data.
+ */
+#define AR_CVISP_ALLOC_HEIGHT		ALIGN(AR_CVISP_HEIGHT, 16)
+#define AR_CVISP_Y_ALLOC		(AR_CVISP_Y_STRIDE * AR_CVISP_ALLOC_HEIGHT)
+#define AR_CVISP_C_ALLOC		(AR_CVISP_C_STRIDE * (AR_CVISP_ALLOC_HEIGHT / 2))
+
+/*
  * Deepest buffer hold the driver will accept, and so the most buffers the hardware can be
  * holding at once. See the depth parameter.
  */
-#define AR_CVISP_MAX_DEPTH		2
+#define AR_CVISP_MAX_DEPTH		4
 
 /* Channel geometry from the late table: width, height, then the crop origin. */
 #define AR_CVISP_CH_WIDTH		0x4000
@@ -191,7 +207,7 @@ MODULE_PARM_DESC(rotate,
 static unsigned int depth = 1;
 module_param(depth, uint, 0444);
 MODULE_PARM_DESC(depth,
-		 "frame ticks a buffer is held before completion, 1 or 2 (default 1)");
+		 "frame ticks a buffer is held before completion, 1 to 4 (default 1)");
 
 /*
  * Bring the sensor, input path and ISP up from STREAMON, so opening the node is
@@ -233,14 +249,15 @@ struct ar_cvisp {
 	struct vb2_queue queue;
 	struct mutex lock;	/* serialises ioctls and vb2 operations */
 
-	spinlock_t buffer_lock;	/* guards the list and the two armed buffers */
+	spinlock_t buffer_lock;	/* guards the list and the armed buffers */
 	struct list_head buffer_list;
 	/*
-	 * arming was programmed at the last tick, filling at the one before it.
-	 * Only filling is old enough to hand back; see ar_cvisp_frame_tick.
+	 * The buffers the block may still be writing, youngest first: held[0]
+	 * was programmed at the last tick, held[1] at the one before it. A
+	 * buffer leaves the far end after depth ticks and only then is old
+	 * enough to hand back; see ar_cvisp_frame_tick.
 	 */
-	struct ar_cvisp_buffer *arming;
-	struct ar_cvisp_buffer *filling;
+	struct ar_cvisp_buffer *held[AR_CVISP_MAX_DEPTH];
 	bool streaming;
 	bool chain_up;		/* the chain ahead of this block has been started */
 	unsigned int sequence;
@@ -377,14 +394,12 @@ static void ar_cvisp_frame_tick(void *ctx)
 
 	list_del(&next->list);
 
-	if (depth > 1) {
-		done = cv->filling;
-		cv->filling = cv->arming;
-	} else {
-		done = cv->arming;
-	}
+	/* Shift the pipeline: the oldest leaves, the new one enters at the front. */
+	done = cv->held[depth - 1];
+	for (unsigned int i = depth - 1; i > 0; i--)
+		cv->held[i] = cv->held[i - 1];
 
-	cv->arming = next;
+	cv->held[0] = next;
 
 	ar_cvisp_arm_buffer(cv, next);
 	ar_cvisp_cycle(cv);
@@ -665,12 +680,15 @@ static void ar_cvisp_fill_format(struct v4l2_pix_format_mplane *pix)
 	 */
 	pix->colorspace = V4L2_COLORSPACE_DEFAULT;
 
+	/* sizeimage is the buffer, which carries the padding rows; the payload set
+	 * at prepare is the written extent.
+	 */
 	pix->plane_fmt[0].bytesperline = AR_CVISP_Y_STRIDE;
-	pix->plane_fmt[0].sizeimage = AR_CVISP_Y_SIZE;
+	pix->plane_fmt[0].sizeimage = AR_CVISP_Y_ALLOC;
 	pix->plane_fmt[1].bytesperline = AR_CVISP_C_STRIDE;
-	pix->plane_fmt[1].sizeimage = AR_CVISP_C_SIZE;
+	pix->plane_fmt[1].sizeimage = AR_CVISP_C_ALLOC;
 	pix->plane_fmt[2].bytesperline = AR_CVISP_C_STRIDE;
-	pix->plane_fmt[2].sizeimage = AR_CVISP_C_SIZE;
+	pix->plane_fmt[2].sizeimage = AR_CVISP_C_ALLOC;
 }
 
 static int ar_cvisp_queue_setup(struct vb2_queue *q, unsigned int *num_buffers,
@@ -678,7 +696,7 @@ static int ar_cvisp_queue_setup(struct vb2_queue *q, unsigned int *num_buffers,
 				struct device *alloc_devs[])
 {
 	static const unsigned int plane_size[3] = {
-		AR_CVISP_Y_SIZE, AR_CVISP_C_SIZE, AR_CVISP_C_SIZE,
+		AR_CVISP_Y_ALLOC, AR_CVISP_C_ALLOC, AR_CVISP_C_ALLOC,
 	};
 
 	if (*num_planes) {
@@ -701,7 +719,10 @@ static int ar_cvisp_queue_setup(struct vb2_queue *q, unsigned int *num_buffers,
 
 static int ar_cvisp_buffer_prepare(struct vb2_buffer *vb)
 {
-	static const unsigned int plane_size[3] = {
+	static const unsigned int plane_alloc[3] = {
+		AR_CVISP_Y_ALLOC, AR_CVISP_C_ALLOC, AR_CVISP_C_ALLOC,
+	};
+	static const unsigned int plane_written[3] = {
 		AR_CVISP_Y_SIZE, AR_CVISP_C_SIZE, AR_CVISP_C_SIZE,
 	};
 	struct ar_cvisp_buffer *buf = to_ar_cvisp_buffer(to_vb2_v4l2_buffer(vb));
@@ -709,10 +730,10 @@ static int ar_cvisp_buffer_prepare(struct vb2_buffer *vb)
 	for (unsigned int i = 0; i < 3; i++) {
 		dma_addr_t addr;
 
-		if (vb2_plane_size(vb, i) < plane_size[i])
+		if (vb2_plane_size(vb, i) < plane_alloc[i])
 			return -EINVAL;
 
-		vb2_set_plane_payload(vb, i, plane_size[i]);
+		vb2_set_plane_payload(vb, i, plane_written[i]);
 
 		/*
 		 * The block takes a 32-bit base. Buffers come from the cvisp_cma
@@ -751,13 +772,13 @@ static void ar_cvisp_return_buffers(struct ar_cvisp *cv,
 
 	spin_lock_irqsave(&cv->buffer_lock, flags);
 
-	if (cv->filling)
-		list_add_tail(&cv->filling->list, &pending);
-	if (cv->arming)
-		list_add_tail(&cv->arming->list, &pending);
+	for (unsigned int i = 0; i < AR_CVISP_MAX_DEPTH; i++) {
+		if (cv->held[i])
+			list_add_tail(&cv->held[i]->list, &pending);
 
-	cv->filling = NULL;
-	cv->arming = NULL;
+		cv->held[i] = NULL;
+	}
+
 	list_splice_tail_init(&cv->buffer_list, &pending);
 
 	spin_unlock_irqrestore(&cv->buffer_lock, flags);
@@ -852,8 +873,8 @@ static int ar_cvisp_start_streaming(struct vb2_queue *q, unsigned int count)
 	}
 
 	list_del(&first->list);
-	cv->arming = first;
-	cv->filling = NULL;
+	memset(cv->held, 0, sizeof(cv->held));
+	cv->held[0] = first;
 	cv->sequence = 0;
 	ar_cvisp_arm_buffer(cv, first);
 

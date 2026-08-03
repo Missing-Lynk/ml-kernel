@@ -1,0 +1,77 @@
+Why: the encoder recomputes the source bytesperline from the picture width and
+discards what the caller asked for, so a frame whose rows carry padding can only
+be encoded after being repacked into a tightly strided buffer. That copy is the
+whole cost the zero-copy import exists to avoid, and on this SoC it is not
+optional: the CVISP capture node writes 1920 pixels on a 2048-byte stride, which
+is the geometry its buffers come out of the reserved pool with.
+
+The hardware takes the source stride as a field of its own. start_encode() hands
+src_fmt.plane_fmt[0].bytesperline to the frame buffer descriptor and the picture
+width is programmed separately, so a stride wider than the picture is a
+configuration the block already supports and the driver simply never exposed.
+
+Honour a requested stride when it is larger than the computed one, scaling every
+plane by the same ratio and growing each sizeimage with its stride. A caller that
+leaves bytesperline at zero, which is what every existing user does, gets the
+computed value unchanged.
+
+--- a/drivers/media/platform/chips-media/wave5/wave5-vpu-enc.c
++++ b/drivers/media/platform/chips-media/wave5/wave5-vpu-enc.c
+@@ -518,11 +518,49 @@
+ 	return 0;
+ }
+ 
++/*
++ * Artosyn: keep a caller-supplied luma stride that is wider than the picture.
++ *
++ * wave5_update_pix_fmt() ends in v4l2_fill_pixfmt_mp(), which derives bytesperline from
++ * the width alone and overwrites whatever the caller asked for. A source whose rows carry
++ * padding therefore cannot be encoded without a copy through a repacked buffer. The
++ * hardware has no such restriction: start_encode() hands src_fmt.plane_fmt[0].bytesperline
++ * to the frame buffer descriptor as the source stride, independent of the picture width.
++ *
++ * The CVISP capture node on this SoC writes 1920 pixels on a 2048-byte stride, so honouring
++ * the request here is what lets its buffers be imported directly.
++ *
++ * Only a stride larger than the computed one is taken, every plane is scaled by the same
++ * ratio so chroma keeps its relation to luma, and each sizeimage grows with its stride so
++ * the buffers still cover every row.
++ */
++static void wave5_widen_src_stride(struct v4l2_pix_format_mplane *pix_mp, unsigned int stride)
++{
++	unsigned int base = pix_mp->plane_fmt[0].bytesperline;
++	unsigned int i;
++
++	if (!base || stride <= base)
++		return;
++
++	for (i = 0; i < pix_mp->num_planes; i++) {
++		unsigned int bpl = pix_mp->plane_fmt[i].bytesperline;
++		unsigned int rows;
++
++		if (!bpl)
++			continue;
++
++		rows = pix_mp->plane_fmt[i].sizeimage / bpl;
++		pix_mp->plane_fmt[i].bytesperline = bpl * stride / base;
++		pix_mp->plane_fmt[i].sizeimage = pix_mp->plane_fmt[i].bytesperline * rows;
++	}
++}
++
+ static int wave5_vpu_enc_try_fmt_out(struct file *file, void *fh, struct v4l2_format *f)
+ {
+ 	struct vpu_instance *inst = file_to_vpu_inst(file);
+ 	const struct v4l2_frmsize_stepwise *frmsize;
+ 	const struct vpu_format *vpu_fmt;
++	unsigned int stride = f->fmt.pix_mp.plane_fmt[0].bytesperline;
+ 	int width, height;
+ 
+ 	dev_dbg(inst->dev->dev, "%s: fourcc: %u width: %u height: %u num_planes: %u field: %u\n",
+@@ -544,6 +582,7 @@
+ 
+ 	wave5_update_pix_fmt(&f->fmt.pix_mp, VPU_FMT_TYPE_RAW,
+ 			     width, height, frmsize);
++	wave5_widen_src_stride(&f->fmt.pix_mp, stride);
+ 	return 0;
+ }
+ 

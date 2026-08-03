@@ -1,0 +1,48 @@
+Why: the encoder sizes the coded picture from the source height AFTER the source
+alignment has been applied to it, so the source buffer's padding rows end up
+inside the stream. The two sides have different rules: W5_ENC_RAW_STEP_HEIGHT is
+16, W5_ENC_CODEC_STEP_HEIGHT is 8. A caller asking to encode 1920x1080 gets a
+source geometry of 1088 rows, which is correct and is what the buffer must hold,
+and then a 1088-row coded picture, which is not: 1080 is already a multiple of
+the coded step, so nothing required the picture to grow.
+
+The visible result is eight rows of whatever the frame writer left in the tail of
+its allocation, encoded as image and shown by every decoder. On this SoC the CVISP
+capture node writes exactly 1080 rows into a 1088-row buffer, so those rows carry
+unrelated resident data and read as a shifted strip along the bottom edge.
+
+Take the caller's requested picture size for the coded side and let the codec's own
+frmsize constraints round it, instead of inheriting a rounding that belongs to the
+source buffer. The source geometry is untouched, so the frame buffer the hardware
+reads is unchanged.
+
+--- a/drivers/media/platform/chips-media/wave5/wave5-vpu-enc.c
++++ b/drivers/media/platform/chips-media/wave5/wave5-vpu-enc.c
+@@ -591,6 +591,18 @@
+ 	struct vpu_instance *inst = file_to_vpu_inst(file);
+ 	const struct vpu_format *vpu_fmt;
+ 	const struct v4l2_format_info *info;
++	/*
++	 * Artosyn: the picture the caller asked for, before the RAW alignment is applied to it.
++	 *
++	 * The source and the coded picture have different alignment rules, 16 rows against 8, and
++	 * the source one is the coarser. Sizing the coded picture from the aligned source height
++	 * makes the encoder code the source buffer's padding rows as if they were image: a 1080-row
++	 * frame becomes a 1088-row stream whose last 8 rows are whatever the writer left in the
++	 * allocation. Keep the caller's request for the coded side and let its own constraints
++	 * round it.
++	 */
++	unsigned int coded_width = f->fmt.pix_mp.width;
++	unsigned int coded_height = f->fmt.pix_mp.height;
+ 	int i, ret;
+ 
+ 	dev_dbg(inst->dev->dev, "%s: fourcc: %u width: %u height: %u num_planes: %u field: %u\n",
+@@ -639,7 +651,7 @@
+ 		return -EINVAL;
+ 
+ 	wave5_update_pix_fmt(&inst->dst_fmt, VPU_FMT_TYPE_CODEC,
+-			     f->fmt.pix_mp.width, f->fmt.pix_mp.height,
++			     coded_width, coded_height,
+ 			     vpu_fmt->v4l2_frmsize);
+ 	/* Artosyn: re-apply the coded sizeimage clamp (see wave5_vpu_enc_try_fmt_cap). s_fmt_out
+ 	 * recomputes dst_fmt after the CAPTURE clamp, and this is the value the CAPTURE vb2 pool
