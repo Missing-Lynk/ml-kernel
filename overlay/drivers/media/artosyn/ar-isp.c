@@ -1856,6 +1856,35 @@ static int ar_isp_stats_show(struct seq_file *s, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(ar_isp_stats);
 
+/*
+ * Raw statistics export for the userspace 3A loop: one read returns the flip
+ * sequence, the AE zone-grid half and the histogram half the hardware is not
+ * writing, then the sequence again. The halves flip at most once per frame,
+ * so a reader that sees the two sequence words differ retries the read and
+ * the second attempt is coherent. A poll of the stats_flips file tells the
+ * reader when a new frame's statistics exist without copying them.
+ */
+static int ar_isp_stats_raw_show(struct seq_file *s, void *unused)
+{
+	struct ar_isp *isp = s->private;
+	const void *rro, *hist;
+	u32 seq = READ_ONCE(isp->stats_flips);
+
+	rro = ar_isp_stats_ready(isp, isp->rro, AR_ISP_RRO_SIZE);
+	hist = ar_isp_stats_ready(isp, isp->hist, AR_ISP_HIST_SIZE);
+	if (!rro || !hist)
+		return -EAGAIN;
+
+	seq_write(s, &seq, sizeof(seq));
+	seq_write(s, rro, AR_ISP_RRO_SIZE);
+	seq_write(s, hist, AR_ISP_HIST_SIZE);
+	seq = READ_ONCE(isp->stats_flips);
+	seq_write(s, &seq, sizeof(seq));
+
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(ar_isp_stats_raw);
+
 static int ar_isp_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1898,6 +1927,8 @@ static int ar_isp_probe(struct platform_device *pdev)
 				   &ar_isp_configure_fops);
 	debugfs_create_file("regs", 0400, isp->debugfs, isp, &ar_isp_regs_fops);
 	debugfs_create_file("stats", 0400, isp->debugfs, isp, &ar_isp_stats_fops);
+	debugfs_create_file("stats_raw", 0400, isp->debugfs, isp,
+			    &ar_isp_stats_raw_fops);
 	/*
 	 * Reading this reports the table size, so a bisect script can discover
 	 * the upper bound without hardcoding it.
