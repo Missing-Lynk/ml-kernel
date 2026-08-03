@@ -452,6 +452,16 @@ module_param(rnr_gain, int, 0644);
 MODULE_PARM_DESC(rnr_gain,
 		 "rnr ladder abscissa as a Q8 linear gain (default 256 = 1.0, the cold band; -1 leaves the replayed bank alone)");
 
+static int lnr_gain = 256;
+module_param(lnr_gain, int, 0644);
+MODULE_PARM_DESC(lnr_gain,
+		 "lnr ladder abscissa as a Q8 linear gain (default 256 = 1.0, the cold band; -1 leaves the replayed bank alone)");
+
+static int de3d_gain = 256;
+module_param(de3d_gain, int, 0644);
+MODULE_PARM_DESC(de3d_gain,
+		 "de3d ladder abscissa as a Q8 linear gain (default 256 = 1.0, the cold band; -1 leaves the replayed bank alone)");
+
 static bool gib = true;
 module_param(gib, bool, 0644);
 MODULE_PARM_DESC(gib,
@@ -944,6 +954,101 @@ static void ar_isp_rnr_apply(struct ar_isp *isp)
 }
 
 /*
+ * Local noise reduction. The vendor recomputes this bank from the lnr ladder
+ * on the same gain moves as rnr. Registers 0x3d10 and 0x3d14 stay with the
+ * replay: the first is never written by the vendor packer, and the second has
+ * a fixed pre-pack bias that is not part of the plain ladder.
+ */
+static void ar_isp_lnr_apply(struct ar_isp *isp)
+{
+	u32 regs[AR_ISP_LNR_REGS];
+	const u8 *blob;
+	unsigned int i;
+
+	if (lnr_gain < 0)
+		return;
+
+	if (!isp->tuning) {
+		dev_info(isp->dev, "lnr: replayed bank only, no tuning file\n");
+		return;
+	}
+
+	blob = isp->tuning->data;
+
+	if (ar_isp_get_le32(blob + AR_ISP_LNR_BLOB_HEADER +
+			    AR_ISP_LNR_HDR_ENABLE) != 1) {
+		dev_info(isp->dev, "lnr: tuning gate clear, bank left replayed\n");
+		return;
+	}
+
+	for (i = 0; i < AR_ISP_LNR_REGS; i++)
+		regs[i] = readl(isp->base + AR_ISP_LNR_BANK + i * 4);
+
+	ar_isp_lnr_from_blob(regs, blob, (u32)lnr_gain << 8);
+
+	for (i = 0; i < AR_ISP_LNR_REGS; i++) {
+		if (i == AR_ISP_LNR_SKIP_NEVER_WRITTEN ||
+		    i == AR_ISP_LNR_SKIP_BIASED)
+			continue;
+		writel(regs[i], isp->base + AR_ISP_LNR_BANK + i * 4);
+	}
+
+	dev_info(isp->dev, "lnr: ladder at gain %d.%03u, 0x%04x..0x%04x = 0x%08x\n",
+		 lnr_gain >> 8, (lnr_gain & 0xff) * 1000 / 256,
+		 AR_ISP_LNR_BANK,
+		 AR_ISP_LNR_BANK + (AR_ISP_LNR_REGS - 1) * 4,
+		 regs[0]);
+}
+
+/*
+ * Temporal denoise. The vendor recomputes this bank from the de3d ladder on
+ * the same gain moves as rnr and lnr; the frozen replay is what runs the
+ * temporal blend with one exposure's thresholds at every exposure, which is
+ * the black smear around moving objects. Registers whose bits belong to other
+ * producers are read-modify-written under the ladder mask; the buffer
+ * addresses stay with ar_isp_de3d_publish and the user-strength cluster with
+ * the replay.
+ */
+static void ar_isp_de3d_apply(struct ar_isp *isp)
+{
+	u32 regs[AR_ISP_DE3D_REGS];
+	const u8 *blob;
+	unsigned int i;
+
+	if (de3d_gain < 0)
+		return;
+
+	if (!isp->tuning) {
+		dev_info(isp->dev, "de3d: replayed bank only, no tuning file\n");
+		return;
+	}
+
+	blob = isp->tuning->data;
+
+	if (ar_isp_get_le32(blob + AR_ISP_DE3D_BLOB_HEADER +
+			    AR_ISP_DE3D_HDR_ENABLE) != 1) {
+		dev_info(isp->dev, "de3d: tuning gate clear, bank left replayed\n");
+		return;
+	}
+
+	ar_isp_de3d_from_blob(regs, blob, (u32)de3d_gain << 8);
+
+	for (i = 0; i < AR_ISP_DE3D_REGS; i++) {
+		u32 off = AR_ISP_DE3D_BANK + ar_isp_de3d_regs[i].off;
+		u32 mask = ar_isp_de3d_regs[i].mask;
+		u32 v = readl(isp->base + off);
+
+		writel((v & ~mask) | (regs[i] & mask), isp->base + off);
+	}
+
+	dev_info(isp->dev, "de3d: ladder at gain %d.%03u, %u registers in 0x%04x..0x%04x\n",
+		 de3d_gain >> 8, (de3d_gain & 0xff) * 1000 / 256,
+		 AR_ISP_DE3D_REGS,
+		 AR_ISP_DE3D_BANK + ar_isp_de3d_regs[0].off,
+		 AR_ISP_DE3D_BANK + ar_isp_de3d_regs[AR_ISP_DE3D_REGS - 1].off);
+}
+
+/*
  * Fill the owned buffers and hand them to the block.
  *
  * Runs after the register replay, which arms the vendor's addresses and commits
@@ -1348,49 +1453,14 @@ static void ar_isp_tables_release(struct ar_isp *isp)
  * would show up.
  */
 /*
- * The lnr strength curves the 1475-entry prefix truncates. lnr carries four
- * 64-entry byte curves from 0x3d60 at stride 0x40, normalised to 0x40, and the
- * prefix cut leaves everything past 0x3d7c zero, which is gain zero rather
- * than neutral. Values are the streaming vendor's, read from the register
- * sweep; the state diff classifies all 35 as reachable static configuration,
- * not AE-moved state.
+ * The one lnr word the ladder does not fully own. The lnr ladder writes only
+ * bits [19:0] of 0x3d44; the vendor streams 0xfff in [31:20], written by the
+ * setup table past every prefix in practical use, so the prefix path would
+ * otherwise leave those bits at the earlier entry's zero. Applied before the
+ * ladder, which preserves them through its read-modify-write.
  */
 static const struct ar_isp_reg ar_isp_lnr_fix[] = {
 	{ 0x3d44, 0xfffdf800 },
-	{ 0x3d60, 0x00000000 },
-	{ 0x3d80, 0x40404040 },
-	{ 0x3d84, 0x40404040 },
-	{ 0x3d88, 0x40404040 },
-	{ 0x3d8c, 0x40404040 },
-	{ 0x3d90, 0x40404040 },
-	{ 0x3d94, 0x40404040 },
-	{ 0x3d98, 0x40404040 },
-	{ 0x3d9c, 0x40404040 },
-	{ 0x3da8, 0x40404040 },
-	{ 0x3dac, 0x40404040 },
-	{ 0x3db0, 0x40404040 },
-	{ 0x3db4, 0x40404040 },
-	{ 0x3db8, 0x40404040 },
-	{ 0x3dbc, 0x40404040 },
-	{ 0x3dc0, 0x40404040 },
-	{ 0x3dc4, 0x40404040 },
-	{ 0x3dc8, 0x40404040 },
-	{ 0x3dcc, 0x40404040 },
-	{ 0x3dd0, 0x40404040 },
-	{ 0x3dd4, 0x40404040 },
-	{ 0x3dd8, 0x40404040 },
-	{ 0x3ddc, 0x40404040 },
-	{ 0x3df4, 0x40404040 },
-	{ 0x3df8, 0x40404040 },
-	{ 0x3dfc, 0x40404040 },
-	{ 0x3e00, 0x40404040 },
-	{ 0x3e04, 0x40404040 },
-	{ 0x3e08, 0x40404040 },
-	{ 0x3e0c, 0x40404040 },
-	{ 0x3e10, 0x40404040 },
-	{ 0x3e14, 0x40404040 },
-	{ 0x3e18, 0x38404040 },
-	{ 0x3e1c, 0x0c182430 },
 };
 
 static void ar_isp_configure(struct ar_isp *isp)
@@ -1544,6 +1614,8 @@ static void ar_isp_arm_output(struct ar_isp *isp)
 	ar_isp_de3d_publish(isp);
 	ar_isp_ccm_apply(isp);
 	ar_isp_rnr_apply(isp);
+	ar_isp_lnr_apply(isp);
+	ar_isp_de3d_apply(isp);
 	ar_isp_dpc_apply(isp);
 
 	if (gib)
