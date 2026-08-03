@@ -913,7 +913,7 @@ static void ar_isp_dpc_apply(struct ar_isp *isp)
  * replay. The bank control word stays with the replay: its mode bit mirrors
  * the blob's header flag, and both read 0.
  */
-static void ar_isp_rnr_apply(struct ar_isp *isp)
+static void ar_isp_rnr_apply(struct ar_isp *isp, bool verbose)
 {
 	u32 regs[AR_ISP_RNR_REGS];
 	const u8 *blob;
@@ -923,7 +923,8 @@ static void ar_isp_rnr_apply(struct ar_isp *isp)
 		return;
 
 	if (!isp->tuning) {
-		dev_info(isp->dev, "rnr: replayed bank only, no tuning file\n");
+		if (verbose)
+			dev_info(isp->dev, "rnr: replayed bank only, no tuning file\n");
 		return;
 	}
 
@@ -936,7 +937,8 @@ static void ar_isp_rnr_apply(struct ar_isp *isp)
 	 */
 	if (ar_isp_get_le32(blob + AR_ISP_RNR_BLOB_HEADER +
 			    AR_ISP_RNR_HDR_ENABLE) != 1) {
-		dev_info(isp->dev, "rnr: tuning gate clear, bank left replayed\n");
+		if (verbose)
+			dev_info(isp->dev, "rnr: tuning gate clear, bank left replayed\n");
 		return;
 	}
 
@@ -946,11 +948,12 @@ static void ar_isp_rnr_apply(struct ar_isp *isp)
 		writel(regs[i], isp->base + AR_ISP_RNR_BANK +
 		       AR_ISP_RNR_LADDER + i * 4);
 
-	dev_info(isp->dev, "rnr: ladder at gain %d.%03u, 0x%04x..0x%04x = 0x%08x\n",
-		 rnr_gain >> 8, (rnr_gain & 0xff) * 1000 / 256,
-		 AR_ISP_RNR_BANK + AR_ISP_RNR_LADDER,
-		 AR_ISP_RNR_BANK + AR_ISP_RNR_LADDER + (AR_ISP_RNR_REGS - 1) * 4,
-		 regs[0]);
+	if (verbose)
+		dev_info(isp->dev, "rnr: ladder at gain %d.%03u, 0x%04x..0x%04x = 0x%08x\n",
+			 rnr_gain >> 8, (rnr_gain & 0xff) * 1000 / 256,
+			 AR_ISP_RNR_BANK + AR_ISP_RNR_LADDER,
+			 AR_ISP_RNR_BANK + AR_ISP_RNR_LADDER + (AR_ISP_RNR_REGS - 1) * 4,
+			 regs[0]);
 }
 
 /*
@@ -959,7 +962,7 @@ static void ar_isp_rnr_apply(struct ar_isp *isp)
  * replay: the first is never written by the vendor packer, and the second has
  * a fixed pre-pack bias that is not part of the plain ladder.
  */
-static void ar_isp_lnr_apply(struct ar_isp *isp)
+static void ar_isp_lnr_apply(struct ar_isp *isp, bool verbose)
 {
 	u32 regs[AR_ISP_LNR_REGS];
 	const u8 *blob;
@@ -969,7 +972,8 @@ static void ar_isp_lnr_apply(struct ar_isp *isp)
 		return;
 
 	if (!isp->tuning) {
-		dev_info(isp->dev, "lnr: replayed bank only, no tuning file\n");
+		if (verbose)
+			dev_info(isp->dev, "lnr: replayed bank only, no tuning file\n");
 		return;
 	}
 
@@ -977,7 +981,8 @@ static void ar_isp_lnr_apply(struct ar_isp *isp)
 
 	if (ar_isp_get_le32(blob + AR_ISP_LNR_BLOB_HEADER +
 			    AR_ISP_LNR_HDR_ENABLE) != 1) {
-		dev_info(isp->dev, "lnr: tuning gate clear, bank left replayed\n");
+		if (verbose)
+			dev_info(isp->dev, "lnr: tuning gate clear, bank left replayed\n");
 		return;
 	}
 
@@ -993,11 +998,12 @@ static void ar_isp_lnr_apply(struct ar_isp *isp)
 		writel(regs[i], isp->base + AR_ISP_LNR_BANK + i * 4);
 	}
 
-	dev_info(isp->dev, "lnr: ladder at gain %d.%03u, 0x%04x..0x%04x = 0x%08x\n",
-		 lnr_gain >> 8, (lnr_gain & 0xff) * 1000 / 256,
-		 AR_ISP_LNR_BANK,
-		 AR_ISP_LNR_BANK + (AR_ISP_LNR_REGS - 1) * 4,
-		 regs[0]);
+	if (verbose)
+		dev_info(isp->dev, "lnr: ladder at gain %d.%03u, 0x%04x..0x%04x = 0x%08x\n",
+			 lnr_gain >> 8, (lnr_gain & 0xff) * 1000 / 256,
+			 AR_ISP_LNR_BANK,
+			 AR_ISP_LNR_BANK + (AR_ISP_LNR_REGS - 1) * 4,
+			 regs[0]);
 }
 
 /*
@@ -1010,7 +1016,7 @@ static void ar_isp_lnr_apply(struct ar_isp *isp)
  * addresses stay with ar_isp_de3d_publish, and 0x2e98 is the block's
  * hardware line-time latch, never written.
  */
-static void ar_isp_de3d_apply(struct ar_isp *isp)
+static void ar_isp_de3d_apply(struct ar_isp *isp, bool verbose)
 {
 	u32 regs[AR_ISP_DE3D_REGS];
 	const u8 *blob;
@@ -1020,7 +1026,8 @@ static void ar_isp_de3d_apply(struct ar_isp *isp)
 		return;
 
 	if (!isp->tuning) {
-		dev_info(isp->dev, "de3d: replayed bank only, no tuning file\n");
+		if (verbose)
+			dev_info(isp->dev, "de3d: replayed bank only, no tuning file\n");
 		return;
 	}
 
@@ -1028,7 +1035,8 @@ static void ar_isp_de3d_apply(struct ar_isp *isp)
 
 	if (ar_isp_get_le32(blob + AR_ISP_DE3D_BLOB_HEADER +
 			    AR_ISP_DE3D_HDR_ENABLE) != 1) {
-		dev_info(isp->dev, "de3d: tuning gate clear, bank left replayed\n");
+		if (verbose)
+			dev_info(isp->dev, "de3d: tuning gate clear, bank left replayed\n");
 		return;
 	}
 
@@ -1042,11 +1050,12 @@ static void ar_isp_de3d_apply(struct ar_isp *isp)
 		writel((v & ~mask) | (regs[i] & mask), isp->base + off);
 	}
 
-	dev_info(isp->dev, "de3d: ladder at gain %d.%03u, %u registers in 0x%04x..0x%04x\n",
-		 de3d_gain >> 8, (de3d_gain & 0xff) * 1000 / 256,
-		 AR_ISP_DE3D_REGS,
-		 AR_ISP_DE3D_BANK + ar_isp_de3d_regs[0].off,
-		 AR_ISP_DE3D_BANK + ar_isp_de3d_regs[AR_ISP_DE3D_REGS - 1].off);
+	if (verbose)
+		dev_info(isp->dev, "de3d: ladder at gain %d.%03u, %u registers in 0x%04x..0x%04x\n",
+			 de3d_gain >> 8, (de3d_gain & 0xff) * 1000 / 256,
+			 AR_ISP_DE3D_REGS,
+			 AR_ISP_DE3D_BANK + ar_isp_de3d_regs[0].off,
+			 AR_ISP_DE3D_BANK + ar_isp_de3d_regs[AR_ISP_DE3D_REGS - 1].off);
 }
 
 /*
@@ -1614,9 +1623,9 @@ static void ar_isp_arm_output(struct ar_isp *isp)
 	ar_isp_stats_publish(isp);
 	ar_isp_de3d_publish(isp);
 	ar_isp_ccm_apply(isp);
-	ar_isp_rnr_apply(isp);
-	ar_isp_lnr_apply(isp);
-	ar_isp_de3d_apply(isp);
+	ar_isp_rnr_apply(isp, true);
+	ar_isp_lnr_apply(isp, true);
+	ar_isp_de3d_apply(isp, true);
 	ar_isp_dpc_apply(isp);
 
 	if (gib)
@@ -1728,6 +1737,27 @@ static int ar_isp_arm_set(void *data, u64 val)
 	return 0;
 }
 DEFINE_DEBUGFS_ATTRIBUTE(ar_isp_arm_fops, NULL, ar_isp_arm_set, "%llu\n");
+
+/*
+ * Ladder-only re-latch for the userspace AE loop: recompute the three
+ * gain-keyed banks from the current Q8 parameters without the full output
+ * re-arm, in the vendor's apply order. The vendor issues the equivalent
+ * register traffic on every AE gain move at frame rate, so this is safe
+ * mid-stream and cheap enough to call per decision.
+ */
+static int ar_isp_ladders_set(void *data, u64 val)
+{
+	struct ar_isp *isp = data;
+
+	if (val) {
+		ar_isp_rnr_apply(isp, false);
+		ar_isp_lnr_apply(isp, false);
+		ar_isp_de3d_apply(isp, false);
+	}
+
+	return 0;
+}
+DEFINE_DEBUGFS_ATTRIBUTE(ar_isp_ladders_fops, NULL, ar_isp_ladders_set, "%llu\n");
 
 /*
  * The one ISP, for the exported bring-up call. Single block, single node.
@@ -1937,6 +1967,8 @@ static int ar_isp_probe(struct platform_device *pdev)
 				   &ar_isp_prefix_fops);
 	debugfs_create_file_unsafe("arm", 0600, isp->debugfs, isp,
 				   &ar_isp_arm_fops);
+	debugfs_create_file_unsafe("ladders", 0600, isp->debugfs, isp,
+				   &ar_isp_ladders_fops);
 	debugfs_create_u32("irq_events", 0400, isp->debugfs, &isp->irq_events);
 	debugfs_create_u32("irq_stats_events", 0400, isp->debugfs,
 			   &isp->irq_stats_events);
