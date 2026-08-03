@@ -17,35 +17,30 @@ computed value unchanged.
 
 --- a/drivers/media/platform/chips-media/wave5/wave5-vpu-enc.c
 +++ b/drivers/media/platform/chips-media/wave5/wave5-vpu-enc.c
-@@ -518,11 +518,49 @@
+@@ -518,11 +518,44 @@
  	return 0;
  }
  
 +/*
-+ * Artosyn: keep a caller-supplied luma stride that is wider than the picture.
++ * Artosyn: honour a caller-supplied luma stride wider than the picture.
 + *
-+ * wave5_update_pix_fmt() ends in v4l2_fill_pixfmt_mp(), which derives bytesperline from
-+ * the width alone and overwrites whatever the caller asked for. A source whose rows carry
-+ * padding therefore cannot be encoded without a copy through a repacked buffer. The
-+ * hardware has no such restriction: start_encode() hands src_fmt.plane_fmt[0].bytesperline
-+ * to the frame buffer descriptor as the source stride, independent of the picture width.
++ * wave5_update_pix_fmt() ends in v4l2_fill_pixfmt_mp(), which derives
++ * bytesperline from the width and overwrites the caller's value, so a padded
++ * source can only be encoded through a repacked copy. The hardware has no such
++ * limit: start_encode() programs src_fmt.plane_fmt[0].bytesperline as the
++ * source stride, independent of the picture width.
 + *
-+ * The CVISP capture node on this SoC writes 1920 pixels on a 2048-byte stride, so honouring
-+ * the request here is what lets its buffers be imported directly.
-+ *
-+ * Only a stride larger than the computed one is taken, every plane is scaled by the same
-+ * ratio so chroma keeps its relation to luma, and each sizeimage grows with its stride so
-+ * the buffers still cover every row.
++ * Only a wider stride is taken. Every plane scales by the same ratio so chroma
++ * keeps its relation to luma, and each sizeimage grows with its stride.
 + */
 +static void wave5_widen_src_stride(struct v4l2_pix_format_mplane *pix_mp, unsigned int stride)
 +{
 +	unsigned int base = pix_mp->plane_fmt[0].bytesperline;
-+	unsigned int i;
 +
 +	if (!base || stride <= base)
 +		return;
 +
-+	for (i = 0; i < pix_mp->num_planes; i++) {
++	for (unsigned int i = 0; i < pix_mp->num_planes; i++) {
 +		unsigned int bpl = pix_mp->plane_fmt[i].bytesperline;
 +		unsigned int rows;
 +
@@ -67,7 +62,7 @@ computed value unchanged.
  	int width, height;
  
  	dev_dbg(inst->dev->dev, "%s: fourcc: %u width: %u height: %u num_planes: %u field: %u\n",
-@@ -544,6 +582,7 @@
+@@ -544,6 +577,7 @@
  
  	wave5_update_pix_fmt(&f->fmt.pix_mp, VPU_FMT_TYPE_RAW,
  			     width, height, frmsize);
