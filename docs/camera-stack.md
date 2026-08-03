@@ -450,7 +450,19 @@ The full chain, sensor through CVISP, captures processed colour frames on the op
 
 Two trace-reading facts that stay relevant: the vendor never spin-waits (no consecutive-read run on any block), and the vendor brings the pipeline up, tears it down, and brings it up again, so the head of a trace shows first-bringup behaviour, not the working path.
 
-The cold-boot dark frame is clean (see "The cold-boot dark-frame blobs"); the open image-quality items are the left-edge ramp and the gain-keyed stages running at a replayed operating point. The edge notch on synthetic bars is the sensor's own test-pattern generator, not an ISP stage: edge-aligned averaging over 3,400 real-scene edges shows no trace of it at optical edges, so it never affects live imagery. The remaining functional gaps are the runtime 3A loops.
+The cold-boot dark frame is clean (see "The cold-boot dark-frame blobs"); the edge notch on synthetic bars is the sensor's own test-pattern generator, not an ISP stage: edge-aligned averaging over 3,400 real-scene edges shows no trace of it at optical edges, so it never affects live imagery.
+
+### Gain-keyed stages: parity by derivation
+
+Three ISP stages are recomputed by the vendor from gain-band ladders in the tuning file: `rnr`, `lnr` and `de3d`. All three share one blob layout (a header of enable, interpolate, band count and abscissa selector; sixteen `[low, high]` float32 band slots; one payload record per band) and one law: inside a band the record applies verbatim, between bands the fields blend linearly with truncation toward zero. The driver implements all three in `ar-isp-ladder.h`, deriving every register from the tuning file at a caller-supplied abscissa (`rnr_gain`, `lnr_gain`, `de3d_gain`, Q8 module parameters until an AE loop produces the abscissa per frame). The proofs are `scripts/check-rnr-ladder.py`, `check-lnr-ladder.py` and `check-de3d-ladder.py`: the same integer arithmetic in Python, refusing to pass unless every capture-covered register reproduces bit-exactly from the blob at both measured vendor operating points.
+
+Registers in these banks that are not ladder outputs are classified, not assumed: lnr `0x3d10` is never written by the vendor and `0x3d14` keeps a replayed value (unresolved pre-pack bias); de3d `0x2e98` is the block's hardware line-time latch and is never written; the de3d buffer addresses are driver-owned; the per-stage user-strength laws are the identity at the vendor's default of 50 and nothing in this stack sets a strength, so they are not carried. The de3d control and strength words (`0x2e00` enables, `0x2e1c`, `0x2e20`, `0x2e90`, `0x2eb4`) are packer outputs and derive with the rest; running them at the replayed pre-streaming state instead is what destroyed moving regions even with the threshold registers exact.
+
+Stages checked and found not gain-keyed: `dpc` (thresholds are a static block copied from `init_config`) and `blc` (bands exist but the traced values are gain-static in practice; implemented in `ar-cvisp`).
+
+### Scene-adaptive state still frozen
+
+Parity above is at a fixed operating point. The vendor's 3A loops move state this stack holds constant: the sensor exposure and gain (AE, including its anti-flicker snap of the integration time to the mains half-period), the ladder abscissas (an AE product), the gamma table (regenerated continuously from 3A; ours is generated once), the AE-selected tone-table index over the gamma and DRC profiles, the LTM tile curves (recomputed per frame; ours ships an identity page), the AWB-driven colour state (ccm1, white-balance gains, and the sensor-MCU lens-shading tables behind `0x8201`), and possibly a scene-adaptive LSC region after the static grid (unconfirmed; ours ships zeros there). These are the remaining functional gaps, and they are loops to implement, not registers to fix.
 
 ## Source map
 

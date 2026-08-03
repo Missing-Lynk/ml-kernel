@@ -1002,12 +1002,13 @@ static void ar_isp_lnr_apply(struct ar_isp *isp)
 
 /*
  * Temporal denoise. The vendor recomputes this bank from the de3d ladder on
- * the same gain moves as rnr and lnr; the frozen replay is what runs the
- * temporal blend with one exposure's thresholds at every exposure, which is
- * the black smear around moving objects. Registers whose bits belong to other
+ * the same gain moves as rnr and lnr; the frozen replay ran the temporal
+ * blend with one exposure's thresholds at every exposure (the black smears
+ * around moving objects) and with the pre-streaming control and strength
+ * state (the block mosaics on motion). Registers whose bits belong to other
  * producers are read-modify-written under the ladder mask; the buffer
- * addresses stay with ar_isp_de3d_publish and the user-strength cluster with
- * the replay.
+ * addresses stay with ar_isp_de3d_publish, and 0x2e98 is the block's
+ * hardware line-time latch, never written.
  */
 static void ar_isp_de3d_apply(struct ar_isp *isp)
 {
