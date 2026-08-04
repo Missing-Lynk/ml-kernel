@@ -493,6 +493,7 @@ static void ar_cvisp_blc_apply(struct ar_cvisp *cv)
 		return;
 
 	int ret = request_firmware(&fw, AR_CVISP_TUNING_FIRMWARE, cv->dev);
+
 	if (ret) {
 		dev_info(cv->dev, "blc: no %s (%d), leaving the replayed constants\n",
 			 AR_CVISP_TUNING_FIRMWARE, ret);
@@ -598,6 +599,7 @@ static int ar_cvisp_configure_set(void *data, u64 val)
 		return -EINVAL;
 
 	struct ar_cvisp *cv = data;
+
 	ar_cvisp_configure(cv, val == 1);
 
 	return 0;
@@ -653,6 +655,7 @@ DEFINE_DEBUGFS_ATTRIBUTE(ar_cvisp_queue_fops, ar_cvisp_queue_get,
 static int ar_cvisp_regs_show(struct seq_file *s, void *unused)
 {
 	struct ar_cvisp *cv = s->private;
+
 	for (unsigned int i = 0; i < ARRAY_SIZE(ar_cvisp_dump_regs); i++)
 		seq_printf(s, "%-12s 0x%04x 0x%08x\n", ar_cvisp_dump_regs[i].name,
 			   ar_cvisp_dump_regs[i].off,
@@ -762,6 +765,7 @@ static int ar_cvisp_buffer_prepare(struct vb2_buffer *vb)
 		 * device tree that has been changed out from under the driver.
 		 */
 		dma_addr_t addr = vb2_dma_contig_plane_dma_addr(vb, i);
+
 		if (upper_32_bits(addr))
 			return -EINVAL;
 
@@ -831,6 +835,7 @@ static int ar_cvisp_chain_start(struct ar_cvisp *cv)
 		return 0;
 
 	int ret = ar_vif_input_start();
+
 	if (ret == -EBUSY) {
 		/* Already brought up from outside, which is how the capture
 		 * harness runs. Nothing to do and not an error.
@@ -1013,10 +1018,12 @@ static const struct v4l2_file_operations ar_cvisp_fops = {
 static int ar_cvisp_register_node(struct ar_cvisp *cv)
 {
 	int ret = v4l2_device_register(cv->dev, &cv->v4l2_dev);
+
 	if (ret)
 		return ret;
 
 	struct vb2_queue *q = &cv->queue;
+
 	q->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 	q->io_modes = VB2_MMAP | VB2_DMABUF;
 	q->drv_priv = cv;
@@ -1086,6 +1093,7 @@ static int ar_cvisp_probe(struct platform_device *pdev)
 	 * to the default CMA, which is ordinary kernel RAM.
 	 */
 	int ret = of_reserved_mem_device_init(dev);
+
 	if (ret)
 		dev_warn(dev,
 			 "no dedicated capture pool (%d); buffers may be unreachable\n",

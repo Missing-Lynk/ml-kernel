@@ -18,11 +18,11 @@
  * alone from the frame-done handler. Completion is signalled by the W1C
  * status at 0x17c (bit v buffer done, bit 8+v frame done).
  *
- * The view path this driver arms is NOT how the vendor captures. A write trace
- * of the streaming vendor shows it configures the views, then sets the per-view
- * reset at 0x2bc and captures every frame through the ISP instead, re-arming an
- * ISP buffer pair from its own frame handler. The view DMA has never written a
- * byte to DDR. See ../../../../docs/camera-stack.md for the vendor sequence.
+ * The vendor captures every frame through the ISP. A write trace of the
+ * streaming vendor shows it configures the views, sets the per-view reset at
+ * 0x2bc, and re-arms an ISP buffer pair from its own frame handler; the view
+ * DMA this driver arms has written no byte to DDR on that path. See
+ * ../../../../docs/camera-stack.md for the vendor sequence.
  */
 
 #include <linux/clk.h>
@@ -201,8 +201,8 @@
 
 /*
  * Constants captured from the vendor's running 1920x1080 RAW12 two-lane
- * configuration. Their internal fields are not decoded; they are properties of
- * the sensor mode and are reproduced verbatim. A different mode would need its
+ * configuration, reproduced verbatim as opaque properties of the sensor mode.
+ * A different mode would need its
  * own set, which is why the driver accepts only the geometry it has values for.
  */
 #define AR_VIF_VIEW_CONTROL_VALUE	0x0000c068
@@ -350,9 +350,9 @@ static u32 census_polls;
  * the accumulation since the previous poll and then near zero, while a
  * free-running counter reports the same value twice.
  *
- * Sampled here rather than inside the log call below because
- * dev_info_ratelimited() evaluates its arguments only when the rate limiter
- * admits the message, which would make the sample interval irregular.
+ * Sampled before the log call below: dev_info_ratelimited() evaluates its
+ * arguments only when the rate limiter admits the message, which would make the
+ * sample interval irregular.
  */
 static const u16 ar_vif_isp_probe_reg[AR_VIF_ISP_PROBES] = {
 	0x104, 0x108, 0x10c, 0x110
@@ -995,17 +995,17 @@ static void ar_vif_sync_format(struct ar_vif *vif);
  * The one VIF, for the exported input-path calls.
  *
  * There is a single instance: one block, one node in the device tree, and the
- * callers are the other drivers in this camera stack rather than anything that
- * could hold a device pointer of its own.
+ * callers are the other drivers in this camera stack, none of which holds a
+ * device pointer of its own.
  */
 static struct ar_vif *ar_vif_instance;
 
 /*
  * Bring the input path up.
  *
- * Everything the block needs to receive frames. Arming a view buffer is part of
- * the sequence rather than bracketing it: the addresses have to be latched
- * between the frame-backpressure strobe and the plane length.
+ * Everything the block needs to receive frames. Arming a view buffer happens
+ * inside the sequence: the addresses have to be latched between the
+ * frame-backpressure strobe and the plane length.
  *
  * That step is not optional even though this driver never reads the buffer
  * back. Brought up with no address armed and no control latch pulsed, the block
@@ -1160,7 +1160,7 @@ static void ar_vif_input_off(struct ar_vif *vif)
  *
  * The caller's next step configures the ISP, which reads registers, and a read
  * with the pixel domain dead hangs the SoC with no diagnostic. So this waits
- * rather than returning as soon as the sequence has been issued.
+ * for the pixel domain to come up before it returns.
  *
  * The liveness signal is irq_events, which is monotonic and cannot be
  * acknowledged away; the status word a completion asserts is write-1-to-clear

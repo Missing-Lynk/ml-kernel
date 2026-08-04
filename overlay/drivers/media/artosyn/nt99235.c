@@ -568,6 +568,7 @@ static int nt99235_write(struct nt99235 *nt99235, u16 address, u8 value)
 	u8 buf[3] = { address >> 8, address & 0xff, value };
 
 	int ret = i2c_master_send(client, buf, sizeof(buf));
+
 	if (ret != sizeof(buf)) {
 		dev_err(nt99235->dev, "write 0x%04x = 0x%02x failed (%d)\n",
 			address, value, ret);
@@ -614,6 +615,7 @@ static int nt99235_write_regs(struct nt99235 *nt99235,
 {
 	for (unsigned int i = 0; i < num_regs; i++) {
 		int ret = nt99235_write(nt99235, regs[i].address, regs[i].value);
+
 		if (ret)
 			return ret;
 	}
@@ -683,6 +685,7 @@ static int nt99235_detect(struct nt99235 *nt99235)
 	u16 id;
 
 	int ret = nt99235_read(nt99235, NT99235_REG_MODEL_ID_HI, &hi);
+
 	if (ret)
 		return ret;
 
@@ -1281,6 +1284,7 @@ static int nt99235_init_controls(struct nt99235 *nt99235)
 	struct v4l2_ctrl *pixel_rate;
 
 	int ret = v4l2_ctrl_handler_init(handler, 4);
+
 	if (ret)
 		return ret;
 
