@@ -146,26 +146,25 @@ static inline void ar_isp_gamma_pack_page(u8 *dst, const u16 *samples, u16 tail)
 static inline void ar_isp_gamma_from_blob(u8 *dst, const u8 *blob,
 					  unsigned int index)
 {
+	const u8 *curve = blob + AR_ISP_GAMMA_BLOB_OFFSET + index * AR_ISP_GAMMA_BLOB_STRIDE;
 	u16 samples[AR_ISP_GAMMA_SAMPLES];
-	const u8 *curve;
-	u16 tail;
+	unsigned int i;
 
-	curve = blob + AR_ISP_GAMMA_BLOB_OFFSET + index * AR_ISP_GAMMA_BLOB_STRIDE;
-
-	for (unsigned int i = 0; i < AR_ISP_GAMMA_SAMPLES; i++)
+	for (i = 0; i < AR_ISP_GAMMA_SAMPLES; i++)
 		samples[i] = ar_isp_get_le32(curve + i * AR_ISP_GAMMA_DECIMATE * 4) & 0xfff;
+
+	for (i = 1; i < AR_ISP_GAMMA_SAMPLES; i++)
+		if (samples[i] < samples[i - 1])
+			samples[i] = samples[i - 1];
 
 	/*
 	 * The sample after the last one. Decimation puts the last stored sample
 	 * at entry 4088, past the decimated range; the vendor uses the curve's
 	 * final entry, which reproduces its forward field of 4093 on both
-	 * captured curves.
+	 * captured curves. Clamped after the loop above, so it cannot sit below
+	 * the last sample the clamp raised.
 	 */
-	tail = ar_isp_get_le32(curve + (AR_ISP_GAMMA_BLOB_ENTRIES - 1) * 4) & 0xfff;
-
-	for (unsigned int i = 1; i < AR_ISP_GAMMA_SAMPLES; i++)
-		if (samples[i] < samples[i - 1])
-			samples[i] = samples[i - 1];
+	u16 tail = ar_isp_get_le32(curve + (AR_ISP_GAMMA_BLOB_ENTRIES - 1) * 4) & 0xfff;
 
 	if (tail < samples[AR_ISP_GAMMA_SAMPLES - 1])
 		tail = samples[AR_ISP_GAMMA_SAMPLES - 1];
@@ -249,7 +248,6 @@ static inline u16 ar_isp_f32_scale(u32 bits)
 	u32 mant = (bits & 0x7fffff) | 0x800000;
 	int exp = (int)((bits >> 23) & 0xff) - 127;
 	int shift = (23 - AR_ISP_LSC_Q) - exp;
-	u32 v;
 
 	if (bits & 0x80000000)
 		return 0;
@@ -260,8 +258,9 @@ static inline u16 ar_isp_f32_scale(u32 bits)
 	if (shift <= 0)
 		return 0xffff;
 
-	v = mant >> shift;
-	return v > 0xffff ? 0xffff : (u16)v;
+	u32 scaled = mant >> shift;
+
+	return scaled > 0xffff ? 0xffff : (u16)scaled;
 }
 
 /*
@@ -280,10 +279,12 @@ static inline u16 ar_isp_f32_scale(u32 bits)
  */
 static inline void ar_isp_lsc_from_blob(u8 *dst, const u8 *blob)
 {
-	for (unsigned int i = 0; i < AR_ISP_LSC_REGION_A; i += 4)
+	unsigned int i;
+
+	for (i = 0; i < AR_ISP_LSC_REGION_A; i += 4)
 		ar_isp_put_le32(dst + i, 0);
 
-	for (unsigned int i = 0; i < AR_ISP_LSC_GRID; i++) {
+	for (i = 0; i < AR_ISP_LSC_GRID; i++) {
 		u16 x = ar_isp_f32_scale(ar_isp_get_le32(blob + AR_ISP_LSC_BLOB_X + i * 4));
 		u16 y = ar_isp_f32_scale(ar_isp_get_le32(blob + AR_ISP_LSC_BLOB_Y + i * 4));
 		u8 *rec = dst + (i / 2) * 16 + (i % 2) * 6;
@@ -306,16 +307,18 @@ static inline void ar_isp_lsc_from_blob(u8 *dst, const u8 *blob)
  */
 static inline void ar_isp_compander_fill(u8 *dst, const u32 *head, const u32 *mid)
 {
-	for (unsigned int i = 0; i < AR_ISP_COMPANDER_HEAD / 4; i++)
+	unsigned int i;
+
+	for (i = 0; i < AR_ISP_COMPANDER_HEAD / 4; i++)
 		ar_isp_put_le32(dst + i * 4, head[i]);
 
-	for (unsigned int i = AR_ISP_COMPANDER_HEAD; i < AR_ISP_COMPANDER_MID_OFF; i += 4)
+	for (i = AR_ISP_COMPANDER_HEAD; i < AR_ISP_COMPANDER_MID_OFF; i += 4)
 		ar_isp_put_le32(dst + i, 0);
 
-	for (unsigned int i = 0; i < AR_ISP_COMPANDER_MID / 4; i++)
+	for (i = 0; i < AR_ISP_COMPANDER_MID / 4; i++)
 		ar_isp_put_le32(dst + AR_ISP_COMPANDER_MID_OFF + i * 4, mid[i]);
 
-	for (unsigned int i = AR_ISP_COMPANDER_FILL_OFF; i < AR_ISP_COMPANDER_SIZE; i += 16) {
+	for (i = AR_ISP_COMPANDER_FILL_OFF; i < AR_ISP_COMPANDER_SIZE; i += 16) {
 		ar_isp_put_le32(dst + i + 0, AR_ISP_COMPANDER_FILL0);
 		ar_isp_put_le32(dst + i + 4, AR_ISP_COMPANDER_FILL1);
 		ar_isp_put_le32(dst + i + 8, 0);
