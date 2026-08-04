@@ -1443,6 +1443,14 @@ static void ar_isp_tables_release(struct ar_isp *isp)
 						  isp->de3d_dma[i]);
 	}
 	release_firmware(isp->tuning);
+
+	/*
+	 * Matches the of_reserved_mem_device_init in ar_isp_tables_prepare.
+	 * Unconditional because the release matches on the device and does
+	 * nothing when nothing was attached, so the two early returns in
+	 * prepare need no state of their own.
+	 */
+	of_reserved_mem_device_release(isp->dev);
 }
 
 /*

@@ -1359,6 +1359,11 @@ static void ar_vif_unregister_devices(struct ar_vif *vif)
 	media_device_cleanup(&vif->media_dev);
 }
 
+static void ar_vif_release_rmem(void *dev)
+{
+	of_reserved_mem_device_release(dev);
+}
+
 static int ar_vif_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1374,6 +1379,16 @@ static int ar_vif_probe(struct platform_device *pdev)
 		dev_warn(dev,
 			 "no dedicated capture pool (%d); buffers may be unreachable\n",
 			 ret);
+
+	/* Unwound through devres, not from remove, so it runs after the scratch
+	 * frame allocated from this pool. Releasing in remove would clear
+	 * dev->dma_mem first and the deferred dmam free would then take the
+	 * generic path. Registered even when the init failed: the release
+	 * matches on the device and does nothing when nothing was attached.
+	 */
+	ret = devm_add_action_or_reset(dev, ar_vif_release_rmem, dev);
+	if (ret)
+		return ret;
 
 	vif = devm_kzalloc(dev, sizeof(*vif), GFP_KERNEL);
 	if (!vif)

@@ -1046,11 +1046,22 @@ static int ar_cvisp_register_node(struct ar_cvisp *cv)
 
 	ret = video_register_device(&cv->video_dev, VFL_TYPE_VIDEO, -1);
 	if (ret) {
+		/*
+		 * The queue is initialised but no video device took ownership of
+		 * it, so vb2_video_unregister_device will never run for it. This
+		 * is the only path that has to release the queue by hand.
+		 */
+		vb2_queue_release(q);
 		v4l2_device_unregister(&cv->v4l2_dev);
 		return ret;
 	}
 
 	return 0;
+}
+
+static void ar_cvisp_release_rmem(void *dev)
+{
+	of_reserved_mem_device_release(dev);
 }
 
 static int ar_cvisp_probe(struct platform_device *pdev)
@@ -1071,6 +1082,15 @@ static int ar_cvisp_probe(struct platform_device *pdev)
 		dev_warn(dev,
 			 "no dedicated capture pool (%d); buffers may be unreachable\n",
 			 ret);
+
+	/*
+	 * Unwound through devres so every probe failure below releases it too.
+	 * Registered even when the init failed: the release matches on the
+	 * device and does nothing when nothing was attached.
+	 */
+	ret = devm_add_action_or_reset(dev, ar_cvisp_release_rmem, dev);
+	if (ret)
+		return ret;
 
 	cv = devm_kzalloc(dev, sizeof(*cv), GFP_KERNEL);
 	if (!cv)
@@ -1179,8 +1199,6 @@ static void ar_cvisp_remove(struct platform_device *pdev)
 	 */
 	if (cv->clk_asserted)
 		clk_disable_unprepare(cv->clk);
-
-	of_reserved_mem_device_release(cv->dev);
 }
 
 static const struct of_device_id ar_cvisp_of_match[] = {
