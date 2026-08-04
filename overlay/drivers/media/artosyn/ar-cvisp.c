@@ -63,21 +63,6 @@
  */
 #define AR_CVISP_TUNING_FIRMWARE	"artosyn/nt99235-tuning-preview-fpv.bin"
 
-static bool blc = true;
-module_param(blc, bool, 0644);
-MODULE_PARM_DESC(blc,
-		 "generate black level correction from the tuning file (default on)");
-
-/*
- * Sensor gain in the tuning file's ladder units, which span 1 to 2100. The
- * default is the vendor's traced operating point and reproduces its registers
- * exactly; auto-exposure will drive this once it owns gain.
- */
-static unsigned int blc_gain = 187;
-module_param(blc_gain, uint, 0644);
-MODULE_PARM_DESC(blc_gain,
-		 "sensor gain BLC blends for, in ladder units (default 187, the traced point)");
-
 /*
  * Output control. The vendor stages this 0x00800800 -> 0x00800802 -> 0x00800806
  * at the end of setup and never writes it again; bits 1 and 2 are undecoded.
@@ -129,6 +114,9 @@ MODULE_PARM_DESC(blc_gain,
 #define AR_CVISP_HEIGHT			1080
 #define AR_CVISP_Y_STRIDE		2048
 #define AR_CVISP_C_STRIDE		1024
+
+/* Y, U and V: the block writes three separate plane bases. */
+#define AR_CVISP_PLANES			3
 #define AR_CVISP_Y_SIZE			(AR_CVISP_Y_STRIDE * AR_CVISP_HEIGHT)
 #define AR_CVISP_C_SIZE			(AR_CVISP_C_STRIDE * (AR_CVISP_HEIGHT / 2))
 
@@ -177,6 +165,22 @@ static bool fpn = true;
 module_param(fpn, bool, 0644);
 MODULE_PARM_DESC(fpn,
 		 "clear fpn's enable bit as the vendor's tuning apply does (default on)");
+
+/* Reads AR_CVISP_TUNING_FIRMWARE. */
+static bool blc = true;
+module_param(blc, bool, 0644);
+MODULE_PARM_DESC(blc,
+		 "generate black level correction from the tuning file (default on)");
+
+/*
+ * Sensor gain in the tuning file's ladder units, which span 1 to 2100. The
+ * default is the vendor's traced operating point and reproduces its registers
+ * exactly; auto-exposure will drive this once it owns gain.
+ */
+static unsigned int blc_gain = 187;
+module_param(blc_gain, uint, 0644);
+MODULE_PARM_DESC(blc_gain,
+		 "sensor gain BLC blends for, in ladder units (default 187, the traced point)");
 
 /*
  * Off by default: see the probe. The vendor never enables this clock and the
@@ -237,7 +241,7 @@ MODULE_PARM_DESC(assert_clk,
 struct ar_cvisp_buffer {
 	struct vb2_v4l2_buffer vb;
 	struct list_head list;
-	u32 plane[3];		/* Y/U/V bases, as the block wants them */
+	u32 plane[AR_CVISP_PLANES];	/* Y/U/V bases, as the block wants them */
 };
 
 struct ar_cvisp {
@@ -441,8 +445,10 @@ static u32 ar_cvisp_f32_to_u32(u32 bits)
 
 	if (bits & 0x80000000 || exp < 0)
 		return 0;
+
 	if (exp > 30)
 		return U32_MAX;
+
 	if (exp >= 23)
 		return mant << (exp - 23);
 
@@ -675,7 +681,7 @@ static void ar_cvisp_fill_format(struct v4l2_pix_format_mplane *pix)
 	pix->height = AR_CVISP_HEIGHT;
 	pix->pixelformat = V4L2_PIX_FMT_YUV420M;
 	pix->field = V4L2_FIELD_NONE;
-	pix->num_planes = 3;
+	pix->num_planes = AR_CVISP_PLANES;
 
 	/*
 	 * Not established. The RGB to YUV stage has not been located:
@@ -703,23 +709,28 @@ static int ar_cvisp_queue_setup(struct vb2_queue *q, unsigned int *num_buffers,
 				unsigned int *num_planes, unsigned int sizes[],
 				struct device *alloc_devs[])
 {
-	static const unsigned int plane_size[3] = {
-		AR_CVISP_Y_ALLOC, AR_CVISP_C_ALLOC, AR_CVISP_C_ALLOC,
+	static const unsigned int plane_size[AR_CVISP_PLANES] = {
+		AR_CVISP_Y_ALLOC,
+		AR_CVISP_C_ALLOC,
+		AR_CVISP_C_ALLOC,
 	};
 
+	/* A non-zero plane count is a layout to validate, from CREATE_BUFS with a
+	 * format; zero is a request for the one layout this block produces.
+	 */
 	if (*num_planes) {
-		if (*num_planes != 3)
+		if (*num_planes != AR_CVISP_PLANES)
 			return -EINVAL;
 
-		for (unsigned int i = 0; i < 3; i++)
+		for (unsigned int i = 0; i < ARRAY_SIZE(plane_size); i++)
 			if (sizes[i] < plane_size[i])
 				return -EINVAL;
 
 		return 0;
 	}
 
-	*num_planes = 3;
-	for (unsigned int i = 0; i < 3; i++)
+	*num_planes = AR_CVISP_PLANES;
+	for (unsigned int i = 0; i < ARRAY_SIZE(plane_size); i++)
 		sizes[i] = plane_size[i];
 
 	return 0;
@@ -727,17 +738,19 @@ static int ar_cvisp_queue_setup(struct vb2_queue *q, unsigned int *num_buffers,
 
 static int ar_cvisp_buffer_prepare(struct vb2_buffer *vb)
 {
-	static const unsigned int plane_alloc[3] = {
-		AR_CVISP_Y_ALLOC, AR_CVISP_C_ALLOC, AR_CVISP_C_ALLOC,
+	static const unsigned int plane_alloc[AR_CVISP_PLANES] = {
+		AR_CVISP_Y_ALLOC,
+		AR_CVISP_C_ALLOC,
+		AR_CVISP_C_ALLOC,
 	};
-	static const unsigned int plane_written[3] = {
-		AR_CVISP_Y_SIZE, AR_CVISP_C_SIZE, AR_CVISP_C_SIZE,
+	static const unsigned int plane_written[AR_CVISP_PLANES] = {
+		AR_CVISP_Y_SIZE,
+		AR_CVISP_C_SIZE,
+		AR_CVISP_C_SIZE,
 	};
 	struct ar_cvisp_buffer *buf = to_ar_cvisp_buffer(to_vb2_v4l2_buffer(vb));
 
-	for (unsigned int i = 0; i < 3; i++) {
-		dma_addr_t addr;
-
+	for (unsigned int i = 0; i < ARRAY_SIZE(plane_alloc); i++) {
 		if (vb2_plane_size(vb, i) < plane_alloc[i])
 			return -EINVAL;
 
@@ -748,7 +761,7 @@ static int ar_cvisp_buffer_prepare(struct vb2_buffer *vb)
 		 * reservation, which is well inside 4 GiB, so this only catches a
 		 * device tree that has been changed out from under the driver.
 		 */
-		addr = vb2_dma_contig_plane_dma_addr(vb, i);
+		dma_addr_t addr = vb2_dma_contig_plane_dma_addr(vb, i);
 		if (upper_32_bits(addr))
 			return -EINVAL;
 
@@ -814,12 +827,10 @@ static void ar_cvisp_return_buffers(struct ar_cvisp *cv,
  */
 static int ar_cvisp_chain_start(struct ar_cvisp *cv)
 {
-	int ret;
-
 	if (cv->chain_up)
 		return 0;
 
-	ret = ar_vif_input_start();
+	int ret = ar_vif_input_start();
 	if (ret == -EBUSY) {
 		/* Already brought up from outside, which is how the capture
 		 * harness runs. Nothing to do and not an error.
