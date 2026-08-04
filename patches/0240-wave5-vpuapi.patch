@@ -1,12 +1,19 @@
-Why: the dec/enc close paths have the same SIGKILL leak shape as patch 0004 -
-interruptible device locks plus early returns on firmware finish/timeout
-failures skip the buffer frees, permanently leaking the instance's allocations
-from the fixed pool (the fd is gone either way, so bailing out converts a
-firmware hiccup into a leak). Locks made uninterruptible, buffers always freed,
-VPU stop/reset ordered before the frees. Also disables decoder reordering
-(reorder_enable=FALSE, the vendor's DEC_PIC configuration): the low-latency
-no-B streams need no reorder delay.
+Why: three changes to the dec/enc close paths.
 
+They have the same SIGKILL leak shape as 0210 - interruptible device locks plus
+early returns on firmware finish/timeout failures skip the buffer frees,
+permanently leaking the instance's allocations from the fixed pool (the fd is
+gone either way, so bailing out converts a firmware hiccup into a leak). Locks
+made uninterruptible, buffers always freed, VPU stop/reset ordered before the
+frees.
+
+Bailing out without a successful quiesce (siblings live, or the last-instance
+safety reset failed) leaves the firmware still DMAing into the instance's
+buffers, so those paths mark the instance keep_dma_bufs (0250) and
+wave5_cleanup_instance (0210) leaks them rather than freeing them.
+
+Also disables decoder reordering (reorder_enable=FALSE, the vendor's DEC_PIC
+configuration): the low-latency no-B streams need no reorder delay.
 --- a/drivers/media/platform/chips-media/wave5/wave5-vpuapi.c
 +++ b/drivers/media/platform/chips-media/wave5/wave5-vpuapi.c
 @@ -171,7 +171,9 @@
@@ -20,7 +27,7 @@ no-B streams need no reorder delay.
  	p_dec_info->temp_id_select_mode = TEMPORAL_ID_MODE_ABSOLUTE;
  	p_dec_info->target_temp_id = DECODE_ALL_TEMPORAL_LAYERS;
  	p_dec_info->target_spatial_id = DECODE_ALL_SPATIAL_LAYERS;
-@@ -214,36 +216,63 @@
+@@ -214,36 +216,65 @@
  
  	pm_runtime_resume_and_get(inst->dev->dev);
  
@@ -72,6 +79,7 @@ no-B streams need no reorder delay.
 +			dev_warn(inst->dev->dev,
 +				 "%s: instance still running with siblings live, leaking its buffers (no global reset)\n",
 +				 __func__);
++			inst->keep_dma_bufs = true;
 +			goto unlock_and_return;
 +		}
 +		dev_warn(inst->dev->dev, "%s: instance still running, VPU safety reset before free\n",
@@ -79,6 +87,7 @@ no-B streams need no reorder delay.
 +		if (wave5_vpu_reset(vpu_dev->dev, SW_RESET_SAFETY)) {
 +			dev_err(inst->dev->dev, "%s: safety reset failed, leaking instance buffers\n",
 +				__func__);
++			inst->keep_dma_bufs = true;
 +			goto unlock_and_return;
 +		}
 +	}
@@ -95,7 +104,7 @@ no-B streams need no reorder delay.
  	}
  
  	wave5_vdi_free_dma_memory(vpu_dev, &p_dec_info->vb_task);
-@@ -251,7 +280,7 @@
+@@ -251,7 +282,7 @@
  unlock_and_return:
  	mutex_unlock(&vpu_dev->hw_lock);
  	pm_runtime_put_sync(inst->dev->dev);
@@ -104,7 +113,7 @@ no-B streams need no reorder delay.
  }
  
  int wave5_vpu_dec_issue_seq_init(struct vpu_instance *inst)
-@@ -720,31 +749,52 @@
+@@ -720,31 +751,54 @@
  
  	pm_runtime_resume_and_get(inst->dev->dev);
  
@@ -154,6 +163,7 @@ no-B streams need no reorder delay.
 +			dev_warn(inst->dev->dev,
 +				 "%s: instance still running with siblings live, leaking its buffers (no global reset)\n",
 +				 __func__);
++			inst->keep_dma_bufs = true;
 +			goto unlock_and_return;
 +		}
 +		dev_warn(inst->dev->dev, "%s: instance still running, VPU safety reset before free\n",
@@ -161,6 +171,7 @@ no-B streams need no reorder delay.
 +		if (wave5_vpu_reset(vpu_dev->dev, SW_RESET_SAFETY)) {
 +			dev_err(inst->dev->dev, "%s: safety reset failed, leaking instance buffers\n",
 +				__func__);
++			inst->keep_dma_bufs = true;
 +			goto unlock_and_return;
 +		}
 +	}
@@ -168,7 +179,7 @@ no-B streams need no reorder delay.
  	wave5_vdi_free_dma_memory(vpu_dev, &p_enc_info->vb_work);
  
  	if (inst->std == W_HEVC_ENC || inst->std == W_AVC_ENC) {
-@@ -755,10 +805,11 @@
+@@ -755,10 +809,11 @@
  	}
  
  	wave5_vdi_free_dma_memory(vpu_dev, &p_enc_info->vb_task);

@@ -1,7 +1,7 @@
 Why: upstream resolves the DT `enable-method` against a fixed list that knows
 only "spin-table" and "psci". The vendor SPL parks the secondary A53 behind a
 bespoke handshake (implemented as the "ar-spin-table" cpu_operations in
-smp_spin_table.c, patch 0002); this registers that method so the DT can select
+smp_spin_table.c, patch 0110); this registers that method so the DT can select
 it.
 
 --- a/arch/arm64/kernel/cpu_ops.c

@@ -23,7 +23,7 @@ instead. start_encode() only peeks that buffer, so after the firmware reports
 the failed picture done, the same buffer can be reused for the next ENC_PIC.
 Other firmware result failures still error both sides.
 
-(3) Coded (bitstream) sizeimage clamp, mirroring the decoder clamp (patch 0009).
+(3) Coded (bitstream) sizeimage clamp, mirroring the decoder clamp (patch 0270).
 GStreamer requests a worst-case ~17 MiB coded buffer at 1080p and the CAPTURE vb2
 pool is drawn from the same fixed pool as the codec's working buffers, so the
 request must be refused. The ceiling is the uncompressed frame (w * h * 3 / 2)
