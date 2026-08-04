@@ -170,15 +170,25 @@
 		 * 1:1 out of the recovered configuration, so the range has to be reserved
 		 * no-map for the same reason isp_cma is: the open kernel does not cap
 		 * memory, so it would otherwise be live kernel RAM under a DMA writer.
-		 * Covers 0x28000000..0x29100000 (17 MiB), which is the ring plus the tail
-		 * of its last slot.
+		 * Covers 0x28000000..0x29a00000 (26 MiB). The vendor ring plus the tail of
+		 * its last slot needs only 17 MiB; the rest is capture depth for the open
+		 * path, which allocates through vb2 rather than at the replayed addresses.
+		 * One buffer is three planes of 2048*1088 + 1024*544 + 1024*544 = 3342336
+		 * bytes, exactly 816 pages, and the pool allocator is page-granular
+		 * first-fit, so 8 buffers occupy 25.5 MiB and 26 MiB leaves 512 KiB spare.
+		 * Eight is what lets the zero-copy encoder feed hold frames without
+		 * starving the block's rotation: it completes a buffer only when one is
+		 * queued, and the consumer holds each one for a whole encode.
+		 *
+		 * The 9 MiB of growth comes out of the unreserved 0x29100000..0x2a000000
+		 * hole, so no other carveout moves and no replayed address changes.
 		 *
 		 * This is why vif_cma moved below: the ring's last slot runs 0x2c000 past
 		 * 0x29000000, where vif_cma used to start.
 		 */
 		cvisp_cma: cvisp-cma@28000000 {
 			compatible = "shared-dma-pool";
-			reg = <0 0x28000000 0 0x01100000>;
+			reg = <0 0x28000000 0 0x01a00000>;
 			no-map;
 		};
 
