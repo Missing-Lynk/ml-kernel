@@ -20,6 +20,7 @@ import argparse
 import re
 import struct
 import sys
+from collections.abc import Sequence
 
 HEADER = 0x89E88
 BANDS = 0x89E98
@@ -36,7 +37,7 @@ POINTS = (
 )
 
 
-def f32_q16(bits):
+def f32_q16(bits: int) -> int:
     mant = (bits & 0x7FFFFF) | 0x800000
     exp = ((bits >> 23) & 0xFF) - 127
     shift = 7 - exp
@@ -52,26 +53,26 @@ def f32_q16(bits):
     return mant >> shift
 
 
-def read_s32(blob, off):
+def read_s32(blob: bytes, off: int) -> int:
     return struct.unpack_from("<i", blob, off)[0]
 
 
-def read_u32(blob, off):
+def read_u32(blob: bytes, off: int) -> int:
     return struct.unpack_from("<I", blob, off)[0]
 
 
-def blend(a, b, t_q24):
+def blend(a: int, b: int, t_q24: int) -> int:
     return (a * ((1 << 24) - t_q24) + b * t_q24) // (1 << 24)
 
 
-def trunc_blend(a, b, t_q24):
+def trunc_blend(a: int, b: int, t_q24: int) -> int:
     num = a * ((1 << 24) - t_q24) + b * t_q24
     if num < 0:
         return -((-num) // (1 << 24))
     return num // (1 << 24)
 
 
-def select(blob, gain_q16):
+def select(blob: bytes, gain_q16: int) -> tuple[int, int]:
     count = read_u32(blob, HEADER + 0x8)
     interp = read_u32(blob, HEADER + 0x4)
     count = COUNT if not 1 <= count <= COUNT else count
@@ -93,7 +94,7 @@ def select(blob, gain_q16):
     return band, t_q24
 
 
-def word(blob, band, off, t_q24):
+def word(blob: bytes, band: int, off: int, t_q24: int) -> int:
     v = read_s32(blob, PAYLOAD + band * STRIDE + off)
     if t_q24:
         v = trunc_blend(read_s32(blob, PAYLOAD + (band - 1) * STRIDE + off),
@@ -101,14 +102,16 @@ def word(blob, band, off, t_q24):
     return v & 0xFFFFFFFF
 
 
-def pack_field(regs, blob, band, t_q24, reg, off, shift, width):
+def pack_field(regs: list[int], blob: bytes, band: int, t_q24: int, reg: int,
+               off: int, shift: int, width: int) -> None:
     mask = 0xFFFFFFFF if width == 32 else (1 << width) - 1
     regs[reg] &= ~(mask << shift) & 0xFFFFFFFF
     regs[reg] |= (word(blob, band, off, t_q24) & mask) << shift
     regs[reg] &= 0xFFFFFFFF
 
 
-def lnr_from_blob(blob, seed, gain_q16):
+def lnr_from_blob(blob: bytes, seed: Sequence[int],
+                  gain_q16: int) -> tuple[list[int], int, int]:
     regs = seed[:]
     band, t_q24 = select(blob, gain_q16)
 
@@ -162,7 +165,7 @@ def lnr_from_blob(blob, seed, gain_q16):
     return regs, band, t_q24
 
 
-def read_capture(path):
+def read_capture(path: str) -> list[int]:
     regs = []
     in_lnr = False
     line_re = re.compile(r"^\+0x[0-9a-f]+:\s+(.+)$")
@@ -184,7 +187,7 @@ def read_capture(path):
     return regs[:REGS]
 
 
-def main():
+def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--tuning", required=True, help="nt99235 tuning blob")
     ap.add_argument("--bright", required=True, help="bright vendor capture")

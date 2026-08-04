@@ -36,6 +36,7 @@ import argparse
 import pathlib
 import re
 import sys
+from collections.abc import Sequence
 
 ISP_BASE = 0x08C00000
 CVISP_BASE = 0x08E00000
@@ -82,7 +83,7 @@ TABLE_RE = re.compile(r"^static const struct ar_isp_reg (\w+)\[\]")
 ENTRY_RE = re.compile(r"\{\s*(0x[0-9a-f]+),\s*(0x[0-9a-f]+)\s*\}")
 
 
-def read_header(path):
+def read_header(path: str) -> dict[str, dict[int, int]]:
     tables, cur = {}, None
     with open(path) as handle:
         for line in handle:
@@ -100,7 +101,8 @@ def read_header(path):
     return tables
 
 
-def read_trace(path, base):
+def read_trace(path: str,
+               base: int) -> tuple[dict[int, list[tuple[int, int]]], int]:
     """Values per register offset, each paired with its index in the trace."""
     seq, index = {}, 0
     pat = re.compile(r"pa=0x([0-9a-f]+) val=0x([0-9a-f]+)")
@@ -116,13 +118,13 @@ def read_trace(path, base):
     return seq, index
 
 
-def last_change(writes):
+def last_change(writes: Sequence[tuple[int, int]]) -> int:
     """Trace index of the last write that changed the register's value."""
     return max((writes[k][0] for k in range(1, len(writes))
                 if writes[k][1] != writes[k - 1][1]), default=0)
 
 
-def main():
+def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--header", help="ar-isp-defaults.h")
     ap.add_argument("--trace", help="mmio-isp.log")
@@ -131,7 +133,8 @@ def main():
 
     # The default is resolved against the kernel tree rather than the working
     # directory, so the script runs from the repo root as well as from kernel/.
-    header = args.header or str(pathlib.Path(__file__).resolve().parent.parent
+    # This file lives in kernel/scripts/isp/, so the tree root is three levels up.
+    header = args.header or str(pathlib.Path(__file__).resolve().parents[2]
                                 / DEFAULTS)
     tables = read_header(header)
     applied = {}

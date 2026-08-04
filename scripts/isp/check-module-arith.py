@@ -62,6 +62,7 @@ import argparse
 import re
 import subprocess
 import sys
+from collections.abc import Sequence
 
 SLOTS = (472, 480, 488)
 
@@ -96,7 +97,7 @@ CONVERT_RE = re.compile(r"^(fcvtz[su]|[su]cvtf)\b")
 MULTIPLY_RE = re.compile(r"^(fmul|fmla|fmadd|fdiv|fsub|fadd)\b")
 
 
-def binutil(tool):
+def binutil(tool: str) -> str:
     """The host objdump does not know aarch64, so prefer a cross build."""
     for prefix in ("aarch64-linux-gnu-", "aarch64-none-linux-gnu-", ""):
         name = prefix + tool
@@ -110,7 +111,7 @@ def binutil(tool):
     sys.exit(f"no usable {tool}: install binutils-aarch64-linux-gnu")
 
 
-def disassemble(lib):
+def disassemble(lib: str) -> dict[int, str]:
     out = subprocess.run([binutil("objdump"), "-d", lib], capture_output=True,
                          text=True, check=True).stdout
     code = {}
@@ -124,7 +125,7 @@ def disassemble(lib):
     return code
 
 
-def symbols(lib):
+def symbols(lib: str) -> dict[str, int]:
     out = subprocess.run([binutil("nm"), "-nD", "--defined-only", lib],
                          capture_output=True, text=True, check=True).stdout
     found = {}
@@ -136,7 +137,7 @@ def symbols(lib):
     return found
 
 
-def handlers(code, creat):
+def handlers(code: dict[int, str], creat: int) -> dict[int, int]:
     """The three handler addresses a constructor stores, by context slot."""
     regs, out = {}, {}
     for addr in range(creat, creat + 0x180, 4):
@@ -172,7 +173,7 @@ def handlers(code, creat):
 RET_RE = re.compile(r"^b\t[0-9a-f]+")
 
 
-def is_start(code, exported, addr):
+def is_start(code: dict[int, str], exported: set[int], addr: int) -> bool:
     """A function begins after a ret or an unconditional branch.
 
     Frameless leaves have no prologue to key on, so the preceding instruction is
@@ -183,12 +184,12 @@ def is_start(code, exported, addr):
     return addr in exported or before == "ret" or bool(RET_RE.match(before))
 
 
-def extents(seeds, stops):
+def extents(seeds: Sequence[int], stops: Sequence[int]) -> dict[int, int]:
     """The span of each seed, bounded at the next handler, callback or symbol."""
     return {s: min([a for a in stops if a > s] + [s + 0x4000]) for s in seeds}
 
 
-def materialised(code, ext):
+def materialised(code: dict[int, str], ext: dict[int, int]) -> set[int]:
     """Every code address a module's own instructions form with adrp and add."""
     low, high = min(code), max(code)
     found = set()
@@ -211,7 +212,8 @@ def materialised(code, ext):
     return found
 
 
-def recover(code, exported, handlers_found):
+def recover(code: dict[int, str], exported: set[int],
+            handlers_found: Sequence[int]) -> tuple[list[int], int]:
     """Grow the seed set until no materialised address falls outside the body.
 
     An address already covered by an extent is reached anyway, so only one that
@@ -231,13 +233,13 @@ def recover(code, exported, handlers_found):
     return sorted(seeds), 0
 
 
-def module_body(code, ext):
+def module_body(code: dict[int, str], ext: dict[int, int]) -> list[str]:
     """Every instruction of a module's handlers and published callbacks."""
     return [code[a] for start, limit in ext.items()
             for a in range(start, limit, 4) if a in code]
 
 
-def main():
+def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--lib", required=True, help="vendor libmpp_service.so")
     ap.add_argument("--limit", type=lambda v: int(v, 0), default=0x400000,

@@ -42,6 +42,7 @@ import argparse
 import re
 import struct
 import sys
+from collections.abc import Sequence
 
 ISP_BASE = 0x08C00000
 
@@ -77,7 +78,7 @@ LOCKSTEP = (("rnr", 0x1800, 0x1C00), ("lnr", 0x3CC8, 0x3E20),
 EVENT_WINDOW = 1200
 
 
-def read_trace(path):
+def read_trace(path: str) -> dict[int, list[tuple[int, int]]]:
     seq, index = {}, 0
     pat = re.compile(r"pa=0x([0-9a-f]+) val=0x([0-9a-f]+)")
     with open(path) as handle:
@@ -92,12 +93,13 @@ def read_trace(path):
     return seq
 
 
-def column(blob, base, stride, col, count):
+def column(blob: bytes, base: int, stride: int, col: int,
+           count: int) -> list[int]:
     return [struct.unpack_from("<i", blob, base + i * stride + col * 4)[0]
             for i in range(count)]
 
 
-def entries(blob, base, stride):
+def entries(blob: bytes, base: int, stride: int) -> list[tuple[int, ...]]:
     """Entries up to the first all-zero one, which is what ends the table."""
     out = []
     while True:
@@ -111,12 +113,13 @@ def entries(blob, base, stride):
     return out
 
 
-def changes(writes):
+def changes(writes: Sequence[tuple[int, int]]) -> list[int]:
     return [writes[k][0] for k in range(1, len(writes))
             if writes[k][1] != writes[k - 1][1]]
 
 
-def busiest(seq, lo, hi):
+def busiest(seq: dict[int, list[tuple[int, int]]], lo: int,
+            hi: int) -> int | None:
     moving = [o for o in seq if lo <= o < hi
               and len({v for _, v in seq[o]}) > 1]
     if not moving:
@@ -124,7 +127,7 @@ def busiest(seq, lo, hi):
     return max(moving, key=lambda o: len({v for _, v in seq[o]}))
 
 
-def main():
+def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--tuning", required=True, help="nt99235 tuning blob")
     ap.add_argument("--trace", required=True, help="mmio-isp.log")

@@ -23,6 +23,7 @@ import struct
 import sys
 
 import arlib
+from collections.abc import Sequence
 
 TILES = 64
 SAMPLES = 128
@@ -35,7 +36,7 @@ TEMPLATE_VMA = 0x450570
 TEMPLATE_LEN = 0x1000
 
 
-def curves(data, count):
+def curves(data: bytes, count: int) -> list[tuple[int, ...]]:
     out = []
     for tile in range(count):
         base = tile * STRIDE
@@ -43,7 +44,7 @@ def curves(data, count):
     return out
 
 
-def check_page(data):
+def check_page(data: bytes) -> list[tuple[int, ...]]:
     if len(data) < PAGE_SIZE:
         sys.exit(f"capture is {len(data):#x}, need at least {PAGE_SIZE:#x}")
 
@@ -74,7 +75,7 @@ def check_page(data):
     return seen
 
 
-def check_template(lib, seen):
+def check_template(lib: bytes, seen: Sequence[tuple[int, ...]]) -> None:
     template = arlib.lib_slice(lib, TEMPLATE_VMA, TEMPLATE_LEN, "LTM template")
 
     tiles = TEMPLATE_LEN // STRIDE
@@ -93,14 +94,14 @@ def check_template(lib, seen):
           f"({equal * 100 // TEMPLATE_LEN}%), so the page is recomputed, not installed")
 
 
-def seen_flat(seen):
+def seen_flat(seen: Sequence[tuple[int, ...]]) -> bytearray:
     out = bytearray()
     for curve in seen:
         out += struct.pack(f"<{SAMPLES}H", *curve)
     return out
 
 
-def main():
+def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--capture", required=True, help="tbl_isp_0x2808.bin")
     ap.add_argument("--lib", help="vendor libmpp_service.so, for the template check")

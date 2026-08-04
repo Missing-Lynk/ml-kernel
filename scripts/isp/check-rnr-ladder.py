@@ -49,7 +49,7 @@ VENDOR_REG = 0x002E002D
 VENDOR_WINDOW = (13.6, 14.2)
 
 
-def f32_q16(bits):
+def f32_q16(bits: int) -> int:
     """Mirror ar_isp_f32_q16: unsigned Q16 truncated toward zero."""
     mant = (bits & 0x7FFFFF) | 0x800000
     exp = ((bits >> 23) & 0xFF) - 127
@@ -70,12 +70,12 @@ def f32_q16(bits):
     return mant >> shift
 
 
-def blend(a, b, t_q24):
+def blend(a: int, b: int, t_q24: int) -> int:
     """Mirror ar_isp_ladder_blend: one Q24 sum, one truncation."""
     return (a * ((1 << 24) - t_q24) + b * t_q24) >> 24
 
 
-def rnr_from_blob(blob, gain_q16):
+def rnr_from_blob(blob: bytes, gain_q16: int) -> list[int]:
     """Mirror ar_isp_rnr_from_blob word for word."""
     count = struct.unpack_from("<I", blob, HEADER + 0xC)[0]
     interp = struct.unpack_from("<I", blob, HEADER + 0x4)[0]
@@ -113,7 +113,7 @@ def rnr_from_blob(blob, gain_q16):
     return regs
 
 
-def main():
+def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--tuning", required=True, help="nt99235 tuning blob")
     args = ap.parse_args()

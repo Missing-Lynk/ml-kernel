@@ -83,7 +83,7 @@ MEASURED = {
 }
 
 
-def f32_q16(bits):
+def f32_q16(bits: int) -> int:
     """Mirror ar_isp_f32_q16: unsigned Q16 truncated toward zero."""
     mant = (bits & 0x7FFFFF) | 0x800000
     exp = ((bits >> 23) & 0xFF) - 127
@@ -104,17 +104,17 @@ def f32_q16(bits):
     return mant >> shift
 
 
-def blend_s32(a, b, t_q24):
+def blend_s32(a: int, b: int, t_q24: int) -> int:
     """Mirror ar_isp_ladder_blend_s32: one Q24 sum, truncation toward zero."""
     acc = a * ((1 << 24) - t_q24) + b * t_q24
     return acc // (1 << 24) if acc >= 0 else -((-acc) // (1 << 24))
 
 
-def word(blob, band, off):
+def word(blob: bytes, band: int, off: int) -> int:
     return struct.unpack_from("<i", blob, PAYLOAD + band * STRIDE + off)[0]
 
 
-def select(blob, gain_q16):
+def select(blob: bytes, gain_q16: int) -> tuple[int, int]:
     """Mirror ar_isp_de3d_select."""
     count = struct.unpack_from("<I", blob, HEADER + 0x8)[0]
     interp = struct.unpack_from("<I", blob, HEADER + 0x4)[0]
@@ -138,19 +138,19 @@ def select(blob, gain_q16):
     return band, t_q24
 
 
-def de3d_from_blob(blob, gain_q16):
+def de3d_from_blob(blob: bytes, gain_q16: int) -> list[int]:
     """Mirror ar_isp_de3d_from_blob register for register."""
     band, t_q24 = select(blob, gain_q16)
 
-    def fld(off, width, t=None):
+    def fld(off: int, width: int, t: int | None = None) -> int:
         t = t_q24 if t is None else t
         v = word(blob, band, off)
         if t:
             v = blend_s32(word(blob, band - 1, off), v, t)
         return v & ((1 << width) - 1)
 
-    def slope(hi_off, lo_off):
-        def f(off):
+    def slope(hi_off: int, lo_off: int) -> int:
+        def f(off: int) -> int:
             v = word(blob, band, off)
             if t_q24:
                 v = blend_s32(word(blob, band - 1, off), v, t_q24)
@@ -204,7 +204,7 @@ def de3d_from_blob(blob, gain_q16):
     return out
 
 
-def main():
+def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--tuning", required=True, help="nt99235 tuning blob")
     args = ap.parse_args()

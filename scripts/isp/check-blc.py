@@ -19,6 +19,7 @@ import argparse
 import re
 import struct
 import sys
+from collections.abc import Sequence
 
 CVISP_BASE = 0x08E00000
 BANK = 0x4200
@@ -35,21 +36,22 @@ REG_SCALE = 0x00
 REG_LEVEL = 0x20
 
 
-def entries(blob):
+def entries(blob: bytes) -> list[tuple[list[int], list[int]]]:
     out = []
     for i in range(ENTRIES):
         off = TABLE + i * ENTRY_SIZE
         vals = struct.unpack_from("<8I", blob, off)
         out.append((list(vals[:4]), list(vals[4:])))
+
     return out
 
 
-def ladder(blob):
+def ladder(blob: bytes) -> list[tuple[float, float]]:
     return [struct.unpack_from("<2f", blob, LADDER + 8 * i)[0:2]
             for i in range(ENTRIES)]
 
 
-def bank_values(trace):
+def bank_values(trace: str) -> dict[int, int]:
     last = {}
     pat = re.compile(r"pa=0x([0-9a-f]+) val=0x([0-9a-f]+)")
     with open(trace) as handle:
@@ -57,13 +59,15 @@ def bank_values(trace):
             m = pat.search(line)
             if not m:
                 continue
+
             off = int(m.group(1), 16) - CVISP_BASE
             if BANK <= off < BANK + BLOCK:
                 last[off - BANK] = int(m.group(2), 16)
+
     return last
 
 
-def check_table(blob):
+def check_table(blob: bytes) -> list[tuple[list[int], list[int]]]:
     table = entries(blob)
     for i, (scale, level) in enumerate(table):
         if min(level) < 1 or max(level) > 0xFFFF:
@@ -91,7 +95,7 @@ def check_table(blob):
     return table
 
 
-def check_ladder(blob):
+def check_ladder(blob: bytes) -> list[tuple[float, float]]:
     pairs = ladder(blob)
     for i, (a, b) in enumerate(pairs):
         if not 0 < a < 1e5 or not 0 < b < 1e5 or b <= a:
@@ -104,7 +108,8 @@ def check_ladder(blob):
     return pairs
 
 
-def check_trace(table, last):
+def check_trace(table: Sequence[tuple[list[int], list[int]]],
+                last: dict[int, int]) -> None:
     if len(last) != BLOCK // 4:
         sys.exit(f"trace holds {len(last)} bank registers, expected "
                  f"{BLOCK // 4}")
@@ -138,7 +143,7 @@ def check_trace(table, last):
           f"{scale[0] >> SCALE_SHIFT}, inside {min(span)}..{max(span)}")
 
 
-def main():
+def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--blob", required=True, help="nt99235 tuning file")
     ap.add_argument("--trace", help="a trace covering CVISP 0x4200")

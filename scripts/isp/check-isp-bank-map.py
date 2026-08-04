@@ -62,7 +62,7 @@ CVISP_SELECT = 0x200000
 ATTACH_SLOT = 472
 
 
-def binutil(tool):
+def binutil(tool: str) -> str:
     """The host objdump does not know aarch64, so prefer a cross build."""
     for prefix in ("aarch64-linux-gnu-", "aarch64-none-linux-gnu-", ""):
         name = prefix + tool
@@ -76,7 +76,7 @@ def binutil(tool):
     sys.exit(f"no usable {tool}: install binutils-aarch64-linux-gnu")
 
 
-def disassemble(lib):
+def disassemble(lib: str) -> dict[int, str]:
     out = subprocess.run([binutil("objdump"), "-d", lib], capture_output=True,
                          text=True, check=True).stdout
     lines = {}
@@ -88,7 +88,7 @@ def disassemble(lib):
     return lines
 
 
-def symbols(lib):
+def symbols(lib: str) -> dict[str, int]:
     out = subprocess.run([binutil("nm"), "-nD", "--defined-only", lib],
                          capture_output=True, text=True, check=True).stdout
     found = {}
@@ -100,11 +100,11 @@ def symbols(lib):
     return found
 
 
-def constructors(syms):
+def constructors(syms: dict[str, int]) -> dict[str, int]:
     return {n: a for n, a in syms.items() if CREAT_RE.match(n)}
 
 
-def attach_handler(lines, creat):
+def attach_handler(lines: dict[int, str], creat: int) -> int | None:
     """The handler stored at ctx+472. Stores use str or stp interchangeably."""
     regs = {}
     for addr in range(creat, creat + 0x180, 4):
@@ -133,7 +133,8 @@ def attach_handler(lines, creat):
     return None
 
 
-def banks(lines, attach, limit):
+def banks(lines: dict[int, str], attach: int,
+          limit: int) -> list[tuple[int, int]]:
     """(block, bank) pairs, one per ar_dev_pa2va call that gets an offset.
 
     The block is chosen before the call by adding a selector to the physical
@@ -201,7 +202,7 @@ def banks(lines, attach, limit):
     return sorted({p for p in out if p[1] > 4})
 
 
-def written(trace):
+def written(trace: str) -> set[int]:
     offsets = set()
     pat = re.compile(r"pa=0x([0-9a-f]+) ")
     with open(trace) as handle:
@@ -215,7 +216,7 @@ def written(trace):
     return offsets
 
 
-def main():
+def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--lib", required=True, help="vendor libmpp_service.so")
     ap.add_argument("--trace", help="mmio-isp.log, for the span cross-check")

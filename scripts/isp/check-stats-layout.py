@@ -42,11 +42,11 @@ RRO_CAPTURES = ("0x6440", "0x6474", "0x6508")
 HIST_CAPTURE = "0x600c"
 
 
-def u32s(data):
+def u32s(data: bytes) -> list[int]:
     return list(struct.unpack_from(f"<{len(data) // 4}I", data))
 
 
-def check_rro(name, data):
+def check_rro(name: str, data: bytes) -> int:
     if len(data) < RRO_SIZE:
         sys.exit(f"{name}: capture is {len(data):#x}, need {RRO_SIZE:#x}")
 
@@ -94,7 +94,7 @@ def check_rro(name, data):
     return count
 
 
-def check_hist(name, data):
+def check_hist(name: str, data: bytes) -> None:
     bins = u32s(data[:HIST_CONTENT])
     if len(bins) != HIST_BINS * HIST_LANES:
         sys.exit(f"{name}: decoded {len(bins)} words")
@@ -118,7 +118,7 @@ def check_hist(name, data):
           f"{FRAME_W}x{FRAME_H}")
 
 
-def main():
+def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--snapshot", required=True,
                     help="directory holding the tbl_isp_*.bin captures")

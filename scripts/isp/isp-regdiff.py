@@ -73,14 +73,14 @@ STATS = {
 }
 
 
-def bank(off):
+def bank(off: int) -> str:
     for base, name in BANKS:
         if off >= base:
             return name
     return "?"
 
 
-def load_sweep(path):
+def load_sweep(path: str) -> dict[tuple[str, int], int]:
     out, blk, wbase = {}, None, 0
     for line in open(path):
         m = HDR.match(line)
@@ -95,7 +95,7 @@ def load_sweep(path):
     return out
 
 
-def load_tables(path):
+def load_tables(path: str) -> dict[str, list[tuple[int, int]]]:
     arrays, cur = {}, None
     for line in open(path):
         m = ARR.match(line)
@@ -109,7 +109,8 @@ def load_tables(path):
     return arrays
 
 
-def classify(off, vendor, ours, tail, trim):
+def classify(off: int, vendor: int, ours: int, tail: dict[int, int],
+             trim: dict[int, int]) -> str:
     if (vendor >> 24) in (0x2A, 0x2B):
         return "C"
     if tail.get(off) == vendor or trim.get(off) == vendor:
@@ -119,7 +120,7 @@ def classify(off, vendor, ours, tail, trim):
     return "D"
 
 
-def main():
+def main() -> int:
     show_all = "--all" in sys.argv
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     if len(args) != 2:
