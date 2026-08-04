@@ -43,7 +43,15 @@
 /* Free-running per-PHY activity counters, named by the vendor's debug dump:
  * clkbyte, hs_c, hs_d0, hs_d1, term_c, term_d0, term_d1 for each of the pair's
  * two PHYs. The data-lane HS counters advance only while that physical lane
- * carries high-speed bursts, which makes them a direct routing probe.
+ * carries high-speed bursts, which makes them a direct routing probe: sample
+ * one twice while the sensor streams and any advance separates a routed lane
+ * from an unrouted one. This is how the board's four-lane wiring was measured,
+ * a question PHY_RX cannot answer (clock-lane bits, identical at any lane
+ * count) and PHY_STOPSTATE on the first core cannot either (that core's two
+ * lanes only, ceiling 0x3 regardless of wiring).
+ *
+ * Reference only; nothing here reads them. Kept because they are the sole way
+ * to ask the routing question again on a new board.
  */
 #define AR_CSI_WRAP_PHY0_HS_D0		0x060
 #define AR_CSI_WRAP_PHY0_HS_D1		0x064
@@ -148,16 +156,6 @@ enum ar_csi2_pads {
 	AR_CSI2_PAD_COUNT,
 };
 
-/* How long to let the link settle after stream-on, and how far apart the two
- * counter samples sit. At 60 fps every active lane bursts thousands of times
- * over the window, so any advance at all separates routed from unrouted.
- */
-#define AR_CSI_LANE_TEST_SETTLE_MS	50
-#define AR_CSI_LANE_TEST_SAMPLE_MS	500
-
-/* Lets the rest of the graph finish binding before the test streams. */
-#define AR_CSI_LANE_TEST_DELAY_MS	1000
-
 /* Per-instance interrupt masks, from the vendor's init table. Every entry is
  * written as zero to mask the source, then as its real value to unmask it.
  */
@@ -186,17 +184,6 @@ static const struct ar_csi2_irq_mask ar_csi2_irq_masks[] = {
 static int lanes;
 module_param(lanes, int, 0444);
 MODULE_PARM_DESC(lanes, "override the data lane count from the device tree (0 to use it)");
-
-/* Run a lane-routing test once the sensor binds: configure the receiver,
- * stream briefly, sample per-lane activity, stop. Nothing written survives a
- * power cycle. Pair with the sensor driver's force_mode so the sensor drives
- * the lanes under test; a two-lane sensor mode measures nothing about lanes
- * 2 and 3.
- */
-static bool lane_test;
-module_param(lane_test, bool, 0444);
-MODULE_PARM_DESC(lane_test,
-		 "on bind, stream briefly and report which data lanes carry HS bursts");
 
 /* Overrides the D-PHY frequency range otherwise derived from the source
  * subdev's link frequency, which lets a range be tried without rebuilding.
@@ -235,9 +222,6 @@ struct ar_csi2 {
 	struct v4l2_async_notifier notifier;
 	struct v4l2_subdev *sensor;
 	u16 sensor_source_pad;
-
-	/* Runs the optional lane test outside the async binding callbacks. */
-	struct delayed_work lane_test_work;
 };
 
 static inline struct ar_csi2 *to_ar_csi2(struct v4l2_subdev *sd)
@@ -788,14 +772,6 @@ static int ar_csi2_notify_bound(struct v4l2_async_notifier *notifier,
 	csi2->sensor = subdev;
 	csi2->sensor_source_pad = pad;
 
-	/* The lane test streams the sensor, which cannot be done from inside a
-	 * binding callback, and the notifier's complete callback never runs for
-	 * a subdev notifier: v4l2-async only calls it on the root notifier.
-	 */
-	if (lane_test)
-		schedule_delayed_work(&csi2->lane_test_work,
-				      msecs_to_jiffies(AR_CSI_LANE_TEST_DELAY_MS));
-
 	return media_create_pad_link(&subdev->entity, pad, &csi2->sd.entity,
 				     AR_CSI2_PAD_SINK,
 				     MEDIA_LNK_FL_ENABLED |
@@ -808,95 +784,7 @@ static void ar_csi2_notify_unbind(struct v4l2_async_notifier *notifier,
 {
 	struct ar_csi2 *csi2 = container_of(notifier, struct ar_csi2, notifier);
 
-	/* A pending lane test would otherwise fire against the gone sensor. */
-	cancel_delayed_work_sync(&csi2->lane_test_work);
-
 	csi2->sensor = NULL;
-}
-
-/* Measure lane activity from the wrapper's per-PHY HS counters: a counter that
- * advances between two samples means that lane carries high-speed bursts.
- * PHY_RX cannot answer this (clock-lane status bits, identical at any lane
- * count), nor can PHY_STOPSTATE on the first core (only that core's two lanes,
- * ceiling 0x3 regardless of wiring). The error status is reported alongside,
- * because a lane count the board cannot support shows up there too.
- */
-static void ar_csi2_measure_lanes(struct ar_csi2 *csi2)
-{
-	static const u32 counter_offsets[] = {
-		AR_CSI_WRAP_PHY0_HS_D0,		/* lane 0 */
-		AR_CSI_WRAP_PHY0_HS_D1,		/* lane 1 */
-		AR_CSI_WRAP_PHY1_HS_D0,		/* lane 2 */
-		AR_CSI_WRAP_PHY1_HS_D1,		/* lane 3 */
-	};
-	u32 expected = GENMASK(csi2->num_data_lanes - 1, 0);
-	u32 before[ARRAY_SIZE(counter_offsets)];
-	u32 seen = 0;
-
-	msleep(AR_CSI_LANE_TEST_SETTLE_MS);
-
-	for (unsigned int i = 0; i < ARRAY_SIZE(counter_offsets); i++)
-		before[i] = ar_csi2_read(csi2->base, counter_offsets[i]);
-
-	msleep(AR_CSI_LANE_TEST_SAMPLE_MS);
-
-	for (unsigned int i = 0; i < ARRAY_SIZE(counter_offsets); i++) {
-		if (ar_csi2_read(csi2->base, counter_offsets[i]) != before[i])
-			seen |= BIT(i);
-	}
-
-	dev_info(csi2->dev,
-		 "lane test: active lanes 0x%x of the configured 0x%x (per-PHY HS counters)\n",
-		 seen, expected);
-	dev_info(csi2->dev,
-		 "lane test: streaming errors: main 0x%08x, stopstate core0 0x%08x core1 0x%08x\n",
-		 ar_csi2_read(csi2->core, DW_CSI2_INT_ST_MAIN),
-		 ar_csi2_read(csi2->core, DW_CSI2_PHY_STOPSTATE),
-		 ar_csi2_read(csi2->base + AR_CSI_CORE1_OFFSET,
-			      DW_CSI2_PHY_STOPSTATE));
-
-	if ((seen & expected) == expected)
-		dev_info(csi2->dev,
-			 "lane test: all %u configured lanes carry data\n",
-			 csi2->num_data_lanes);
-	else
-		dev_info(csi2->dev,
-			 "lane test: lanes 0x%x carried no data; not routed, or the sensor does not drive them in this mode\n",
-			 expected & ~seen);
-}
-
-/* Stream briefly and report which lanes carry data. */
-static void ar_csi2_run_lane_test(struct ar_csi2 *csi2)
-{
-	int ret;
-
-	dev_info(csi2->dev, "lane test: configuring %u lanes\n", csi2->num_data_lanes);
-
-	ret = ar_csi2_clks_enable(csi2);
-	if (ret)
-		return;
-
-	ar_csi2_configure(csi2, MIPI_CSI2_DT_RAW12);
-
-	ret = v4l2_subdev_call(csi2->sensor, video, s_stream, 1);
-	if (ret) {
-		dev_err(csi2->dev, "lane test: the sensor refused to stream (%d)\n", ret);
-	} else {
-		ar_csi2_measure_lanes(csi2);
-		v4l2_subdev_call(csi2->sensor, video, s_stream, 0);
-	}
-
-	ar_csi2_stop(csi2);
-	ar_csi2_clks_disable(csi2);
-}
-
-/* Run the lane test away from the binding callbacks. */
-static void ar_csi2_lane_test_work(struct work_struct *work)
-{
-	struct ar_csi2 *csi2 = container_of(to_delayed_work(work), struct ar_csi2,
-					    lane_test_work);
-
-	ar_csi2_run_lane_test(csi2);
 }
 
 /* No complete callback: v4l2-async only calls it on the root notifier, and this
@@ -948,8 +836,6 @@ static int ar_csi2_parse_and_register_sensor(struct ar_csi2 *csi2)
 	}
 
 	csi2->num_data_lanes = declared;
-
-	INIT_DELAYED_WORK(&csi2->lane_test_work, ar_csi2_lane_test_work);
 
 	v4l2_async_subdev_nf_init(&csi2->notifier, &csi2->sd);
 	csi2->notifier.ops = &ar_csi2_notify_ops;
@@ -1071,9 +957,6 @@ static int ar_csi2_probe(struct platform_device *pdev)
 static void ar_csi2_remove(struct platform_device *pdev)
 {
 	struct ar_csi2 *csi2 = platform_get_drvdata(pdev);
-
-	/* A pending test would otherwise run against freed module code. */
-	cancel_delayed_work_sync(&csi2->lane_test_work);
 
 	v4l2_async_unregister_subdev(&csi2->sd);
 	v4l2_async_nf_unregister(&csi2->notifier);
