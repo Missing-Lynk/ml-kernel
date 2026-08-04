@@ -22,6 +22,8 @@ import argparse
 import struct
 import sys
 
+import arlib
+
 TILES = 64
 SAMPLES = 128
 STRIDE = 0x100
@@ -29,7 +31,6 @@ PAGE_SIZE = TILES * STRIDE
 SAMPLE_MAX = 0x3FF
 
 # ISP-init template entry 40. Same curve shape, a quarter of the page.
-VMA_TO_FILE = 0x10000
 TEMPLATE_VMA = 0x450570
 TEMPLATE_LEN = 0x1000
 
@@ -74,10 +75,7 @@ def check_page(data):
 
 
 def check_template(lib, seen):
-    off = TEMPLATE_VMA - VMA_TO_FILE
-    if off + TEMPLATE_LEN > len(lib):
-        sys.exit("template lies past the end of the library")
-    template = lib[off:off + TEMPLATE_LEN]
+    template = arlib.lib_slice(lib, TEMPLATE_VMA, TEMPLATE_LEN, "LTM template")
 
     tiles = TEMPLATE_LEN // STRIDE
     tpl = curves(template, tiles)
