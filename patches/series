@@ -10,7 +10,5 @@
 0010-wave5-vpu-enc.patch
 0011-dma-coherent-page-granular.patch
 0012-dwc2-gadget-buffer-dma.patch
-0013-wave5-enc-plane-data-offset.patch
 0014-wave5-close-keep-dma-bufs.patch
-0015-wave5-enc-source-stride.patch
-0016-wave5-enc-coded-height.patch
+0015-wave5-enc-active-src-idx.patch
