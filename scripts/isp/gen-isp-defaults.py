@@ -25,6 +25,8 @@ import struct
 import sys
 from collections.abc import Iterator, Sequence
 
+import arlib
+
 # Page number -> file offsets of each copy of that page's default block. The
 # offset is that of the first register the trace wrote on the page, which is
 # register 0 of the page for every block found so far.
@@ -267,6 +269,7 @@ def main() -> None:
 
         pages.append((page, len(bases), verified, regs))
 
+    guard_open, guard_close = arlib.guard('AR_ISP_DEFAULTS_H')
     with open(args.output, 'w') as header:
         emit = header.write
         emit('/* SPDX-License-Identifier: GPL-2.0 */\n')
@@ -287,7 +290,7 @@ def main() -> None:
         emit(' * Page 0x28 has a single known copy, so its values cannot be\n')
         emit(' * cross-checked and are marked unverified.\n')
         emit(' */\n\n')
-        emit('#ifndef _AR_ISP_DEFAULTS_H\n#define _AR_ISP_DEFAULTS_H\n\n')
+        emit(guard_open + '\n')
         emit('#include <linux/compiler_attributes.h>\n')
         emit('#include <linux/types.h>\n\n')
         emit('struct ar_isp_reg {\n\tu16 off;\n\tu32 val;\n};\n\n')
@@ -388,7 +391,7 @@ def main() -> None:
             emit(f'\t{{ 0x{off:04x}, 0x{val:08x} }},\n')
 
         emit('};\n\n')
-        emit('#endif /* _AR_ISP_DEFAULTS_H */\n')
+        emit(guard_close)
 
     total = n_traced + n_recovered + n_unverified
     print(f'{args.output}: {total} registers over {len(pages)} pages')

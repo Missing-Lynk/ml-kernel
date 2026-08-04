@@ -18,6 +18,9 @@
  * about whether the vendor polls this block.
  */
 
+#ifndef AR_CVISP_DEFAULTS_H
+#define AR_CVISP_DEFAULTS_H
+
 struct ar_cvisp_reg {
 	u16 off;
 	u32 val;
@@ -437,3 +440,5 @@ static const struct ar_cvisp_reg ar_cvisp_tick[] = {
 /* ring: 5 buffer sets */
 /* tick: 8 registers, 496 wraps over 2477 frames */
 /* not tabled, rewritten a few times aperiodically: 0x4100=0x00000000 (9x), 0x4108=0x00000000 (9x) */
+
+#endif /* AR_CVISP_DEFAULTS_H */

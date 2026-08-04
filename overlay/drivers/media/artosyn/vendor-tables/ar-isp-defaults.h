@@ -17,8 +17,8 @@
  * cross-checked and are marked unverified.
  */
 
-#ifndef _AR_ISP_DEFAULTS_H
-#define _AR_ISP_DEFAULTS_H
+#ifndef AR_ISP_DEFAULTS_H
+#define AR_ISP_DEFAULTS_H
 
 #include <linux/compiler_attributes.h>
 #include <linux/types.h>
@@ -3682,4 +3682,4 @@ static const struct ar_isp_reg ar_isp_output_fix[] = {
 	{ 0x2e30, 0x001020fc },
 };
 
-#endif /* _AR_ISP_DEFAULTS_H */
+#endif /* AR_ISP_DEFAULTS_H */
