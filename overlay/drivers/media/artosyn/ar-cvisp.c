@@ -199,15 +199,23 @@ MODULE_PARM_DESC(rotate,
  * position-keyed pattern before queueing it and reports what survived: at 1
  * and at 2 alike a completed buffer carries 518400 luma words and 138240 per
  * chroma plane, its full written extent, with no marker left at the bottom.
- * The write has drained by the next tick, so 1 is enough.
+ * The write has drained by the next tick.
+ *
+ * That measures the DMA, not the consumer. A consumer that still holds the
+ * buffer when the next tick re-arms it reads while the hardware writes: the
+ * wave5 encoder imports these buffers by dmabuf and does exactly that, so at
+ * depth 1 it encodes torn frames while the drop counter stays clean. The
+ * default is therefore 3, which is what the recorder and the air-unit video
+ * path are validated at; 1 remains selectable for the drain measurement above
+ * and costs a buffer less out of the pool of five.
  *
  * Take the measurement from a buffer marked while the stream is running. See
  * the geometry block for what the first buffer of a stream reports instead.
  */
-static unsigned int depth = 1;
+static unsigned int depth = 3;
 module_param(depth, uint, 0444);
 MODULE_PARM_DESC(depth,
-		 "frame ticks a buffer is held before completion, 1 to 4 (default 1)");
+		 "frame ticks a buffer is held before completion, 1 to 4 (default 3)");
 
 /*
  * Bring the sensor, input path and ISP up from STREAMON, so opening the node is

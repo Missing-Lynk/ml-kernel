@@ -149,18 +149,18 @@
 		#size-cells = <2>;
 		ranges;
 
-		/* MMZ media pool for the wave5 encoder + camera capture buffers. 32 MiB
-		 * (0x25000000..0x27000000), a no-map hole in the 256 MiB DRAM. SIZE IS A
-		 * FIRST-CUT ESTIMATE for the encode-only path (one 1080p capture ring + the
-		 * encoder DPB/bitstream pool); TUNE ON HW - the vendor keeps its MMZ as a
-		 * runtime ar_osal mmz= param, not in the DTB, so there is no vendor number to
-		 * copy. Too small -> the wave5 firmware spins. There is room to grow or relocate
-		 * this pool within the 256 MiB DRAM. The wave5 codec claims it via the
-		 * `memory-region` phandle on video-codec@a080000. `no-map`: coherent uncached
-		 * carveout outside the kernel linear map. */
+		/* MMZ media pool for the wave5 codec. 48 MiB (0x25000000..0x28000000), a
+		 * no-map hole in the 256 MiB DRAM ending flush against cvisp-cma. The vendor
+		 * keeps its MMZ as a runtime ar_osal mmz= param rather than in the DTB, so
+		 * there is no vendor number to copy; too small and the wave5 firmware spins.
+		 * Two concurrent encoder instances take about 13 MiB of working buffers, and
+		 * the per-tile dma-heap buffers are drawn from this pool as well, because
+		 * `mmz` is the only dma-heap the board exposes. The codec claims the pool via
+		 * the `memory-region` phandle on video-codec@a080000. `no-map`: coherent
+		 * uncached carveout outside the kernel linear map. */
 		mmz_pool: mmz@25000000 {
 			compatible = "shared-dma-pool";
-			reg = <0 0x25000000 0 0x02000000>;
+			reg = <0 0x25000000 0 0x03000000>;
 			no-map;
 		};
 
