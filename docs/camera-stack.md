@@ -424,7 +424,6 @@ Parity above is at a fixed operating point. The vendor's 3A loops move state thi
 | CVISP output stage and queue | `overlay/drivers/media/artosyn/ar-cvisp.c`, tables `vendor-tables/ar-cvisp-defaults.h` from `scripts/isp/gen-cvisp-defaults.py` |
 | DT nodes (camera, CSI, VIF, ISP, CVISP, clocks, carveouts) | `devices/betafpv-vr04-air/proxima-9311-air.dts` |
 | Vendor MMIO write trace, per block and wide sweep | capture harness `glue/camera/au-slotA-mmiotrace.sh`, shim `native/mmiotrace.c`; the logs are capture artifacts, not in the tree |
-| CVISP first-light experiment | `glue/camera/au-cvisp-firstlight.sh` |
 
 Precedence between sources: the trace is the authority for what the vendor writes, the disassembly is the authority for what a register means, and hand-written RE notes are leads to verify. Notes checked against the trace have been wrong on `0x080`, `0x32c` and `0x0d0`.
 
