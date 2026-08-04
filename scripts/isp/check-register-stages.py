@@ -92,12 +92,15 @@ def read_header(path: str) -> dict[str, dict[int, int]]:
                 cur = m.group(1)
                 tables[cur] = {}
                 continue
+
             m = ENTRY_RE.search(line)
             if m and cur:
                 tables[cur][int(m.group(1), 16)] = int(m.group(2), 16)
+
     missing = [t for t in APPLIED if t not in tables]
     if missing:
         sys.exit(f"{path}: no table named {', '.join(missing)}")
+
     return tables
 
 
@@ -111,10 +114,12 @@ def read_trace(path: str,
             m = pat.search(line)
             if not m:
                 continue
+
             index += 1
             off = int(m.group(1), 16) - base
             if 0 <= off < 0x10000:
                 seq.setdefault(off, []).append((index, int(m.group(2), 16)))
+
     return seq, index
 
 
@@ -145,9 +150,11 @@ def main() -> int:
         for name, block, lo, hi in STAGES:
             if block != ISP:
                 continue
+
             n = sum(1 for o in applied if lo <= o < hi)
             print(f"{name:9s} {lo:#06x}..{hi:#06x}  "
                   f"replay covers {n:3d} registers")
+
         return 0
 
     seq, total = {}, {}
@@ -193,15 +200,18 @@ def main() -> int:
               f"{len(wrong)} reached with a different value")
         if gap:
             print("        unreached: " + " ".join(f"{o:#x}" for o in gap))
+
         if wrong:
             print("        differs:   " + " ".join(
                 f"{o:#x} trace {values[o][-1]:#x} replay {applied[o]:#x}"
                 for o in wrong))
+
         if trimmed:
             print("        read-back overrides: " + " ".join(
                 f"{o:#x} written {values[o][-1]:#x} "
                 f"trimmed to {tables[TRIM][o]:#x}"
                 for o in trimmed))
+
         # A constant register the replay misses or contradicts is a real defect;
         # a recomputed one is out of the replay's reach by construction.
         fail += [(name, o) for o in gap + wrong]

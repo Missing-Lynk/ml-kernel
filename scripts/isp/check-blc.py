@@ -72,6 +72,7 @@ def check_table(blob: bytes) -> list[tuple[list[int], list[int]]]:
     for i, (scale, level) in enumerate(table):
         if min(level) < 1 or max(level) > 0xFFFF:
             sys.exit(f"entry {i}: level {level} outside a sane black level")
+
         if min(scale) < 1:
             sys.exit(f"entry {i}: scale {scale} has a zero lane")
 
@@ -80,6 +81,7 @@ def check_table(blob: bytes) -> list[tuple[list[int], list[int]]]:
     for i in range(1, ENTRIES):
         if table[i][0][0] <= table[i - 1][0][0]:
             sys.exit(f"entry {i}: scale does not rise")
+
         if table[i][1][0] < table[i - 1][1][0]:
             sys.exit(f"entry {i}: level falls")
 
@@ -100,9 +102,11 @@ def check_ladder(blob: bytes) -> list[tuple[float, float]]:
     for i, (a, b) in enumerate(pairs):
         if not 0 < a < 1e5 or not 0 < b < 1e5 or b <= a:
             sys.exit(f"ladder pair {i}: {a}, {b} is not an increasing window")
+
     for i in range(1, ENTRIES):
         if pairs[i][0] <= pairs[i - 1][1]:
             sys.exit(f"ladder pair {i} overlaps pair {i - 1}")
+
     print(f"ladder: {ENTRIES} float pairs at {LADDER:#x}, "
           f"{', '.join(f'({a:g},{b:g})' for a, b in pairs)}")
     return pairs
@@ -132,6 +136,7 @@ def check_trace(table: Sequence[tuple[list[int], list[int]]],
         if v % (1 << SCALE_SHIFT):
             sys.exit(f"scale {v:#x} is not a multiple of "
                      f"{1 << SCALE_SHIFT}, so the shift is not {SCALE_SHIFT}")
+
         u = v >> SCALE_SHIFT
         if not min(span) <= u <= max(span):
             sys.exit(f"scale {v:#x} unshifts to {u}, outside the table range "
@@ -159,6 +164,7 @@ def main() -> int:
         last = bank_values(args.trace)
         if not last:
             sys.exit(f"no writes to CVISP {BANK:#x} in {args.trace}")
+
         check_trace(table, last)
 
     print("BLC layout agrees with ar-isp-blc.h")

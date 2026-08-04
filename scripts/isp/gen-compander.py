@@ -18,7 +18,8 @@ checked against the original before emitting.
 The library is proprietary and not in the repository; supply it with --lib. The generated
 header is checked in, so this script is rerun only if the vendor library changes.
 
-    kernel/scripts/isp/gen-compander.py --lib out/air-gather/vendor-root/usr/lib/libmpp_service.so \\
+    kernel/scripts/isp/gen-compander.py \\
+        --lib out/air-gather/vendor-root/usr/lib/libmpp_service.so \\
         > overlay/drivers/media/artosyn/vendor-tables/ar-isp-compander.h
 """
 

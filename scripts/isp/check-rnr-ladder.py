@@ -101,6 +101,7 @@ def rnr_from_blob(blob: bytes, gain_q16: int) -> list[int]:
         lo, hi = (struct.unpack_from("<I", blob, PAYLOAD + band * STRIDE +
                                      (col + k) * 4)[0]
                   for col in (LO_WORD, HI_WORD))
+
         if t_q24:
             prev = PAYLOAD + (band - 1) * STRIDE
             lo = blend(struct.unpack_from("<I", blob, prev + (LO_WORD + k) * 4)[0],
@@ -141,6 +142,7 @@ def main() -> int:
     if not hits:
         sys.exit(f"no abscissa in {VENDOR_WINDOW} reproduces "
                  f"{VENDOR_REG:#010x}")
+
     print(f"abscissa {hits[0]:.3f}..{hits[-1]:.3f} -> {VENDOR_REG:#010x} x{REGS}, "
           f"the vendor's live bank")
 

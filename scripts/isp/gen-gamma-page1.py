@@ -18,7 +18,8 @@ lives in ar-isp-codec.h and a curve is reviewable where a blob is not.
 The library is proprietary and not in the repository; supply it with --lib. The generated
 header is checked in, so this script is rerun only if the vendor library changes.
 
-    kernel/scripts/isp/gen-gamma-page1.py --lib out/air-gather/vendor-root/usr/lib/libmpp_service.so \\
+    kernel/scripts/isp/gen-gamma-page1.py \\
+        --lib out/air-gather/vendor-root/usr/lib/libmpp_service.so \\
         > overlay/drivers/media/artosyn/vendor-tables/ar-isp-gamma-page1.h
 """
 

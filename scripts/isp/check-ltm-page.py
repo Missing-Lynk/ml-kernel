@@ -21,9 +21,9 @@ Captures and the vendor library are proprietary and are not in the repository.
 import argparse
 import struct
 import sys
+from collections.abc import Sequence
 
 import arlib
-from collections.abc import Sequence
 
 TILES = 64
 SAMPLES = 128
@@ -41,6 +41,7 @@ def curves(data: bytes, count: int) -> list[tuple[int, ...]]:
     for tile in range(count):
         base = tile * STRIDE
         out.append(struct.unpack_from(f"<{SAMPLES}H", data, base))
+
     return out
 
 
@@ -52,8 +53,10 @@ def check_page(data: bytes) -> list[tuple[int, ...]]:
     for tile, curve in enumerate(seen):
         if curve[0] != 0:
             sys.exit(f"tile {tile}: starts at {curve[0]}, expected 0")
-        if not all(b >= a for a, b in zip(curve, curve[1:])):
+
+        if not all(b >= a for a, b in zip(curve, curve[1:], strict=False)):
             sys.exit(f"tile {tile}: curve is not monotonic")
+
         if not SAMPLE_MAX * 0.85 < curve[-1] <= SAMPLE_MAX:
             sys.exit(f"tile {tile}: ends at {curve[-1]}, outside the 10-bit top")
 
@@ -64,7 +67,7 @@ def check_page(data: bytes) -> list[tuple[int, ...]]:
     # or the geometry is wrong and 0x4000 is not the real extent.
     if len(data) >= PAGE_SIZE + STRIDE:
         past = curves(data[PAGE_SIZE:], 1)[0]
-        monotonic = all(b >= a for a, b in zip(past, past[1:]))
+        monotonic = all(b >= a for a, b in zip(past, past[1:], strict=False))
         if past[0] == 0 and monotonic:
             sys.exit(f"a {TILES + 1}th curve follows: page is larger than {PAGE_SIZE:#x}")
 
@@ -72,6 +75,7 @@ def check_page(data: bytes) -> list[tuple[int, ...]]:
           f"{PAGE_SIZE:#x} bytes, all monotonic 0 -> "
           f"{min(c[-1] for c in seen)}..{max(c[-1] for c in seen)}")
     print(f"      content stops at {PAGE_SIZE:#x}; no further curve follows")
+
     return seen
 
 
@@ -84,10 +88,10 @@ def check_template(lib: bytes, seen: Sequence[tuple[int, ...]]) -> None:
     # and one starts at 1, so this allows a small offset where the page check,
     # which every captured tile satisfies exactly, does not.
     for tile, curve in enumerate(tpl):
-        if curve[0] > 4 or not all(b >= a for a, b in zip(curve, curve[1:])):
+        if curve[0] > 4 or not all(b >= a for a, b in zip(curve, curve[1:], strict=False)):
             sys.exit(f"template tile {tile}: not a monotonic curve from zero")
 
-    equal = sum(1 for a, b in zip(template, bytes(seen_flat(seen))) if a == b)
+    equal = sum(1 for a, b in zip(template, bytes(seen_flat(seen)), strict=False) if a == b)
     print(f"template entry 40 ({TEMPLATE_VMA:#x}): {tiles} tiles of the same shape, "
           f"{TEMPLATE_LEN:#x} bytes, a quarter of the page")
     print(f"      shares {equal} of {TEMPLATE_LEN} bytes with the captured page "
@@ -98,6 +102,7 @@ def seen_flat(seen: Sequence[tuple[int, ...]]) -> bytearray:
     out = bytearray()
     for curve in seen:
         out += struct.pack(f"<{SAMPLES}H", *curve)
+
     return out
 
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Diff two ISP register sweeps and classify every difference.
+"""
+Diff two ISP register sweeps and classify every difference.
 
 The sweeps in out/au-snapshot are a sequence of windows, each introduced by a
 "--- <block> +0x<base> (<n> words) ---" header followed by rows whose offset is
@@ -46,20 +47,49 @@ lms is 20 registers wide and measured off, so a large block of statistics
 registers was being read as a gain-keyed image stage.
 """
 BANKS = [
-    (0x8600, "ir_lms_horz"), (0x8400, "ir_rnr"),
-    (0x7600, "acm"), (0x7400, "af_stats"), (0x7278, "ir_gtm"),
-    (0x7264, "lms"), (0x7230, "qgg"), (0x7200, "nuc_dpc"),
-    (0x6C00, "awbs_stats"), (0x64C8, "rro_face_stats"), (0x6400, "rro_stats"),
-    (0x6000, "raw_hist_stats"), (0x5C00, "rgb_hist_stats"), (0x5800, "lut3d"),
-    (0x5400, "rgb_max_stats"), (0x5000, "wb"), (0x4C00, "lsc"),
-    (0x4834, "cm"), (0x4800, "cm2"), (0x4000, "raw_3dnr"),
-    (0x3CC8, "lnr"), (0x3C64, "cnf"), (0x3C30, "binning"), (0x3C00, "rgb2yuv"),
-    (0x3900, "derolling_stats"), (0x3800, "ccm2"), (0x3400, "ccm1"),
-    (0x3000, "drc"), (0x2E00, "de3d"), (0x2870, "ltm_v1"), (0x2800, "ltm"),
-    (0x2400, "gib"), (0x1FFC, "hdr_lsc"), (0x1F98, "hdr"),
-    (0x1F40, "hdr_rro_face_stats"), (0x1E44, "hdr_awbs_stats"),
-    (0x1DD0, "hdr_lsc"), (0x1D78, "hdr_rro_1_stats"), (0x1D20, "hdr_rro_0_stats"),
-    (0x1C00, "hdr"), (0x1800, "rnr"), (0x0C00, "dpc"), (0x0800, "cfa"),
+    (0x8600, "ir_lms_horz"),
+    (0x8400, "ir_rnr"),
+    (0x7600, "acm"),
+    (0x7400, "af_stats"),
+    (0x7278, "ir_gtm"),
+    (0x7264, "lms"),
+    (0x7230, "qgg"),
+    (0x7200, "nuc_dpc"),
+    (0x6C00, "awbs_stats"),
+    (0x64C8, "rro_face_stats"),
+    (0x6400, "rro_stats"),
+    (0x6000, "raw_hist_stats"),
+    (0x5C00, "rgb_hist_stats"),
+    (0x5800, "lut3d"),
+    (0x5400, "rgb_max_stats"),
+    (0x5000, "wb"),
+    (0x4C00, "lsc"),
+    (0x4834, "cm"),
+    (0x4800, "cm2"),
+    (0x4000, "raw_3dnr"),
+    (0x3CC8, "lnr"),
+    (0x3C64, "cnf"),
+    (0x3C30, "binning"),
+    (0x3C00, "rgb2yuv"),
+    (0x3900, "derolling_stats"),
+    (0x3800, "ccm2"),
+    (0x3400, "ccm1"),
+    (0x3000, "drc"),
+    (0x2E00, "de3d"),
+    (0x2870, "ltm_v1"),
+    (0x2800, "ltm"),
+    (0x2400, "gib"),
+    (0x1FFC, "hdr_lsc"),
+    (0x1F98, "hdr"),
+    (0x1F40, "hdr_rro_face_stats"),
+    (0x1E44, "hdr_awbs_stats"),
+    (0x1DD0, "hdr_lsc"),
+    (0x1D78, "hdr_rro_1_stats"),
+    (0x1D20, "hdr_rro_0_stats"),
+    (0x1C00, "hdr"),
+    (0x1800, "rnr"),
+    (0x0C00, "dpc"),
+    (0x0800, "cfa"),
     (0x0000, "base"),
 ]
 
@@ -77,35 +107,42 @@ def bank(off: int) -> str:
     for base, name in BANKS:
         if off >= base:
             return name
+
     return "?"
 
 
 def load_sweep(path: str) -> dict[tuple[str, int], int]:
     out, blk, wbase = {}, None, 0
-    for line in open(path):
-        m = HDR.match(line)
-        if m:
-            blk, wbase = m.group(1), int(m.group(2), 16)
-            continue
-        m = ROW.match(line)
-        if m and blk:
-            base = wbase + int(m.group(1), 16)
-            for i, word in enumerate(m.group(2).split()):
-                out[(blk, base + i * 4)] = int(word, 16)
+    with open(path) as sweep:
+        for line in sweep:
+            m = HDR.match(line)
+            if m:
+                blk, wbase = m.group(1), int(m.group(2), 16)
+                continue
+
+            m = ROW.match(line)
+            if m and blk:
+                base = wbase + int(m.group(1), 16)
+                for i, word in enumerate(m.group(2).split()):
+                    out[(blk, base + i * 4)] = int(word, 16)
+
     return out
 
 
 def load_tables(path: str) -> dict[str, list[tuple[int, int]]]:
     arrays, cur = {}, None
-    for line in open(path):
-        m = ARR.match(line)
-        if m:
-            cur = m.group(1)
-            arrays[cur] = []
-            continue
-        m = ENT.match(line)
-        if m and cur:
-            arrays[cur].append((int(m.group(1), 16), int(m.group(2), 16)))
+    with open(path) as header:
+        for line in header:
+            m = ARR.match(line)
+            if m:
+                cur = m.group(1)
+                arrays[cur] = []
+                continue
+
+            m = ENT.match(line)
+            if m and cur:
+                arrays[cur].append((int(m.group(1), 16), int(m.group(2), 16)))
+
     return arrays
 
 
@@ -113,10 +150,13 @@ def classify(off: int, vendor: int, ours: int, tail: dict[int, int],
              trim: dict[int, int]) -> str:
     if (vendor >> 24) in (0x2A, 0x2B):
         return "C"
+
     if tail.get(off) == vendor or trim.get(off) == vendor:
         return "A"
+
     if tail.get(off) == ours or trim.get(off) == ours:
         return "B"
+
     return "D"
 
 
@@ -124,7 +164,9 @@ def main() -> int:
     show_all = "--all" in sys.argv
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     if len(args) != 2:
-        print(__doc__)
+        # The docstring opens on the line after its quotes, so the usage banner would
+        # start with a blank line.
+        print(__doc__.lstrip("\n"))
         return 1
 
     vend, ours = load_sweep(args[0]), load_sweep(args[1])
@@ -148,6 +190,7 @@ def main() -> int:
     for (blk, off), va, vb in diff:
         if blk != "isp":
             continue
+
         groups[classify(off, va, vb, tail, trim)].append((off, va, vb))
 
     for name in "ABCD":
@@ -163,6 +206,7 @@ def main() -> int:
                 tag = "  stats" if b in STATS else ""
                 print(f"    0x{off:04x} {b:19s} "
                       f"vendor {va:08x}  ours {vb:08x}{tag}")
+
     return 0
 
 

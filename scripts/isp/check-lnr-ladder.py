@@ -44,12 +44,16 @@ def f32_q16(bits: int) -> int:
 
     if bits & 0x80000000:
         return 0
+
     if shift >= 32:
         return 0
+
     if shift < -8:
         return 0xFFFFFFFF
+
     if shift <= 0:
         return mant << -shift
+
     return mant >> shift
 
 
@@ -175,15 +179,19 @@ def read_capture(path: str) -> list[int]:
             if line.startswith("--- "):
                 in_lnr = line.startswith("--- isp lnr 0x3cc8")
                 continue
+
             if not in_lnr:
                 continue
+
             match = line_re.match(line.strip())
             if not match:
                 continue
+
             regs.extend(int(v, 16) for v in match.group(1).split())
 
     if len(regs) < REGS:
         sys.exit(f"{path}: only {len(regs)} lnr words")
+
     return regs[:REGS]
 
 
@@ -207,16 +215,18 @@ def main() -> int:
         predicted, band, t_q24 = lnr_from_blob(blob, measured, int(gain * 65536))
         misses = []
 
-        for i, (want, got) in enumerate(zip(measured, predicted)):
+        for i, (want, got) in enumerate(zip(measured, predicted, strict=True)):
             reg = BANK + i * 4
             if reg in SKIP:
                 continue
+
             if want != got:
                 misses.append((reg, want, got))
 
         if misses:
             for reg, want, got in misses:
                 print(f"{name}: {reg:#06x} measured {want:#010x} predicted {got:#010x}")
+
             sys.exit(f"{name}: {len(misses)} lnr mismatches")
 
         print(f"{name:6s} gain {gain:.5f} band {band - 1},{band} "

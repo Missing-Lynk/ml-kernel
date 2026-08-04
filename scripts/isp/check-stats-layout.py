@@ -59,14 +59,17 @@ def check_rro(name: str, data: bytes) -> int:
 
         if len(set(count_block)) != 1:
             sys.exit(f"{name} column {col}: count block is not constant")
+
         count = count_block[0]
         if not count:
             sys.exit(f"{name} column {col}: zero pixel count")
+
         counts.append(count)
         sums.extend(sum_block)
 
     if len(set(counts)) != 1:
         sys.exit(f"{name}: per-column counts differ: {sorted(set(counts))}")
+
     count = counts[0]
 
     if len(sums) != RRO_COLS * RRO_ROWS * RRO_CHANNELS:
@@ -82,6 +85,7 @@ def check_rro(name: str, data: bytes) -> int:
     for ch in range(RRO_CHANNELS):
         lane = sums[ch::RRO_CHANNELS]
         means.append(sum(lane) / len(lane) / count)
+
     green_gap = abs(means[1] - means[2])
     outer_gap = abs(means[0] - means[3])
     if green_gap >= outer_gap:
@@ -105,11 +109,14 @@ def check_hist(name: str, data: bytes) -> None:
 
     if totals[3]:
         sys.exit(f"{name}: lane 3 should be unused, sums to {totals[3]}")
+
     if sum(totals) != pixels:
         sys.exit(f"{name}: bins sum to {sum(totals)}, frame has {pixels}")
 
+    # Three expectations against HIST_LANES totals: lane 3 carries no colour and is
+    # required to be zero above, so the pairing stops at the three populated lanes.
     expected = (pixels // 4, pixels // 2, pixels // 4)
-    for lane, (got, want) in enumerate(zip(totals, expected)):
+    for lane, (got, want) in enumerate(zip(totals, expected, strict=False)):
         if got != want:
             sys.exit(f"{name}: lane {lane} sums to {got}, Bayer expects {want}")
 

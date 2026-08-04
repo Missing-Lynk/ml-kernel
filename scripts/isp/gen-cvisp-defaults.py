@@ -83,8 +83,8 @@ def split_at_enable(writes: Sequence[tuple[int, int]]) -> int:
         if writes[i] == (CVISP_CONTROL, CVISP_ENABLE_DONE):
             return i + 1
 
-    sys.exit("no output-enable write (0x%04x = 0x%08x) in the trace"
-             % (CVISP_CONTROL, CVISP_ENABLE_DONE))
+    sys.exit(f"no output-enable write (0x{CVISP_CONTROL:04x} = "
+             f"0x{CVISP_ENABLE_DONE:08x}) in the trace")
 
 
 def collapse(writes: Sequence[tuple[int, int]]) -> list[tuple[int, int]]:
@@ -112,13 +112,16 @@ def extract_ring(steady: Sequence[tuple[int, int]]) -> list[tuple[int, ...]]:
     for off, val in steady:
         if off not in CVISP_PLANE:
             continue
+
         pending[off] = val
         if len(pending) == len(CVISP_PLANE):
             triplet = tuple(pending[plane] for plane in CVISP_PLANE)
             if triplet not in seen:
                 seen.add(triplet)
                 sets.append(triplet)
+
             pending = {}
+
     return sets
 
 

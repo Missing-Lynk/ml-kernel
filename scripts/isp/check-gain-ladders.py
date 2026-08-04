@@ -86,10 +86,12 @@ def read_trace(path: str) -> dict[int, list[tuple[int, int]]]:
             m = pat.search(line)
             if not m:
                 continue
+
             index += 1
             off = int(m.group(1), 16) - ISP_BASE
             if 0 <= off < 0x10000:
                 seq.setdefault(off, []).append((index, int(m.group(2), 16)))
+
     return seq
 
 
@@ -106,10 +108,13 @@ def entries(blob: bytes, base: int, stride: int) -> list[tuple[int, ...]]:
         off = base + len(out) * stride
         if off + stride > len(blob):
             break
+
         row = struct.unpack_from(f"<{stride // 4}i", blob, off)
         if not any(row):
             break
+
         out.append(row)
+
     return out
 
 
@@ -124,6 +129,7 @@ def busiest(seq: dict[int, list[tuple[int, int]]], lo: int,
               and len({v for _, v in seq[o]}) > 1]
     if not moving:
         return None
+
     return max(moving, key=lambda o: len({v for _, v in seq[o]}))
 
 
@@ -135,6 +141,7 @@ def main() -> int:
 
     with open(args.tuning, "rb") as handle:
         blob = handle.read()
+
     seq = read_trace(args.trace)
 
     for name, base, stride, _, _ in TABLES:
@@ -152,9 +159,11 @@ def main() -> int:
             v = column(blob, base, stride, c, len(rows))
             if len(set(v)) < 3:
                 continue
-            up = all(a <= b for a, b in zip(v, v[1:]))
-            down = all(a >= b for a, b in zip(v, v[1:]))
+
+            up = all(a <= b for a, b in zip(v, v[1:], strict=False))
+            down = all(a >= b for a, b in zip(v, v[1:], strict=False))
             ladders += up or down
+
         if not ladders:
             sys.exit(f"{name}: no monotone column at {base:#x}, not a ladder")
 
@@ -184,11 +193,14 @@ def main() -> int:
             # The placeholder zero before the first real write is not a value.
             path = [v for i, v in enumerate(vals)
                     if v and (i == 0 or v != vals[i - 1])]
+
             if path[:2] != col_vals[:2]:
                 sys.exit(f"rnr: {reg:#x} {name} half starts {path[:2]}, "
                          f"expected {col_vals[:2]}")
+
             if max(path) > max(col_vals) or min(path) < min(col_vals):
                 sys.exit(f"rnr: {reg:#x} {name} half leaves the ladder range")
+
     print(f"rnr   {len(RNR_REGS)} registers, both halves start on entries 0 "
           f"and 1 and stay in range")
 
@@ -201,10 +213,13 @@ def main() -> int:
     if (path[0], path[-1]) != ORACLE_ENDS:
         sys.exit(f"{ORACLE_REG:#x}: lane runs {path[0]}..{path[-1]}, "
                  f"expected {ORACLE_ENDS}")
+
     if not all(v in col for v in ORACLE_ENDS):
         sys.exit(f"{ORACLE_REG:#x}: endpoints are not both entry values")
+
     if min(path) < min(ORACLE_ENDS) or max(path) > max(ORACLE_ENDS):
         sys.exit(f"{ORACLE_REG:#x}: traced values leave the entry interval")
+
     print(f"de3d  {ORACLE_REG:#06x} lane runs {path[0]}..{path[-1]} through "
           f"{len(path) - 2} interpolated values, both ends in column "
           f"{ORACLE_COL}")
@@ -215,6 +230,7 @@ def main() -> int:
         reg = busiest(seq, lo, hi)
         if reg is None:
             sys.exit(f"{name}: no moving register")
+
         events[name] = changes(seq[reg])
         print(f"{name:5s} {reg:#06x} steps {len(events[name])} times")
 
@@ -225,9 +241,10 @@ def main() -> int:
         if paired < len(other) - 1:
             sys.exit(f"{name}: only {paired} of {len(other)} steps pair with "
                      f"rnr, so they are not on one input")
-    print("      rnr, lnr and de3d step together on the same events")
 
+    print("      rnr, lnr and de3d step together on the same events")
     print("\ngain ladders agree with plans/au-isp-module-inventory.md")
+
     return 0
 
 

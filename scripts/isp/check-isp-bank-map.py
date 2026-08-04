@@ -135,7 +135,8 @@ def attach_handler(lines: dict[int, str], creat: int) -> int | None:
 
 def banks(lines: dict[int, str], attach: int,
           limit: int) -> list[tuple[int, int]]:
-    """(block, bank) pairs, one per ar_dev_pa2va call that gets an offset.
+    """
+    (block, bank) pairs, one per ar_dev_pa2va call that gets an offset.
 
     The block is chosen before the call by adding a selector to the physical
     base, and the bank is added to the translated result after it. A module can
@@ -271,8 +272,10 @@ def main() -> int:
 
         stray = sorted(o for o in offsets if o >= order[0] and
                        not any(b <= o for b in order))
+
         if stray:
             sys.exit(f"written registers in no bank: {stray[:8]}")
+
         print("      every bank's written span stops before the next bank")
 
     print("ISP bank map agrees with plans/au-isp-module-inventory.md")

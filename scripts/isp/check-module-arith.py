@@ -119,6 +119,7 @@ def disassemble(lib: str) -> dict[int, str]:
         m = LINE_RE.match(line)
         if m:
             code[int(m.group(1), 16)] = m.group(2).strip()
+
     if not code:
         sys.exit(f"{lib}: no instructions disassembled")
 
@@ -174,7 +175,8 @@ RET_RE = re.compile(r"^b\t[0-9a-f]+")
 
 
 def is_start(code: dict[int, str], exported: set[int], addr: int) -> bool:
-    """A function begins after a ret or an unconditional branch.
+    """
+    A function begins after a ret or an unconditional branch.
 
     Frameless leaves have no prologue to key on, so the preceding instruction is
     what identifies them.
@@ -219,11 +221,12 @@ def recover(code: dict[int, str], exported: set[int],
     An address already covered by an extent is reached anyway, so only one that
     lies outside every span is a callback that changes what the module is.
     """
-    seeds, stops = list(handlers_found), sorted(exported)
+    seeds = list(handlers_found)
     for _ in range(8):
         ext = extents(seeds, sorted(exported | set(seeds)))
         outside = {a for a in materialised(code, ext)
                    if not any(s <= a < e for s, e in ext.items())}
+
         fresh = {a for a in outside if is_start(code, exported, a)}
         if not fresh:
             return sorted(seeds), len(outside - fresh)
@@ -255,6 +258,7 @@ def main() -> int:
         m = CREAT_RE.match(name)
         if m:
             modules[m.group(1)] = addr
+
     if not modules:
         sys.exit("no isp_sub_*_creat symbols: is the library stripped?")
 
@@ -275,6 +279,7 @@ def main() -> int:
         block = module_body(code, extents(seeds, sorted(exported | set(seeds))))
         if uncov:
             short.append((name, uncov))
+
         aec = sum("is_aec_trigger_compute" in i for i in block)
         awb = sum("is_awb_trigger_compute" in i for i in block)
         tune = sum("isp_get_tuning_manager" in i for i in block)
