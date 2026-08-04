@@ -36,7 +36,7 @@ The library and tuning file are proprietary and are not in the repository.
 
     kernel/scripts/isp/gen-ccm.py --lib out/air-gather/vendor-root/usr/lib/libmpp_service.so \\
         --blob out/air-gather/camera/nt99235_tuning_preview_fpv.bin \\
-        > overlay/drivers/media/artosyn/ar-isp-ccm-init.h
+        > overlay/drivers/media/artosyn/vendor-tables/ar-isp-ccm-init.h
 """
 
 import argparse

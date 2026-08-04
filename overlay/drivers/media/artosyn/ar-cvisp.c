@@ -32,7 +32,7 @@
  *  - A reset line. No CVISP reset write appears in the trace and no reset leaf
  *    has been identified, so none is declared.
  *
- * Configuration provenance is in ar-cvisp-defaults.h. See
+ * Configuration provenance is in vendor-tables/ar-cvisp-defaults.h. See
  * ../../../../docs/camera-stack.md.
  */
 
@@ -53,7 +53,7 @@
 #include <media/videobuf2-dma-contig.h>
 #include <media/videobuf2-v4l2.h>
 
-#include "ar-cvisp-defaults.h"
+#include "vendor-tables/ar-cvisp-defaults.h"
 #include "ar-isp-blc.h"
 
 /*

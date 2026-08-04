@@ -44,7 +44,8 @@
  * data, which matches the bank count in the selector block.
  *
  * ccm2 has its own gate at 0x2595c; it reads 0 in this blob, so ccm2 keeps its
- * static init block (carried in ar-isp-ccm-init.h) for the whole session.
+ * static init block (carried in vendor-tables/ar-isp-ccm-init.h) for the whole
+ * session.
  */
 #define AR_ISP_CCM_BLOB_GATE		0x253fc
 #define AR_ISP_CCM_BLOB_LADDER		0x25438

@@ -19,7 +19,7 @@ The library is proprietary and not in the repository; supply it with --lib. The 
 header is checked in, so this script is rerun only if the vendor library changes.
 
     kernel/scripts/isp/gen-compander.py --lib out/air-gather/vendor-root/usr/lib/libmpp_service.so \\
-        > overlay/drivers/media/artosyn/ar-isp-compander.h
+        > overlay/drivers/media/artosyn/vendor-tables/ar-isp-compander.h
 """
 
 import argparse

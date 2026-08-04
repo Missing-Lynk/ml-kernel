@@ -22,7 +22,7 @@ whether that ordering is required is not established, so the two tables stay sep
 
 Usage:
     kernel/scripts/isp/gen-cvisp-defaults.py --trace out/au-mmiotrace/wide-sweep.log \\
-        > kernel/overlay/drivers/media/artosyn/ar-cvisp-defaults.h
+        > kernel/overlay/drivers/media/artosyn/vendor-tables/ar-cvisp-defaults.h
 """
 
 import argparse

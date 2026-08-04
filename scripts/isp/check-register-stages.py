@@ -40,7 +40,7 @@ from collections.abc import Sequence
 
 ISP_BASE = 0x08C00000
 CVISP_BASE = 0x08E00000
-DEFAULTS = "overlay/drivers/media/artosyn/ar-isp-defaults.h"
+DEFAULTS = "overlay/drivers/media/artosyn/vendor-tables/ar-isp-defaults.h"
 
 # Bank spans from plans/au-isp-module-inventory.md. The end is the next mapped
 # bank on the same block, which is where the trace's contiguous span for this

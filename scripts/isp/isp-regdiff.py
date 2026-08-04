@@ -32,7 +32,7 @@ ROW = re.compile(r"^\+0x([0-9a-f]+): (.*)$")
 ENT = re.compile(r"^\s*\{\s*0x([0-9a-f]+),\s*0x([0-9a-f]+)\s*\},")
 ARR = re.compile(r"^static const struct ar_isp_reg (\w+)\[\]")
 
-DEFAULTS = "overlay/drivers/media/artosyn/ar-isp-defaults.h"
+DEFAULTS = "overlay/drivers/media/artosyn/vendor-tables/ar-isp-defaults.h"
 PREFIX = 1475
 
 """Bank bases, from each module's attach handler (the ar_dev_pa2va offset), not

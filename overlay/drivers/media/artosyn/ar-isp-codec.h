@@ -76,7 +76,8 @@
 /*
  * Compander: a 0x7800 page, mostly structure. Two spans carry content, a 0x700
  * span is zero, and everything from 0x1800 is one 16-byte unity record repeated.
- * The carried spans are in ar-isp-compander.h; the rest is rebuilt below.
+ * The carried spans are in vendor-tables/ar-isp-compander.h; the rest is
+ * rebuilt below.
  */
 #define AR_ISP_COMPANDER_SIZE		0x7800
 #define AR_ISP_COMPANDER_HEAD		0x900
@@ -210,7 +211,7 @@ static inline void ar_isp_drc_pack_bank(u8 *dst, const u32 *samples)
  * Build the dynamic half of the DRC page from the tuning file.
  *
  * Only the first 0x1000 of the 0x2000 page. The second half is a constant the
- * vendor never recomputes; it is in ar-isp-drc-tail.h.
+ * vendor never recomputes; it is in vendor-tables/ar-isp-drc-tail.h.
  *
  * This is the neutral-strength form. The vendor blends the source against one of
  * two service tables when the user DRC strength moves off 50, which is a lever

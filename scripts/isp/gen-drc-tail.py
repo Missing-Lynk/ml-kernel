@@ -19,7 +19,7 @@ generated header is checked in, so this script is rerun only if the vendor
 library changes.
 
     kernel/scripts/isp/gen-drc-tail.py --lib out/air-gather/vendor-root/usr/lib/libmpp_service.so \\
-        > overlay/drivers/media/artosyn/ar-isp-drc-tail.h
+        > overlay/drivers/media/artosyn/vendor-tables/ar-isp-drc-tail.h
 """
 
 import argparse

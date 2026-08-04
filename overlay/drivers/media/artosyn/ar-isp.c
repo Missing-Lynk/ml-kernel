@@ -42,10 +42,10 @@
  *  - Auto-exposure itself. The statistics are readable; nothing consumes them.
  *  - Buffer allocation, geometry other than 1920x1080, and any V4L2 interface.
  *
- * Configuration provenance is in ar-isp-defaults.h. Two thirds of it comes
- * from static per-submodule default blocks in the vendor library and one third
- * from the write trace; applying both reproduces the vendor's final register
- * state exactly. See ../../../../docs/camera-stack.md.
+ * Configuration provenance is in vendor-tables/ar-isp-defaults.h. Two thirds of
+ * it comes from static per-submodule default blocks in the vendor library and
+ * one third from the write trace; applying both reproduces the vendor's final
+ * register state exactly. See ../../../../docs/camera-stack.md.
  */
 
 #include <linux/clk.h>
@@ -60,16 +60,16 @@
 #include <linux/of_reserved_mem.h>
 #include <linux/platform_device.h>
 
-#include "ar-isp-defaults.h"
+#include "vendor-tables/ar-isp-defaults.h"
 #include "ar-isp-codec.h"
 #include "ar-camera-hook.h"
 #include "ar-isp-dpc.h"
 #include "ar-isp-stats.h"
-#include "ar-isp-drc-tail.h"
-#include "ar-isp-gamma-page1.h"
-#include "ar-isp-compander.h"
+#include "vendor-tables/ar-isp-drc-tail.h"
+#include "vendor-tables/ar-isp-gamma-page1.h"
+#include "vendor-tables/ar-isp-compander.h"
 #include "ar-isp-colour.h"
-#include "ar-isp-ccm-init.h"
+#include "vendor-tables/ar-isp-ccm-init.h"
 #include "ar-isp-ladder.h"
 
 /*
