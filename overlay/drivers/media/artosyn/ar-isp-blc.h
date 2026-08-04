@@ -2,17 +2,15 @@
 /*
  * ar-isp-blc.h - black level correction on CVISP bank 0x4200.
  *
- * BLC is a register file, not a DMA table. Sixteen registers are filled by a
- * verbatim 64-byte copy of a structure the vendor builds in DRAM, so the whole
- * stage is one memcpy once its 64 bytes are computed.
+ * Sixteen registers loaded by a verbatim 64-byte copy: one memcpy once the 64
+ * bytes are computed.
  *
- * The payload comes from the tuning file, not from a library template. Five
- * calibration entries hold per-Bayer-channel values, and a ladder of float
- * pairs blends between two adjacent entries by the current sensor gain. The
- * first group of four is shifted left by 6 on its way to the registers and the
- * second group is not.
+ * The payload comes from the tuning file. Five calibration entries hold
+ * per-Bayer-channel values; a ladder of float pairs blends two adjacent
+ * entries by the current sensor gain. The first group of four is shifted left
+ * by 6 into the registers, the second is not.
  *
- * The proof is kernel/scripts/isp/check-blc.py.
+ * Proof: kernel/scripts/isp/check-blc.py.
  */
 
 #ifndef AR_ISP_BLC_H
@@ -20,19 +18,16 @@
 
 #include "ar-isp-bytes.h"
 
-/*
- * The bank lives on the CVISP block, which the vendor reaches by adding
- * 0x200000 to the ISP physical base before translating it, then 0x4200 after.
- */
+/* The bank is on CVISP: ISP physical base + 0x200000, then + 0x4200. */
 #define AR_ISP_CVISP_OFFSET		0x200000
 #define AR_ISP_BLC_BANK			0x4200
 #define AR_ISP_BLC_BLOCK		0x40
 
 /*
- * Register block, four lanes of four u32. Lane 0 takes the first group of the
- * blended entry shifted left by 6, lane 2 takes the second group unshifted.
- * Lanes 1 and 3 mirror them on the vendor's single-exposure capture and are
- * filled by a path outside this stage.
+ * Four lanes of four u32. Lane 0 holds the blended entry's first group shifted
+ * left by 6, lane 2 its second group unshifted. Lanes 1 and 3 hold the same
+ * values on the vendor's single-exposure capture, written there by another
+ * stage.
  */
 #define AR_ISP_BLC_REG_SCALE		0x00
 #define AR_ISP_BLC_REG_SCALE_ALT	0x10
@@ -40,13 +35,13 @@
 #define AR_ISP_BLC_REG_LEVEL_ALT	0x30
 #define AR_ISP_BLC_LANE			4
 
-/* The first group is stored at this shift; the second is stored as it is. */
+/* Applied to the first group only. */
 #define AR_ISP_BLC_SCALE_SHIFT		6
 
 /*
- * Tuning file layout. The entry table is five 32-byte entries, each two groups
- * of four u32 in Bayer channel order. The ladder is five pairs of float32 at an
- * 8-byte stride, one pair per entry, and selects and blends the entries.
+ * Tuning file layout. Five 32-byte entries, each two groups of four u32 in
+ * Bayer channel order. The ladder is five float32 pairs at an 8-byte stride,
+ * one per entry, and selects and blends them.
  */
 #define AR_ISP_BLC_BLOB_LADDER		0x34
 #define AR_ISP_BLC_BLOB_TABLE		0xb4
@@ -62,44 +57,38 @@ struct ar_isp_blc_entry {
 static inline void ar_isp_blc_entry(const u8 *blob, unsigned int index,
 				    struct ar_isp_blc_entry *out)
 {
-	const u8 *e = blob + AR_ISP_BLC_BLOB_TABLE +
-		      index * AR_ISP_BLC_ENTRY_SIZE;
-	unsigned int i;
+	const u8 *entry = blob + AR_ISP_BLC_BLOB_TABLE +
+			  index * AR_ISP_BLC_ENTRY_SIZE;
 
-	for (i = 0; i < AR_ISP_BLC_LANE; i++) {
-		out->scale[i] = ar_isp_get_le32(e + 4 * i);
-		out->level[i] = ar_isp_get_le32(e + AR_ISP_BLC_GROUP_OFF +
+	for (unsigned int i = 0; i < AR_ISP_BLC_LANE; i++) {
+		out->scale[i] = ar_isp_get_le32(entry + 4 * i);
+		out->level[i] = ar_isp_get_le32(entry + AR_ISP_BLC_GROUP_OFF +
 						4 * i);
 	}
 }
 
 /*
- * The vendor blends in float32 and converts with fcvtzu, which truncates
- * toward zero, so the fixed-point form has to truncate too. blend is the
- * weight of the low entry in Q16.
+ * blend is the low entry's weight in Q16. The vendor blends in float32 and
+ * converts with fcvtzu, which truncates toward zero, so this truncates too.
  */
 #define AR_ISP_BLC_BLEND_ONE		65536u
 
 static inline u32 ar_isp_blc_mix(u32 lo, u32 hi, u32 blend)
 {
-	u64 v = (u64)lo * blend + (u64)hi * (AR_ISP_BLC_BLEND_ONE - blend);
+	u64 sum = (u64)lo * blend + (u64)hi * (AR_ISP_BLC_BLEND_ONE - blend);
 
-	return (u32)(v / AR_ISP_BLC_BLEND_ONE);
+	return (u32)(sum / AR_ISP_BLC_BLEND_ONE);
 }
 
-/*
- * Fill the 64-byte block the bank is loaded from. Lanes 1 and 3 are written to
- * match lanes 0 and 2, which is what the vendor's single-exposure capture
- * holds.
+/* Fill the 64-byte block the bank is loaded from. Lanes 1 and 3 take the same
+ * values as lanes 0 and 2.
  */
 static inline void ar_isp_blc_fill(u8 *block,
 				   const struct ar_isp_blc_entry *lo,
 				   const struct ar_isp_blc_entry *hi,
 				   u32 blend)
 {
-	unsigned int i;
-
-	for (i = 0; i < AR_ISP_BLC_LANE; i++) {
+	for (unsigned int i = 0; i < AR_ISP_BLC_LANE; i++) {
 		u32 scale = ar_isp_blc_mix(lo->scale[i], hi->scale[i], blend);
 		u32 level = ar_isp_blc_mix(lo->level[i], hi->level[i], blend);
 
