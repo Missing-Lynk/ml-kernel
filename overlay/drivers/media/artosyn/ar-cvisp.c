@@ -487,12 +487,11 @@ static void ar_cvisp_blc_apply(struct ar_cvisp *cv)
 	u32 bound_lo, bound_hi, blend;
 	unsigned int i, sel = 0;
 	const u8 *ladder;
-	int ret;
 
 	if (!blc)
 		return;
 
-	ret = request_firmware(&fw, AR_CVISP_TUNING_FIRMWARE, cv->dev);
+	int ret = request_firmware(&fw, AR_CVISP_TUNING_FIRMWARE, cv->dev);
 	if (ret) {
 		dev_info(cv->dev, "blc: no %s (%d), leaving the replayed constants\n",
 			 AR_CVISP_TUNING_FIRMWARE, ret);
@@ -518,6 +517,7 @@ static void ar_cvisp_blc_apply(struct ar_cvisp *cv)
 	for (i = 0; i + 1 < AR_ISP_BLC_ENTRIES; i++) {
 		if (blc_gain < ar_cvisp_f32_to_u32(ar_isp_get_le32(ladder + i * 8 + 4)))
 			break;
+
 		sel = i;
 	}
 
@@ -593,12 +593,12 @@ static void ar_cvisp_configure(struct ar_cvisp *cv, bool late)
  */
 static int ar_cvisp_configure_set(void *data, u64 val)
 {
-	struct ar_cvisp *cv = data;
-
 	if (val != 1 && val != 2)
 		return -EINVAL;
 
+	struct ar_cvisp *cv = data;
 	ar_cvisp_configure(cv, val == 1);
+
 	return 0;
 }
 
@@ -652,7 +652,6 @@ DEFINE_DEBUGFS_ATTRIBUTE(ar_cvisp_queue_fops, ar_cvisp_queue_get,
 static int ar_cvisp_regs_show(struct seq_file *s, void *unused)
 {
 	struct ar_cvisp *cv = s->private;
-
 	for (unsigned int i = 0; i < ARRAY_SIZE(ar_cvisp_dump_regs); i++)
 		seq_printf(s, "%-12s 0x%04x 0x%08x\n", ar_cvisp_dump_regs[i].name,
 			   ar_cvisp_dump_regs[i].off,
@@ -1012,13 +1011,11 @@ static const struct v4l2_file_operations ar_cvisp_fops = {
 
 static int ar_cvisp_register_node(struct ar_cvisp *cv)
 {
-	struct vb2_queue *q = &cv->queue;
-	int ret;
-
-	ret = v4l2_device_register(cv->dev, &cv->v4l2_dev);
+	int ret = v4l2_device_register(cv->dev, &cv->v4l2_dev);
 	if (ret)
 		return ret;
 
+	struct vb2_queue *q = &cv->queue;
 	q->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 	q->io_modes = VB2_MMAP | VB2_DMABUF;
 	q->drv_priv = cv;
@@ -1079,7 +1076,6 @@ static int ar_cvisp_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct ar_cvisp *cv;
-	int ret;
 
 	/*
 	 * Capture buffers must come out of cvisp_cma, the no-map reservation the
@@ -1088,7 +1084,7 @@ static int ar_cvisp_probe(struct platform_device *pdev)
 	 * writeback can land over a frame. Without the pool vb2 would fall back
 	 * to the default CMA, which is ordinary kernel RAM.
 	 */
-	ret = of_reserved_mem_device_init(dev);
+	int ret = of_reserved_mem_device_init(dev);
 	if (ret)
 		dev_warn(dev,
 			 "no dedicated capture pool (%d); buffers may be unreachable\n",
@@ -1160,6 +1156,7 @@ static int ar_cvisp_probe(struct platform_device *pdev)
 		debugfs_remove_recursive(cv->debugfs);
 		if (cv->clk_asserted)
 			clk_disable_unprepare(cv->clk);
+
 		return dev_err_probe(dev, ret, "cannot register the video node\n");
 	}
 
