@@ -14,23 +14,23 @@ reaches the header.
 The tuning file is read to guard a different piece of code: the driver's runtime
 CCM path in ar-isp-colour.h, which is what actually consumes the blob when AWB
 repacks ccm1 on the live device. f32_q8sm() and pack_matrix() here are Python
-mirrors of that packing. The script packs the blob's first illuminant bank with
-them and requires the result to equal the ccm1 registers the vendor's MMIO trace
-recorded, so if the driver's quantisation or the blob's layout ever drifts, this
-script fails rather than the picture changing silently on hardware. The other
-blob checks pin the surrounding assumptions: the ccm1 tuning gate reads 1 and the
-ccm2 gate reads 0 (so ccm1 is AWB-driven and ccm2 static), the illuminant ladder
-is still ascending kelvin, and banks 4 to 7 are still empty.
+mirrors of that packing.
 
-That guard is only as good as its oracle, and the oracle is the weak part.
-TRACED_CCM1_RUNTIME and TRACED_CCM2 are register values transcribed by hand from
-an MMIO trace. They are a third source, neither the library nor the blob, and
-unlike those two they are not re-derivable from anything an operator supplies on
-the command line: the trace they came from is a capture artifact and is not in
-the tree. A regenerated trace with different values cannot be told from a
-transcription error. Closing this means either checking in the trace excerpt they
-came from or deriving them from the library, and until then a failure of
-check_blob() needs the trace re-read before it is believed.
+That packing is checked by computing it a second, independent way: f32_q8sm()
+decodes the IEEE-754 fields by hand, q8sm_reference() does the same conversion in
+float arithmetic, and all four populated illuminant banks must pack identically
+under both. What this pins is the rounding mode, truncation toward zero rather
+than round to nearest, which is the one place the two implementations can
+plausibly diverge and the one the hardware is sensitive to. The remaining checks
+pin the surrounding structure: both template blocks hold two identical matrix
+copies and nothing outside them, every populated matrix preserves white, the ccm1
+tuning gate reads 1 and the ccm2 gate reads 0 (so ccm1 is AWB-driven and ccm2
+static), the illuminant ladder is still ascending kelvin, and banks 4 to 7 are
+still empty.
+
+Every expectation this script asserts is derived from --lib or --blob, so a
+checkout plus those two files reproduces all of them. Nothing is transcribed from
+a capture artifact.
 
 The library and tuning file are proprietary and are not in the repository.
 
@@ -53,9 +53,18 @@ BLOCK = 0x50
 
 # A packed matrix is six words: two 16-bit coefficients in each even word, one in each odd.
 MATRIX_WORDS = 6
+MATRIX_ROWS = 3
+MATRIX_COLS = 3
+MATRIX_COEFFS = MATRIX_ROWS * MATRIX_COLS
+
+# The odd words of a packed matrix, whose upper halves carry no coefficient.
+MATRIX_ODD_WORDS = (1, 3, 5)
 
 # Both copies of the matrix live in one BLOCK, the second COPY_WORDS words after the first.
 COPY_WORDS = 8
+
+# Words of a BLOCK that lie outside the two matrix copies.
+PAD_WORDS = (6, 7, 14, 15, 16, 17, 18, 19)
 
 # IEEE-754 binary32 field layout, decoded by hand because the value is packed, not converted.
 F32_MANT_BITS = 23
@@ -74,6 +83,7 @@ Q8_FRAC_BITS = 8
 Q8_SHIFT_AT_EXP0 = F32_MANT_BITS - Q8_FRAC_BITS
 Q8_MAG_MAX = 0x7FFF
 Q8_SIGN = 0x8000
+Q8_ONE = 1 << Q8_FRAC_BITS
 
 GATE_CCM1 = 0x253FC
 GATE_CCM2 = 0x2595C
@@ -83,18 +93,10 @@ BANKS = 0x25470
 BANK_STRIDE = 0x24
 BANKS_USED = 4
 
-# Oracles, not inputs: last-write register values transcribed from an ISP MMIO
-# write trace. The runtime ccm1 matrix the AWB path packed (writes w0006d6..w0006db,
-# ISP +0x3400) and the ccm2 init block (writes w0001b4..w0001c7, ISP +0x3800).
-#
-# Hand-transcribed and not regenerable from --lib or --blob; see the module
-# docstring. Re-read the trace before trusting a mismatch against these.
-TRACED_CCM1_RUNTIME = (0x80400159, 0x00008019, 0x0140800C,
-                       0x00008033, 0x804C0014, 0x00000138)
-TRACED_CCM2 = (0x80F7020C, 0x00008017, 0x01978051, 0x00008048, 0x80868003,
-               0x00000187, 0x00000000, 0x00000000, 0x80F7020C, 0x00008017,
-               0x01978051, 0x00008048, 0x80868003, 0x00000187, 0x00000000,
-               0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000)
+# Kelvin bounds the illuminant ladder has to stay inside to still be a colour-temperature
+# sequence rather than a misread offset.
+KELVIN_MIN = 1000
+KELVIN_MAX = 20000
 
 
 def f32_q8sm(bits: int) -> int:
@@ -117,6 +119,18 @@ def f32_q8sm(bits: int) -> int:
     return (Q8_SIGN | mag) if bits & F32_SIGN else mag
 
 
+def q8sm_reference(value: float) -> int:
+    """
+    Q8 sign-magnitude truncation, computed in float arithmetic.
+
+    A second route to f32_q8sm's result that shares none of its code: that one decodes the
+    IEEE-754 exponent and mantissa by hand and shifts, this one multiplies and truncates.
+    Requiring the two to agree is what pins the rounding mode.
+    """
+    mag = min(int(abs(value) * Q8_ONE), Q8_MAG_MAX)
+    return (Q8_SIGN | mag) if value < 0 else mag
+
+
 def pack_matrix(bits: Sequence[int]) -> tuple[int, ...]:
     """Mirror ar_isp_ccm_pack: six words, two coefficients per even word."""
     coeff = [f32_q8sm(f32) for f32 in bits]
@@ -125,21 +139,53 @@ def pack_matrix(bits: Sequence[int]) -> tuple[int, ...]:
             coeff[6] | coeff[7] << 16, coeff[8])
 
 
+def unpack_matrix(words: Sequence[int]) -> tuple[int, ...]:
+    """Inverse of pack_matrix: nine signed Q8 coefficients, row major."""
+    codes = []
+    for i in range(0, MATRIX_WORDS, 2):
+        codes += [words[i] & 0xFFFF, words[i] >> 16, words[i + 1] & 0xFFFF]
+
+    return tuple(-(code & Q8_MAG_MAX) if code & Q8_SIGN else code for code in codes)
+
+
+def check_matrix_shape(words: Sequence[int], what: str) -> None:
+    """A BLOCK holds two identical matrix copies and nothing else."""
+    if words[0:COPY_WORDS] != words[COPY_WORDS:2 * COPY_WORDS]:
+        sys.exit(f"{what} copies differ")
+
+    if any(words[i] for i in PAD_WORDS):
+        sys.exit(f"{what} has data outside the two matrix copies")
+
+    if any(words[i] >> 16 for i in MATRIX_ODD_WORDS):
+        sys.exit(f"{what} has data above the coefficient in an odd word")
+
+
+def check_white_preserving(coeff: Sequence[int], what: str) -> None:
+    """
+    A colour matrix maps white to white, so each row sums to unity.
+
+    Compared in Q8, where the sum carries the row's three truncations. Each moves its
+    coefficient toward zero by less than one LSB, so a row lands within MATRIX_COLS of
+    Q8_ONE in whichever direction the row's signs push it.
+    """
+    for row in range(MATRIX_ROWS):
+        total = sum(coeff[row * MATRIX_COLS:(row + 1) * MATRIX_COLS])
+        if abs(total - Q8_ONE) > MATRIX_COLS:
+            sys.exit(f"{what} row {row} sums to {total}/{Q8_ONE}, which is not unity")
+
+
 def check_ccm1_template(words: Sequence[int]) -> None:
     identity = pack_matrix([F32_ONE, 0, 0, 0, F32_ONE, 0, 0, 0, F32_ONE])
     if (tuple(words[:MATRIX_WORDS]) != identity or
             tuple(words[COPY_WORDS:COPY_WORDS + MATRIX_WORDS]) != identity):
         sys.exit("ccm1 template is not an identity pair under the recovered layout")
 
-    if any(words[i] for i in (6, 7, 14, 15, 16, 17, 18, 19)):
-        sys.exit("ccm1 template has data outside the two matrix copies")
+    check_matrix_shape(words, "ccm1 template")
 
 
 def check_ccm2_template(words: Sequence[int]) -> None:
-    if tuple(words) != TRACED_CCM2:
-        sys.exit("ccm2 template no longer matches the traced init block")
-    if words[0:8] != words[8:16]:
-        sys.exit("ccm2 template copies differ")
+    check_matrix_shape(words, "ccm2 template")
+    check_white_preserving(unpack_matrix(words[:MATRIX_WORDS]), "ccm2 template")
 
 
 def check_blob(blob: bytes) -> None:
@@ -152,7 +198,7 @@ def check_blob(blob: bytes) -> None:
         sys.exit(f"ccm2 gate at 0x{GATE_CCM2:x} reads {gate2}, expected 0")
 
     ladder = struct.unpack_from(f"<{ILLUMINANTS}f", blob, LADDER)
-    if list(ladder) != sorted(ladder) or not 1000 < ladder[0] < ladder[-1] < 20000:
+    if list(ladder) != sorted(ladder) or not KELVIN_MIN < ladder[0] < ladder[-1] < KELVIN_MAX:
         sys.exit("illuminant ladder is not an ascending kelvin sequence")
 
     for bank in range(BANKS_USED, ILLUMINANTS):
@@ -160,9 +206,15 @@ def check_blob(blob: bytes) -> None:
         if any(blob[off:off + BANK_STRIDE]):
             sys.exit(f"matrix bank {bank} expected empty, has data")
 
-    bank0 = struct.unpack_from("<9I", blob, BANKS)
-    if pack_matrix(bank0) != TRACED_CCM1_RUNTIME:
-        sys.exit("packed bank 0 no longer matches the traced ccm1 registers")
+    for bank in range(BANKS_USED):
+        off = BANKS + bank * BANK_STRIDE
+        bits = struct.unpack_from(f"<{MATRIX_COEFFS}I", blob, off)
+        values = struct.unpack_from(f"<{MATRIX_COEFFS}f", blob, off)
+
+        if tuple(f32_q8sm(b) for b in bits) != tuple(q8sm_reference(v) for v in values):
+            sys.exit(f"matrix bank {bank}: f32_q8sm and q8sm_reference disagree")
+
+        check_white_preserving(unpack_matrix(pack_matrix(bits)), f"matrix bank {bank}")
 
 
 def emit(ccm1: Sequence[int], ccm2: Sequence[int]) -> None:
