@@ -403,7 +403,7 @@ The cold-boot dark frame is clean (see "The cold-boot dark-frame blobs"); the ed
 
 ### Gain-keyed stages: parity by derivation
 
-Three ISP stages are recomputed by the vendor from gain-band ladders in the tuning file: `rnr`, `lnr` and `de3d`. All three share one blob layout (a header of enable, interpolate, band count and abscissa selector; sixteen `[low, high]` float32 band slots; one payload record per band) and one law: inside a band the record applies verbatim, between bands the fields blend linearly with truncation toward zero. The driver implements all three in `ar-isp-ladder.h`, deriving every register from the tuning file at a caller-supplied abscissa (`rnr_gain`, `lnr_gain`, `de3d_gain`, Q8 module parameters until an AE loop produces the abscissa per frame). The proofs are `scripts/isp/check-rnr-ladder.py`, `check-lnr-ladder.py` and `check-de3d-ladder.py`: the same integer arithmetic in Python, refusing to pass unless every capture-covered register reproduces bit-exactly from the blob at both measured vendor operating points.
+Three ISP stages are recomputed by the vendor from gain-band ladders in the tuning file: `rnr`, `lnr` and `de3d`. All three share one blob layout (a header of enable, interpolate, band count and abscissa selector; sixteen `[low, high]` float32 band slots; one payload record per band) and one law: inside a band the record applies verbatim, between bands the fields blend linearly with truncation toward zero. The driver implements the shared band selection and blend in `ar-isp-ladder.h` and each stage in its own `ar-isp-rnr.h`, `ar-isp-lnr.h` and `ar-isp-de3d.h`, deriving every register from the tuning file at a caller-supplied abscissa (`rnr_gain`, `lnr_gain`, `de3d_gain`, Q8 module parameters until an AE loop produces the abscissa per frame). The proofs are `scripts/isp/check-rnr-ladder.py`, `check-lnr-ladder.py` and `check-de3d-ladder.py`: the same integer arithmetic in Python, refusing to pass unless every capture-covered register reproduces bit-exactly from the blob at both measured vendor operating points.
 
 Registers in these banks that are not ladder outputs are classified, not assumed: lnr `0x3d10` is never written by the vendor and `0x3d14` keeps a replayed value (unresolved pre-pack bias); de3d `0x2e98` is the block's hardware line-time latch and is never written; the de3d buffer addresses are driver-owned; the per-stage user-strength laws are the identity at the vendor's default of 50 and nothing in this stack sets a strength, so they are not carried. The de3d control and strength words (`0x2e00` enables, `0x2e1c`, `0x2e20`, `0x2e90`, `0x2eb4`) are packer outputs and derive with the rest; running them at the replayed pre-streaming state instead is what destroyed moving regions even with the threshold registers exact.
 
@@ -468,7 +468,7 @@ Validated on hardware with seeding off, so nothing in the "ours" rows came from 
 | hdr_lsc | `0x1e38` | zero page | parity: the stage ends disabled and the vendor's own page is stale heap |
 | CCM | registers `0x3400`/`0x3800`, no DMA | tuning file, packed Q8 sign-magnitude | ours; all six words match the trace exactly |
 | BLC | CVISP registers `0x4200`, no DMA | tuning file, gain-blended calibration entries | ours; reproduces the traced registers exactly |
-| rnr | registers `0x1808`-`0x1834`, no DMA | tuning file, gain-ladder blend (`ar-isp-ladder.h`) | ours; band 0 is byte-identical to the replayed cold bank, and the vendor's live bank reproduces at abscissa 13.6-14.2 (`scripts/isp/check-rnr-ladder.py`) |
+| rnr | registers `0x1808`-`0x1834`, no DMA | tuning file, gain-ladder blend (`ar-isp-rnr.h`) | ours; band 0 is byte-identical to the replayed cold bank, and the vendor's live bank reproduces at abscissa 13.6-14.2 (`scripts/isp/check-rnr-ladder.py`) |
 
 **Statistics buffers the hardware writes**, allocated and published by the driver, confirmed on silicon:
 
@@ -497,7 +497,7 @@ The vendor's operating point is pinned exactly: at gain **187** the band is 130 
 
 | Stage | Table | Status |
 |---|---|---|
-| `rnr` | `0x7a6c`, stride `0x160`, 12 entries | implemented: the driver derives the twelve registers from the ladder (`ar-isp-ladder.h`), validated against both measured points |
+| `rnr` | `0x7a6c`, stride `0x160`, 12 entries | implemented: the driver derives the twelve registers from the ladder (`ar-isp-rnr.h`), validated against both measured points |
 | `lnr` | `0x89f18`, stride `0x428`, 11 entries | table pinned, source fields known, destination registers not established |
 | `de3d` | `0x963ac`, stride `0x2f8`, 12 entries | as `lnr` |
 | `acm`, `cfa`, `cnf` | not located | carry a recomputation path that did not fire during this capture |

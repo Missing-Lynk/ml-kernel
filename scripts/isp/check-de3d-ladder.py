@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Prove the de3d ladder transform in ar-isp-ladder.h against both measured points.
+Prove the de3d ladder transform in ar-isp-de3d.h against both measured points.
 
 The de3d driver in the vendor service (0x1c6c10, packer 0x1c61f8) recomputes
 the bank 0x2e00 registers from a ladder in the tuning file whenever the 3A
@@ -115,7 +115,7 @@ def word(blob: bytes, band: int, off: int) -> int:
 
 
 def select(blob: bytes, gain_q16: int) -> tuple[int, int]:
-    """Mirror ar_isp_de3d_select."""
+    """Mirror ar_isp_ladder_select on ar_isp_de3d_ladder."""
     count = struct.unpack_from("<I", blob, HEADER + 0x8)[0]
     interp = struct.unpack_from("<I", blob, HEADER + 0x4)[0]
     count = COUNT if not 1 <= count <= COUNT else count
@@ -237,7 +237,7 @@ def main() -> int:
               f"t {t_q24 / (1 << 24):.7f}, all {len(want)} covered "
               f"registers exact")
 
-    print("\nde3d ladder agrees with ar-isp-ladder.h and the two measured "
+    print("\nde3d ladder agrees with ar-isp-de3d.h and the two measured "
           "points")
     return 0
 

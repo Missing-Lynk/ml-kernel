@@ -2,7 +2,7 @@
 """
 Check the lnr ladder transform against the two measured vendor register images.
 
-This mirrors ar_isp_lnr_from_blob in ar-isp-ladder.h: Q16 band edges, a Q24
+This mirrors ar_isp_lnr_from_blob in ar-isp-lnr.h: Q16 band edges, a Q24
 blend fraction, signed payload words, truncation toward zero, and register
 packing with preserved bits seeded from the captured register image. Register
 0x3d10 is never written by the vendor packer, and 0x3d14 is intentionally left
@@ -222,7 +222,7 @@ def main() -> int:
         print(f"{name:6s} gain {gain:.5f} band {band - 1},{band} "
               f"t_q24 {t_q24} matched {REGS - len(SKIP)} ladder registers")
 
-    print("\nlnr ladder agrees with ar-isp-ladder.h and both measured points")
+    print("\nlnr ladder agrees with ar-isp-lnr.h and both measured points")
     return 0
 
 

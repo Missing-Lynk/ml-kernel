@@ -245,9 +245,8 @@ static inline void ar_isp_drc_from_blob(u8 *dst, const u8 *blob,
  */
 static inline u16 ar_isp_f32_scale(u32 bits)
 {
-	u32 mant = (bits & 0x7fffff) | 0x800000;
-	int exp = (int)((bits >> 23) & 0xff) - 127;
-	int shift = (23 - AR_ISP_LSC_Q) - exp;
+	u32 mant = ar_isp_f32_mant(bits);
+	int shift = (AR_ISP_F32_MANT_BITS - AR_ISP_LSC_Q) - ar_isp_f32_exp(bits);
 
 	if (bits & 0x80000000)
 		return 0;

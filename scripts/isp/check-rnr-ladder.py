@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Prove the rnr ladder transform in ar-isp-ladder.h against both measured points.
+Prove the rnr ladder transform in ar-isp-rnr.h against both measured points.
 
 The rnr driver in the vendor service (0x1993b8) recomputes the twelve packed
 registers at ISP 0x1808..0x1834 from a ladder in the tuning file whenever the
@@ -144,7 +144,7 @@ def main() -> int:
     print(f"abscissa {hits[0]:.3f}..{hits[-1]:.3f} -> {VENDOR_REG:#010x} x{REGS}, "
           f"the vendor's live bank")
 
-    print("\nrnr ladder agrees with ar-isp-ladder.h and the two measured points")
+    print("\nrnr ladder agrees with ar-isp-rnr.h and the two measured points")
     return 0
 
 

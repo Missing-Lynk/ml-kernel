@@ -70,7 +70,9 @@
 #include "vendor-tables/ar-isp-compander.h"
 #include "ar-isp-colour.h"
 #include "vendor-tables/ar-isp-ccm-init.h"
-#include "ar-isp-ladder.h"
+#include "ar-isp-rnr.h"
+#include "ar-isp-lnr.h"
+#include "ar-isp-de3d.h"
 
 /*
  * Master control. The block is brought up by a staged sequence of writes to
@@ -932,7 +934,7 @@ static void ar_isp_rnr_apply(struct ar_isp *isp, bool verbose)
 	 * behaviour and not a failure.
 	 */
 	if (ar_isp_get_le32(blob + AR_ISP_RNR_BLOB_HEADER +
-			    AR_ISP_RNR_HDR_ENABLE) != 1) {
+			    AR_ISP_LADDER_HDR_ENABLE) != 1) {
 		if (verbose)
 			dev_info(isp->dev, "rnr: tuning gate clear, bank left replayed\n");
 		return;
@@ -976,7 +978,7 @@ static void ar_isp_lnr_apply(struct ar_isp *isp, bool verbose)
 	blob = isp->tuning->data;
 
 	if (ar_isp_get_le32(blob + AR_ISP_LNR_BLOB_HEADER +
-			    AR_ISP_LNR_HDR_ENABLE) != 1) {
+			    AR_ISP_LADDER_HDR_ENABLE) != 1) {
 		if (verbose)
 			dev_info(isp->dev, "lnr: tuning gate clear, bank left replayed\n");
 		return;
@@ -1030,7 +1032,7 @@ static void ar_isp_de3d_apply(struct ar_isp *isp, bool verbose)
 	blob = isp->tuning->data;
 
 	if (ar_isp_get_le32(blob + AR_ISP_DE3D_BLOB_HEADER +
-			    AR_ISP_DE3D_HDR_ENABLE) != 1) {
+			    AR_ISP_LADDER_HDR_ENABLE) != 1) {
 		if (verbose)
 			dev_info(isp->dev, "de3d: tuning gate clear, bank left replayed\n");
 		return;

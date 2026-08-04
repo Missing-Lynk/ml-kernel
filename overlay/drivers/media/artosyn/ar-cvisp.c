@@ -441,19 +441,19 @@ static void ar_cvisp_frame_tick(void *ctx)
  */
 static u32 ar_cvisp_f32_to_u32(u32 bits)
 {
-	u32 mant = (bits & 0x7fffff) | 0x800000;
-	int exp = (int)((bits >> 23) & 0xff) - 127;
+	u32 mant = ar_isp_f32_mant(bits);
+	int exp = ar_isp_f32_exp(bits);
 
-	if (bits & 0x80000000 || exp < 0)
+	if (bits & AR_ISP_F32_SIGN || exp < 0)
 		return 0;
 
 	if (exp > 30)
 		return U32_MAX;
 
-	if (exp >= 23)
-		return mant << (exp - 23);
+	if (exp >= AR_ISP_F32_MANT_BITS)
+		return mant << (exp - AR_ISP_F32_MANT_BITS);
 
-	return mant >> (23 - exp);
+	return mant >> (AR_ISP_F32_MANT_BITS - exp);
 }
 
 /*

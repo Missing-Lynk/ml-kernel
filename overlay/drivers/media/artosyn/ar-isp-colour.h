@@ -37,6 +37,17 @@
 #define AR_ISP_CCM_WORDS		6
 
 /*
+ * Matrix shape and coefficient format. A coefficient is 16-bit sign-magnitude
+ * with the magnitude in Q8, so the magnitude field is the low 15 bits and bit
+ * 15 carries the sign.
+ */
+#define AR_ISP_CCM_DIM			3
+#define AR_ISP_CCM_COEFFS		(AR_ISP_CCM_DIM * AR_ISP_CCM_DIM)
+#define AR_ISP_CCM_Q			8
+#define AR_ISP_CCM_MAG_MAX		0x7fff
+#define AR_ISP_CCM_SIGN			0x8000
+
+/*
  * CCM source data in the tuning file. The gate enables the AWB-driven ccm1
  * path; the ladder is eight illuminants in kelvin and the matrix banks are
  * unpacked float32 3x3, row major. Eight slots are allocated and four hold
@@ -93,25 +104,24 @@
  */
 static inline u16 ar_isp_f32_q8sm(u32 bits)
 {
-	u32 mant = (bits & 0x7fffff) | 0x800000;
-	int exp = (int)((bits >> 23) & 0xff) - 127;
-	int shift = 15 - exp;
+	u32 mant = ar_isp_f32_mant(bits);
+	int shift = (AR_ISP_F32_MANT_BITS - AR_ISP_CCM_Q) - ar_isp_f32_exp(bits);
 	u32 mag;
 
-	if (!(bits & 0x7fffffff))
+	if (!(bits & ~AR_ISP_F32_SIGN))
 		return 0;
 
 	if (shift >= 32)
 		mag = 0;
 	else if (shift <= 0)
-		mag = 0x7fff;
+		mag = AR_ISP_CCM_MAG_MAX;
 	else
 		mag = mant >> shift;
 
-	if (mag > 0x7fff)
-		mag = 0x7fff;
+	if (mag > AR_ISP_CCM_MAG_MAX)
+		mag = AR_ISP_CCM_MAG_MAX;
 
-	return (bits & 0x80000000) ? (u16)(0x8000 | mag) : (u16)mag;
+	return (bits & AR_ISP_F32_SIGN) ? (u16)(AR_ISP_CCM_SIGN | mag) : (u16)mag;
 }
 
 /*
@@ -135,11 +145,12 @@ static inline u16 ar_isp_f32_q8sm(u32 bits)
  */
 static inline void ar_isp_ccm_pack(u8 *dst, const u32 *bits)
 {
-	for (unsigned int row = 0; row < 3; row++) {
-		u16 a = ar_isp_f32_q8sm(bits[3 * row + 0]);
-		u16 b = ar_isp_f32_q8sm(bits[3 * row + 1]);
-		u16 c = ar_isp_f32_q8sm(bits[3 * row + 2]);
+	for (unsigned int row = 0; row < AR_ISP_CCM_DIM; row++) {
+		u16 a = ar_isp_f32_q8sm(bits[AR_ISP_CCM_DIM * row + 0]);
+		u16 b = ar_isp_f32_q8sm(bits[AR_ISP_CCM_DIM * row + 1]);
+		u16 c = ar_isp_f32_q8sm(bits[AR_ISP_CCM_DIM * row + 2]);
 
+		/* Two words per row: a pair in the low and high halves, then one. */
 		ar_isp_put_le32(dst + 8 * row, (u32)a | ((u32)b << 16));
 		ar_isp_put_le32(dst + 8 * row + 4, c);
 	}
@@ -154,9 +165,9 @@ static inline void ar_isp_ccm_from_blob(u8 *dst, const u8 *blob,
 {
 	const u8 *src = blob + AR_ISP_CCM_BLOB_BANKS +
 			bank * AR_ISP_CCM_BLOB_BANK_STRIDE;
-	u32 bits[9];
+	u32 bits[AR_ISP_CCM_COEFFS];
 
-	for (unsigned int i = 0; i < 9; i++)
+	for (unsigned int i = 0; i < AR_ISP_CCM_COEFFS; i++)
 		bits[i] = ar_isp_get_le32(src + i * 4);
 
 	ar_isp_ccm_pack(dst, bits);
