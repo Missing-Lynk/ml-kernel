@@ -5,8 +5,8 @@
  * CVISP is the block at 0x08e00000, ISP base + 0x200000. It is absent from the
  * vendor device tree; the name comes from the cvisp_* stack exported by the
  * vendor's unstripped libmpp_service.so. It is not the DTS scaler@08840000 or
- * gdc@08848000. In the vendor's design this block, not the ISP, writes frames
- * to DRAM; the ISP feeds it and CVISP owns the output queue.
+ * gdc@08848000. In the vendor's design this block writes frames to DRAM; the
+ * ISP feeds it and CVISP owns the output queue.
  *
  * This driver applies the recovered configuration and exposes the output queue,
  * both as a V4L2 capture node and, while that node is not streaming, as the
@@ -194,8 +194,8 @@ MODULE_PARM_DESC(rotate,
 /*
  * Frame ticks a buffer is held before it is handed back.
  *
- * The tick is the ISP's statistics event, not CVISP's own completion, so the
- * output DMA for a frame is not known to have drained when it fires. At 2 a
+ * The tick is the ISP's statistics event, so the output DMA for a frame is not
+ * known to have drained when it fires. At 2 a
  * buffer is held a further full frame period; the cost is a buffer, and the
  * hardware holds one per unit of depth out of a pool of five.
  *
@@ -333,8 +333,9 @@ static void ar_cvisp_arm(struct ar_cvisp *cv, unsigned int slot)
  *
  * Separate from the ring walk: the trace has the tick group written 496 times
  * over 2477 frames, once every five frames. Its coincidence with a wrap of the
- * vendor's five-slot ring is a property of a five-slot ring, not evidence that
- * the block reads the ring position. Driven by the frame count, so it runs the
+ * vendor's five-slot ring follows from the ring having five slots; whether
+ * the block reads the ring position is unestablished. Driven by the frame
+ * count, so it runs the
  * same whether the output queue is the vendor's ring or the node's buffers.
  */
 static void ar_cvisp_cycle(struct ar_cvisp *cv)

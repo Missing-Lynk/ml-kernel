@@ -2,10 +2,10 @@
 /*
  * ar-isp-codec.h - packing formats for the ISP's DMA coefficient tables.
  *
- * The ISP does not read the vendor tuning file. It reads DMA buffers whose
- * physical addresses are published to descriptor registers and fetched on a
- * write to 0x0014. Filling those buffers is a software job, done by vendor
- * userspace; these are the packing formats it uses.
+ * The ISP reads DMA buffers whose physical addresses are published to
+ * descriptor registers and fetched on a write to 0x0014. Filling those buffers
+ * is a software job, done by vendor userspace from the tuning file; these are
+ * the packing formats it uses.
  *
  * Recovered from libmpp_service.so and validated byte-for-byte against buffers
  * captured off a streaming vendor unit. Reference implementations and capture
@@ -90,9 +90,9 @@
 /*
  * Pack 512 twelve-bit samples into one gamma page.
  *
- * 128 records of 16 bytes hold four samples each. The surplus bits are not
- * padding: they are redundant overlap fields the hardware also reads, so an
- * encoder has to write them or the table is malformed.
+ * 128 records of 16 bytes hold four samples each. The surplus bits are
+ * redundant overlap fields the hardware also reads, so an encoder has to write
+ * them or the table is malformed.
  *
  *	sample[4i+0] =  word0        & 0xfff
  *	sample[4i+1] = (word0 >> 12) & 0xfff
@@ -177,9 +177,8 @@ static inline void ar_isp_gamma_from_blob(u8 *dst, const u8 *blob,
  * Pack a 257-sample curve into one DRC bank.
  *
  * 128 records of 16 bytes, each carrying three unsigned 20-bit samples in its
- * first ten bytes. Consecutive records overlap by one sample, which is what
- * makes 128 records a 257-sample curve rather than 384 independent lanes:
- * record i is [sample[2i], sample[2i+1], sample[2i+2]].
+ * first ten bytes. Consecutive records overlap by one sample, so record i is
+ * [sample[2i], sample[2i+1], sample[2i+2]] and 128 records carry 257 samples.
  *
  *	sample[2i+0] = word0[19:0]
  *	sample[2i+1] = word0[31:20] | word1[7:0] << 12
@@ -210,12 +209,11 @@ static inline void ar_isp_drc_pack_bank(u8 *dst, const u32 *samples)
 /*
  * Build the dynamic half of the DRC page from the tuning file.
  *
- * Only the first 0x1000 of the 0x2000 page. The second half is a constant the
- * vendor never recomputes; it is in vendor-tables/ar-isp-drc-tail.h.
+ * Builds the first 0x1000 of the 0x2000 page. The second half is constant and
+ * lives in vendor-tables/ar-isp-drc-tail.h.
  *
- * This is the neutral-strength form. The vendor blends the source against one of
- * two service tables when the user DRC strength moves off 50, which is a lever
- * we do not expose.
+ * The neutral-strength form. The vendor blends the source against one of two
+ * service tables once the user DRC strength moves off 50.
  */
 static inline void ar_isp_drc_from_blob(u8 *dst, const u8 *blob,
 					unsigned int profile)
@@ -239,8 +237,8 @@ static inline void ar_isp_drc_from_blob(u8 *dst, const u8 *blob,
  *
  * The kernel has no FPU and the tuning file stores the lens-shading grid as
  * float32, so the vendor's quantisation is reproduced from the bit pattern.
- * Truncation, not rounding: rounding matches only 55 of the 100 grid entries
- * against a captured page, truncation all 100.
+ * Truncated toward zero: truncation matches all 100 grid entries against a
+ * captured page, rounding only 55.
  *
  * Every grid entry is a positive gain between 1 and 4, so the general cases
  * cannot occur for a valid tuning file; the clamp exists so a corrupt one
@@ -277,9 +275,8 @@ static inline u16 ar_isp_f32_scale(u32 bits)
  * 50 records hold the grid; records 50 and 51 are zero, as are the last four
  * bytes of every record. Zeroing the region first covers all three.
  *
- * Only region A. The 0x2c0 of scene-adaptive state after it is computed at
- * runtime from image statistics and is not stored anywhere, so it is left
- * alone.
+ * Covers region A. The 0x2c0 of scene-adaptive state after it is computed at
+ * runtime from image statistics.
  */
 static inline void ar_isp_lsc_from_blob(u8 *dst, const u8 *blob)
 {
@@ -300,9 +297,9 @@ static inline void ar_isp_lsc_from_blob(u8 *dst, const u8 *blob)
 /*
  * Rebuild the compander page from its two carried spans.
  *
- * Not a packing: the vendor installs the page verbatim from a static template
- * and never recomputes it, so there is no curve to encode. This reconstructs
- * the three quarters of the page that is constant by structure.
+ * The vendor installs this page verbatim from a static template, so there is
+ * no curve to encode. This reconstructs the three quarters of the page that is
+ * constant by structure.
  *
  * The unity record writes only its first two words; the remaining eight bytes
  * are zero in all 1536 template records.

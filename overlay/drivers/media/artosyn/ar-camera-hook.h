@@ -2,16 +2,15 @@
 /*
  * ar-camera-hook.h - the per-frame callback the ISP hands to the output stage.
  *
- * The CVISP writes YUV to DRAM but its own completion path is not usable by
- * this driver: the vendor services it in cvisp_dispatch_irq, and neither its
- * interrupt number nor its acknowledge register has been recovered. The VIF's
- * buffer completion is not an alternative either, because it only runs for the
- * v4l2 capture path and the bypass view that would drive it has never completed
- * on this hardware.
+ * The ISP's statistics event is the one signal that fires once per frame,
+ * measured at one per frame against the ISP interrupt count, so the ISP owns
+ * the frame tick and the output stage subscribes to it.
  *
- * What does fire once per frame is the ISP's statistics event, measured at one
- * per frame against the ISP interrupt count. So the ISP owns the frame tick and
- * the output stage subscribes to it.
+ * The two nearer sources are both out of reach. The CVISP writes YUV to DRAM,
+ * but the vendor services its completion in cvisp_dispatch_irq and neither the
+ * interrupt number nor the acknowledge register has been recovered. The VIF's
+ * buffer completion runs only for the v4l2 capture path, whose bypass view has
+ * never completed on this hardware.
  *
  * Direction matters. The ISP exports the registration and the CVISP calls it,
  * so the module dependency runs cvisp -> isp, matching the order they are

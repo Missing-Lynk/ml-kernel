@@ -35,7 +35,7 @@
  *  - The per-frame loop. The vendor re-arms the statistics buffer addresses and
  *    runs three indirect-port transactions on every frame, driven by the VIF
  *    frame-start interrupt that ar-vif.c already owns. The output planes are
- *    programmed once during setup and are not part of that loop, so the first
+ *    programmed once during setup, outside that loop, so the first
  *    frame lands without it. Until that loop moves in here, ml-isploop drives
  *    it from userspace and re-arms the vendor's statistics addresses over the
  *    ones published here, so owning them only holds with the cycle disabled.
@@ -145,8 +145,8 @@
  * vendor reads 0x04380780, 1080 x 1920, the active area. Zero means the block
  * is seeing nothing.
  *
- * AR_ISP_IN_LINETIME latches the incoming line time and is static, not a
- * counter: a streaming vendor holds 0x134e across repeated samples while VIF
+ * AR_ISP_IN_LINETIME latches the incoming line time and holds it: a streaming
+ * vendor reads 0x134e across repeated samples while VIF
  * 0x1f8 measures about the same. Zero means no line timing is arriving.
  */
 #define AR_ISP_IN_GEOMETRY		0x706c
@@ -156,8 +156,8 @@
  * Coefficient table descriptors. Each holds the physical address of a DMA buffer
  * the block fetches when the matching bit is written to AR_ISP_TABLE_COMMIT.
  *
- * The commit is write-to-trigger, not a set-then-clear pulse: clearing the bit
- * afterwards cancels the fetch. Bit 16 is always set alongside. From the vendor
+ * The commit is write-to-trigger: clearing the bit afterwards cancels the
+ * fetch. Bit 16 is always set alongside. From the vendor
  * trace, which publishes an address and then commits, one table at a time:
  *
  *	0x0020 = 0x2b2e0c00   0x0014 = 0x00010001    compander
@@ -179,7 +179,7 @@
 /*
  * The HDR page and the compander share one allocation, in the vendor's layout.
  *
- * On the vendor these are not independent buffers: the compander sits at
+ * On the vendor the two overlap: the compander sits at
  * 0x2b2e0c00 and the HDR page at 0x2b2e0200, exactly 0xa00 lower, and the HDR
  * descriptor length makes it fetch 0x1000. So its last 0x600 bytes ARE the
  * compander's first 0x600, read because the fetch overruns its own content.
@@ -187,10 +187,10 @@
  *
  * Allocating one block in that relationship reproduces the fetched bytes for
  * both descriptors without copying anything twice, and makes the overlap
- * explicit rather than something a later reader has to rediscover.
+ * explicit.
  *
- * The compander span is the 0xf000 its length register at 0x0024 implies rather
- * than the 0x7800 the table occupies. The vendor cannot satisfy that either:
+ * The length register at 0x0024 implies a 0xf000 compander span; the table
+ * occupies 0x7800. The vendor cannot satisfy that either:
  * 0xf000 past its compander runs into the gamma page, so what the block reads
  * beyond the table is its neighbours' memory and cannot be meaningful. The
  * excess is therefore ignored, and allocating it only keeps the DMA inside
@@ -216,7 +216,7 @@
 
 /*
  * The addresses the replayed configuration arms, inside the isp_cma reservation.
- * They are the vendor's own buffers, not ours. Reading them is how a table is
+ * These belong to the vendor. Reading them is how a table is
  * seeded from whatever the vendor left in DRAM across a RAM-boot.
  */
 #define AR_ISP_VENDOR_GAMMA_PHYS	0x2b2ec600
@@ -278,8 +278,8 @@
  * addresses the vendor's per-frame cycle writes, which is the check that the
  * bank map is right.
  *
- * These are DMA targets the hardware writes, not tables it fetches, so there is
- * no commit and no valid bit: publishing an address is the whole protocol.
+ * These are DMA targets the hardware writes: no commit and no valid bit,
+ * publishing an address is the whole protocol.
  */
 #define AR_ISP_STATS_RRO0	(AR_ISP_RRO_BANK + AR_ISP_RRO_REG_ADDR)
 #define AR_ISP_STATS_RRO1	(AR_ISP_RRO_BANK + AR_ISP_RRO_ENGINE_STRIDE + \
@@ -294,7 +294,7 @@
  * a single status bit. The consumer then reads whichever half the index does
  * not name, so a reader never races the engine writing the next frame.
  *
- * The mechanism is what is reproduced here, not the vendor's block ids: an
+ * What is reproduced here is the mechanism: an
  * index per buffer this driver owns, flipped from the frame's statistics event,
  * with each buffer allocated at twice its geometry so the two halves are one
  * allocation. The vendor's 0x8000 stride is its own allocation granularity and
@@ -355,7 +355,7 @@ MODULE_PARM_DESC(tables,
  * both gamma and DRC generate every byte the hardware reads. Kept because that
  * fallback is the difference between a degraded camera and no camera, and
  * because turning it off is how a bring-up proves the generation really is
- * standalone rather than quietly leaning on what the vendor left behind.
+ * standalone.
  */
 static bool seed = true;
 module_param(seed, bool, 0644);
@@ -368,7 +368,8 @@ MODULE_PARM_DESC(seed,
  *
  * Curve 3 reproduces one of our captures to within 5 counts of 4095 and curve 2
  * reproduces another, which is the AE selection visible directly in our own
- * data. Any pinned value is therefore an operating point, not a correct answer.
+ * data. AE selects the curve at runtime, so any pinned value records one
+ * operating point.
  */
 static int gamma_curve = 3;
 module_param(gamma_curve, int, 0644);
@@ -470,15 +471,14 @@ MODULE_PARM_DESC(gib,
 /*
  * Setup-table entries applied when this driver brings the chain up itself.
  *
- * Not the whole table. The capture harness has configured every validated
- * bring-up through configure_upto with this length, so it is the measured
- * operating configuration rather than a bisect leftover, and it belongs to the
- * driver rather than to whatever writes debugfs. The cut has consequences the
+ * A prefix. The capture harness has configured every validated bring-up
+ * through configure_upto with this length, so it is the measured operating
+ * configuration and it belongs to the driver. The cut has consequences the
  * driver covers on its own: the replay's colour correction matrix sits at entry
  * 1718, past this, so ccm installs it directly (see the ccm bank comment), and
  * the lnr strength curves past 0x3d7c are left at zero.
  *
- * The remaining entries are not merely unused, they are suspect: after the full
+ * The remaining entries are suspect: after the full
  * table AR_ISP_IN_GEOMETRY reads zero, so one of them stops the block seeing
  * its input. Which one is not established.
  */
@@ -588,10 +588,9 @@ static const struct {
  * receiver and the VIF, and before the first per-frame acknowledge. This is where the output
  * stage is armed and the master enable reaches its final value.
  *
- * Carried verbatim from out/au-mmiotrace/mmio-combined.log rather than sliced out of
- * ar_isp_setup_1080p60: that table was generated from a different trace with consecutive
- * duplicates collapsed, so its ordering does not align here (18 of 69 match at the best
- * offset).
+ * Carried verbatim from out/au-mmiotrace/mmio-combined.log. ar_isp_setup_1080p60 was
+ * generated from a different trace with consecutive duplicates collapsed, so its ordering
+ * does not align here (18 of 69 match at the best offset).
  *
  * The vendor's startup topology is ISP bulk -> receiver brought live -> output armed. Ours
  * configures the receiver first and replays the ISP afterwards, so that hand-off has never been
@@ -727,15 +726,13 @@ static bool ar_isp_seed_from_vendor(struct ar_isp *isp, void *dst,
  * Point de3d at buffers this driver owns.
  *
  * Each buffer goes to two registers, which is how the vendor arms them: the
- * pair takes one address, not two halves of a range. Published after the setup
+ * pair takes the same full address. Published after the setup
  * table for the same reason the statistics buffers are, since that table also
  * carries the vendor's addresses for these.
  *
- * The buffers are handed over zeroed rather than seeded. de3d is temporal, so
- * whatever it accumulates it rebuilds from the frames it sees; starting from
- * zero means the first frames run against an empty history instead of against
- * the vendor's, which is the honest cold-boot behaviour rather than inherited
- * state that happens to look right.
+ * The buffers are handed over zeroed. de3d is temporal, so whatever it
+ * accumulates it rebuilds from the frames it sees; the first frames run against
+ * an empty history, which is cold-boot behaviour.
  */
 static void ar_isp_de3d_publish(struct ar_isp *isp)
 {
@@ -764,7 +761,7 @@ static void ar_isp_de3d_publish(struct ar_isp *isp)
  * sleep or touch anything the reader also writes.
  *
  * The two 0x6400 engines are given the same address, which is what the vendor
- * publishes, so both halves stay a single pair rather than four buffers.
+ * publishes, so both halves stay a single pair.
  */
 static void ar_isp_stats_arm(struct ar_isp *isp, unsigned int half)
 {
@@ -825,7 +822,7 @@ static void ar_isp_stats_publish(struct ar_isp *isp)
 }
 
 /*
- * Colour correction. Two register banks, not a DMA page: 0x50 bytes each
+ * Colour correction. Two register banks of 0x50 bytes each,
  * holding two packed 3x3 matrices, one at +0x00 and a second copy at +0x20.
  *
  * The vendor's sequence is an identity pair installed into ccm1 at init, a
@@ -833,8 +830,7 @@ static void ar_isp_stats_publish(struct ar_isp *isp)
  * ccm1's FIRST copy only with an interpolated tuning-file matrix. ccm2 never
  * moves, because its tuning gate reads 0 in this blob.
  *
- * Doing it here rather than leaving it to the register replay is not just
- * ownership. The replay carries the vendor's runtime matrix, but at entry 1718
+ * Doing it here is more than ownership. The replay carries the vendor's runtime matrix, but at entry 1718
  * of the setup table, and a bring-up that applies a prefix shorter than that
  * stops at the identity the earlier entries wrote. The 1475-entry prefix the
  * camera harness uses does exactly that, so every bring-up so far has run with
@@ -894,7 +890,7 @@ static void ar_isp_ccm_apply(struct ar_isp *isp)
 
 /*
  * Defect pixel correction. The payload is a register image the vendor copies
- * wholesale out of init_config, so it is carried rather than derived; see
+ * wholesale out of init_config, so it is carried verbatim; see
  * ar-isp-dpc.h for the two defects in the replay it supersedes.
  */
 static void ar_isp_dpc_apply(struct ar_isp *isp)
@@ -1063,7 +1059,7 @@ static void ar_isp_de3d_apply(struct ar_isp *isp, bool verbose)
  *
  * Runs after the register replay, which arms the vendor's addresses and commits
  * them. Republishing ours and committing again is the same sequence the vendor
- * itself issues on every AE update, so this is not a special case for the block.
+ * itself issues on every AE update.
  *
  * Compander has no generator to recover: the vendor installs its 0x7800 page
  * verbatim from a static template in the service library and never recomputes
@@ -1542,7 +1538,7 @@ static void ar_isp_configure(struct ar_isp *isp)
  */
 /*
  * The per-frame tick handed to the output stage. See ar-camera-hook.h for why
- * the ISP owns it rather than the VIF or the CVISP.
+ * the ISP owns it.
  *
  * The lock is held across the call, not just the pointer read, so a module that
  * unregisters is guaranteed no callback is still running when it returns. The
@@ -1688,7 +1684,7 @@ static void ar_isp_arm_output(struct ar_isp *isp)
  * back finds which one, in about eleven steps over the 2082 entries.
  *
  * Each probe needs a clean block, so reload the capture modules and restart the
- * stream between probes rather than issuing several prefixes in a row. The trim
+ * stream between probes, one prefix per boot. The trim
  * pass is deliberately not applied here: it would reintroduce the writes being
  * bisected.
  */
@@ -1776,11 +1772,10 @@ static struct ar_isp *ar_isp_instance;
  * Configure the block and arm its output, as one call for a driver that is
  * bringing the whole chain up.
  *
- * Uses the prefix rather than the full setup table, because the prefix is the
- * configuration every validated bring-up has run: the capture harness has
- * driven configure_upto with this length throughout. The full table is a
- * different configuration and is not currently validated, so choosing it here
- * would silently change what the camera runs.
+ * Uses the prefix, the configuration every validated bring-up has run: the
+ * capture harness has driven configure_upto with this length throughout. The
+ * full table is a different configuration and is still unvalidated, so choosing
+ * it here would silently change what the camera runs.
  *
  * The caller must have the pixel domain live already: this reads registers back.
  */
@@ -1842,7 +1837,7 @@ DEFINE_SHOW_ATTRIBUTE(ar_isp_regs);
  *
  * Prints the per-zone luma mean as a 36-column by 16-row map, plus the frame
  * mean and the count the sums were accumulated over. The count is read from the
- * buffer rather than computed, because it is a function of the programmed
+ * buffer, because the count is a function of the programmed
  * geometry and a stale divisor would silently scale every mean.
  *
  * An all-zero map with a zero count means the hardware is not writing here,

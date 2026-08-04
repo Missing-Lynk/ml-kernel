@@ -2,10 +2,9 @@
 /*
  * ar-isp-dpc.h - the vendor's defect-pixel-correction payload, carried verbatim.
  *
- * dpc is not configured register by register. The vendor isp_memcpy's a whole
- * register image out of its init_config object into the head of bank 0x0c00, so
- * the payload is fixed library data rather than anything computed from the
- * tuning file, and carrying it is the vendor's own mechanism.
+ * The vendor isp_memcpy's a whole register image out of its init_config object
+ * into the head of bank 0x0c00, so the payload is fixed library data and
+ * carrying it verbatim is the vendor's own mechanism.
  *
  * Read from a streaming vendor unit on 2026-08-02 at the 1080p60 operating
  * point, over the exact extent the register replay covers (0x0c00 to 0x0d08),
@@ -26,9 +25,9 @@
  *   holds 0. So the replay ran a second correction pass with the same too-low
  *   thresholds on top of the first.
  *
- * Applied after the setup tables rather than folded into them, for the reason
- * the ccm and rnr stages are: a bring-up that runs a prefix of the replay would
- * otherwise leave whichever partial state the prefix reached.
+ * Applied after the setup tables, for the reason the ccm and rnr stages are: a
+ * bring-up that runs a prefix of the replay would otherwise leave whichever
+ * partial state the prefix reached.
  */
 
 #ifndef AR_ISP_DPC_H

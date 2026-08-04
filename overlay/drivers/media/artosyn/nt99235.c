@@ -58,7 +58,7 @@
  * Exposure is a 16-bit big-endian count of line periods, clamped by the vendor
  * to vts - 2. Gain is a code written identically to both 0x0206 and 0x0207.
  *
- * The group hold is required, not optional: the vendor brackets every dirty
+ * The group hold is required: the vendor brackets every dirty
  * entry of a commit with 0x0104 = 1 then 0x0104 = 0, so a frame never sees a
  * half-updated exposure and gain pair.
  *
@@ -87,7 +87,7 @@
  *
  * which reproduces all 97 entries exactly: four-bit mantissa, four-bit binary
  * exponent, 1x at code 0x00 rising to 64x at code 0x60. An AE loop may use the
- * formula directly; it is not an approximation of the table, it is the table.
+ * formula directly; it reproduces the table exactly.
  */
 #define NT99235_AGAIN_MIN		0x00
 #define NT99235_AGAIN_MAX		0x60

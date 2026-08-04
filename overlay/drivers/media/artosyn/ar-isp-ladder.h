@@ -2,7 +2,7 @@
 /*
  * ar-isp-ladder.h - gain-keyed register ladders from the tuning file.
  *
- * The gain-keyed stages are register banks, not DMA pages. Each recomputes its
+ * The gain-keyed stages are register banks. Each recomputes its
  * bank from a per-stage ladder in the tuning file whenever the 3A loop moves
  * the gain. The shared shape, from the per-stage drivers in libmpp_service.so
  * (rnr's is 0x1993b8): a header of enable, interpolate, mode, band count and

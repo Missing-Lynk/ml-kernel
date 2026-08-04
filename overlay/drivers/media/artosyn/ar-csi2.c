@@ -336,8 +336,8 @@ static int ar_csi2_phy_range_code(unsigned int rate_mbps)
 
 /* The sensor's per-lane bit rate, from the source subdev's link frequency
  * control: half the per-lane bit rate, the D-PHY clocks data on both edges.
- * This must be the rate the source's PLL drives the lanes at, not the average
- * implied by the frame rate. The link idles between lines, so the average
+ * This must be the rate the source's PLL drives the lanes at. The link idles
+ * between lines, so a rate derived from the frame rate averages too low and
  * selects too low a range, which shows up as unrecoverable header ECC errors
  * rather than a dead link.
  */
@@ -474,7 +474,7 @@ static void ar_csi2_phy_set_deskew_core(void __iomem *core, bool enable)
 }
 
 /* Set the deskew bit in two D-PHY registers. A separate step after the PHY is
- * released, not part of the power-up sequence; on a merged link it runs once
+ * released; on a merged link it runs once
  * per core.
  */
 static void ar_csi2_phy_enable_deskew(struct ar_csi2 *csi2)

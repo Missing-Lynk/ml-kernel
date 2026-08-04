@@ -2,8 +2,7 @@
 /*
  * ar-isp-colour.h - the ISP's colour correction and 3D-LUT stages.
  *
- * Unlike the tone tables these stages are not DMA pages fetched through
- * descriptors. CCM is a register file: two banks of 0x50 bytes at ISP offsets
+ * CCM is a register file: two banks of 0x50 bytes at ISP offsets
  * 0x3400 (ccm1) and 0x3800 (ccm2), each holding two packed 3x3 matrices. LUT3D
  * is a module-local descriptor bank at 0x5800 with four DMA payload banks; the
  * streaming vendor leaves the whole module disabled.
@@ -65,8 +64,8 @@
  *
  * The payloads have no tuning-file source: the init handler copies entries 42
  * to 45 of the ISP-init template array verbatim (VMAs 0x458960, 0x4562e0,
- * 0x453c60, 0x4515e0, 0x2680 each, flushed as 0x2800). They are not carried
- * in-tree while the module stays disabled.
+ * 0x453c60, 0x4515e0, 0x2680 each, flushed as 0x2800). They stay in the
+ * library while the module is disabled.
  */
 #define AR_ISP_LUT3D_BANK		0x5800
 #define AR_ISP_LUT3D_CTRL		0x00
@@ -85,9 +84,9 @@
  *
  * The vendor converts with fcvtzs #8, so the magnitude is Q8 truncated toward
  * zero, and encodes the sign separately: a negative coefficient v becomes
- * 0x8000 + |v|. Sign-magnitude, not two's complement; 0x8040 is -0.25.
- * Truncation, not rounding: all nine traced ccm1 coefficients match it, and
- * several (-0.1, -0.05, -0.2) would differ under rounding.
+ * 0x8000 + |v|. Sign-magnitude: 0x8040 is -0.25. Truncated toward zero: all
+ * nine traced ccm1 coefficients match, and several (-0.1, -0.05, -0.2) would
+ * differ under rounding.
  *
  * Valid tuning matrices stay well inside +/-4, so the clamp exists only so a
  * corrupt file cannot spill the sign bit.

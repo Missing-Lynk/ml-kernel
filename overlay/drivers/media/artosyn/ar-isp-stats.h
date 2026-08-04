@@ -2,10 +2,9 @@
 /*
  * ar-isp-stats.h - layout of the ISP's hardware-written statistics buffers.
  *
- * These buffers are filled by the ISP over DMA, not by software, so unlike the
- * coefficient tables there is nothing to pack: the driver publishes an address
- * and a geometry and then reads what the hardware left. What this header
- * describes is how to index the result.
+ * The ISP fills these buffers over DMA: the driver publishes an address and a
+ * geometry, then reads what the hardware left. This header describes how to
+ * index the result.
  *
  * Two producers matter for auto-exposure. The RRO engine writes a 36x16 grid of
  * per-zone, per-channel sums, and the raw histogram writes a 128-bin Bayer
@@ -54,8 +53,8 @@
  * Every u32 in a count block holds the same value, the number of pixels the
  * engine accumulated per zone per channel. Dividing a sum by it gives that
  * zone's channel mean, and in the reference capture those means span 4.2 to
- * exactly 255.0 with the maximum exactly 255 * count, which is what establishes
- * the sums as 8-bit samples rather than the sensor's 10.
+ * exactly 255.0 with the maximum exactly 255 * count, which establishes the
+ * sums as 8-bit samples, two bits below the sensor's 10.
  *
  * Channels 1 and 2 track each other closely across the whole grid and channels
  * 0 and 3 sit either side of them, which identifies 1 and 2 as the two greens.

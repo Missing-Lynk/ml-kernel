@@ -16,8 +16,7 @@
  * written and latched by pulsing bit12 of the view control on the first arm
  * only; each further frame is re-armed by rewriting the address registers
  * alone from the frame-done handler. Completion is signalled by the W1C
- * status at 0x17c (bit v buffer done, bit 8+v frame done), not by the
- * address readback.
+ * status at 0x17c (bit v buffer done, bit 8+v frame done).
  *
  * The view path this driver arms is NOT how the vendor captures. A write trace
  * of the streaming vendor shows it configures the views, then sets the per-view
@@ -190,7 +189,7 @@
  * register to 0 while arming the capture and only writes 0x2 when tearing the
  * capture down. A snapshot of a streaming unit reads 0x2 because the vendor had
  * already torn its capture down again, so the value a register holds at rest is
- * the reset state, not the running one. Fully released = 0.
+ * the reset state. Fully released = 0.
  */
 #define AR_VIF_SOFT_RESET_RELEASED	0x00000000
 
@@ -272,7 +271,7 @@
  * One-time block initialisation, transcribed from the vendor's own table (a
  * list of offset/value pairs walked by its vif_reg_init). This is separate
  * from the per-capture configuration below: the vendor applies it when its
- * driver loads, not when a capture starts.
+ * driver loads.
  *
  * It was missed by the register diff that produced the per-capture constants,
  * because that diff compared a streaming vendor stack against an idle one on

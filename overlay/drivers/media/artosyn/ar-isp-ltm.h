@@ -5,12 +5,11 @@
  * Bank 0x2800 carries three things: a module control word, a coefficient page
  * the vendor's ltm and gtm2 modules publish at +0x08, and the ltm_stats output
  * the hardware writes at +0x0c. This header describes the coefficient page and
- * the buffer extents; there is no packing function because there is nothing to
- * pack from.
+ * the buffer extents.
  *
  * The page has no stored source. It is recomputed every frame by a SIMD loop in
  * the vendor service, which emits one 128-sample curve per tile into a 0x100
- * slot, so reproducing it is 3A-class work rather than table work. What is
+ * slot, so reproducing it is 3A-class work. What is
  * established here is the geometry a producer has to fill and the extents a
  * driver has to allocate, both measured against a captured page.
  *
@@ -60,8 +59,8 @@
  * Buffer extents, measured from the vendor's own allocation layout: each
  * descriptor alternates between two addresses and the gap between them is the
  * buffer. The coefficient page and the statistics buffer are both double
- * buffered and both strides are 0x80000, which is the allocation the vendor
- * makes rather than the bytes it fills.
+ * buffered and both strides are 0x80000, the size the vendor allocates; the
+ * data it writes occupies less.
  *
  * af_stats is included because a driver still has to publish an address for it
  * even though the module is disabled and nothing writes there.
@@ -83,9 +82,9 @@ static inline void ar_isp_ltm_put_sample(u8 *page, unsigned int tile,
 }
 
 /*
- * An identity page: every tile mapped to a straight ramp over the sample range.
- * Not a reconstruction of what the vendor computes; it leaves the stage
- * tone-neutral rather than dark.
+ * An identity page: every tile mapped to a straight ramp over the sample
+ * range, which leaves the stage tone-neutral. An unfilled page leaves it dark.
+ * The vendor computes its own curves; this stands in for them.
  */
 static inline void ar_isp_ltm_fill_identity(u8 *page)
 {
