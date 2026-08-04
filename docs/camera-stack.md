@@ -206,7 +206,7 @@ Round robin, all three planes in lockstep, no deviation across 496 wraps. The ra
 
 **No reset and no interrupt are declared.** No CVISP reset write appears anywhere in the trace and no reset leaf has been identified. The block does have its own completion path (`cvisp_device_irq_process` at `0x2424b8` dispatches through `cvisp_dispatch_irq` at `0x242390`, routing status bits 1 and 5 to output events `0x1001`/`0x1002` and bit 3 to `0x2c02`), which is good evidence that frame completion is serviced from CVISP rather than from VIF SPI 62 alone. But the hardware IRQ number and its acknowledge register are still behind the vendor's generic camera-module event layer, so asserting either in the device tree would be inventing it.
 
-Extractor: `scripts/gen-cvisp-defaults.py` -> `overlay/drivers/media/artosyn/ar-cvisp-defaults.h`. The setup table self-checks: replaying it in order reproduces the vendor's final value for every register it touches.
+Extractor: `scripts/isp/gen-cvisp-defaults.py` -> `overlay/drivers/media/artosyn/ar-cvisp-defaults.h`. The setup table self-checks: replaying it in order reproduces the vendor's final value for every register it touches.
 
 ### CVISP on the open stack, validated
 
@@ -403,7 +403,7 @@ The cold-boot dark frame is clean (see "The cold-boot dark-frame blobs"); the ed
 
 ### Gain-keyed stages: parity by derivation
 
-Three ISP stages are recomputed by the vendor from gain-band ladders in the tuning file: `rnr`, `lnr` and `de3d`. All three share one blob layout (a header of enable, interpolate, band count and abscissa selector; sixteen `[low, high]` float32 band slots; one payload record per band) and one law: inside a band the record applies verbatim, between bands the fields blend linearly with truncation toward zero. The driver implements all three in `ar-isp-ladder.h`, deriving every register from the tuning file at a caller-supplied abscissa (`rnr_gain`, `lnr_gain`, `de3d_gain`, Q8 module parameters until an AE loop produces the abscissa per frame). The proofs are `scripts/check-rnr-ladder.py`, `check-lnr-ladder.py` and `check-de3d-ladder.py`: the same integer arithmetic in Python, refusing to pass unless every capture-covered register reproduces bit-exactly from the blob at both measured vendor operating points.
+Three ISP stages are recomputed by the vendor from gain-band ladders in the tuning file: `rnr`, `lnr` and `de3d`. All three share one blob layout (a header of enable, interpolate, band count and abscissa selector; sixteen `[low, high]` float32 band slots; one payload record per band) and one law: inside a band the record applies verbatim, between bands the fields blend linearly with truncation toward zero. The driver implements all three in `ar-isp-ladder.h`, deriving every register from the tuning file at a caller-supplied abscissa (`rnr_gain`, `lnr_gain`, `de3d_gain`, Q8 module parameters until an AE loop produces the abscissa per frame). The proofs are `scripts/isp/check-rnr-ladder.py`, `check-lnr-ladder.py` and `check-de3d-ladder.py`: the same integer arithmetic in Python, refusing to pass unless every capture-covered register reproduces bit-exactly from the blob at both measured vendor operating points.
 
 Registers in these banks that are not ladder outputs are classified, not assumed: lnr `0x3d10` is never written by the vendor and `0x3d14` keeps a replayed value (unresolved pre-pack bias); de3d `0x2e98` is the block's hardware line-time latch and is never written; the de3d buffer addresses are driver-owned; the per-stage user-strength laws are the identity at the vendor's default of 50 and nothing in this stack sets a strength, so they are not carried. The de3d control and strength words (`0x2e00` enables, `0x2e1c`, `0x2e20`, `0x2e90`, `0x2eb4`) are packer outputs and derive with the rest; running them at the replayed pre-streaming state instead is what destroyed moving regions even with the threshold registers exact.
 
@@ -420,8 +420,8 @@ Parity above is at a fixed operating point. The vendor's 3A loops move state thi
 | Sensor init, MCLK, stream-on | `overlay/drivers/media/artosyn/nt99235.c` |
 | CSI-2 D-PHY, lanes, IPI, deskew | `overlay/drivers/media/artosyn/ar-csi2.c` |
 | VIF front end, view arm, DMA | `overlay/drivers/media/artosyn/ar-vif.c` |
-| ISP configuration | `overlay/drivers/media/artosyn/ar-isp.c`, tables `ar-isp-defaults.h` from `scripts/gen-isp-defaults.py` |
-| CVISP output stage and queue | `overlay/drivers/media/artosyn/ar-cvisp.c`, tables `ar-cvisp-defaults.h` from `scripts/gen-cvisp-defaults.py` |
+| ISP configuration | `overlay/drivers/media/artosyn/ar-isp.c`, tables `ar-isp-defaults.h` from `scripts/isp/gen-isp-defaults.py` |
+| CVISP output stage and queue | `overlay/drivers/media/artosyn/ar-cvisp.c`, tables `ar-cvisp-defaults.h` from `scripts/isp/gen-cvisp-defaults.py` |
 | DT nodes (camera, CSI, VIF, ISP, CVISP, clocks, carveouts) | `devices/betafpv-vr04-air/proxima-9311-air.dts` |
 | Vendor MMIO write trace, per block and wide sweep | capture harness `glue/camera/au-slotA-mmiotrace.sh`, shim `native/mmiotrace.c`; the logs are capture artifacts, not in the tree |
 | CVISP first-light experiment | `glue/camera/au-cvisp-firstlight.sh` |
@@ -450,7 +450,7 @@ All five ring slots hold distinct frames after a one-second window, differing by
 
 The crush was `0x2e2c` and `0x2e30`, whose corrected values sit past the prefix the replay applies; writing them recovers the whole shadow range (57% of pixels under luma 32 becomes 0.0%). See `ar_isp_output_fix` in `ar-isp-defaults.h`.
 
-A related trap, worth keeping: the vendor's coefficient pages survive in DRAM across a RAM-boot at the addresses the replay arms, so a pipeline that does not generate its own tables runs correctly on **inherited** content and only fails on a cold boot. `ar-isp.c` generates every byte the hardware fetches (gamma page 0 and the DRC dynamic half from the tuning file; gamma page 1 and the DRC tail carried as decoded curves via `scripts/gen-gamma-page1.py` and `scripts/gen-drc-tail.py`). Packed multi-lane table formats are neither mostly zero nor monotonic read as flat `u32`, so zero-fraction and monotonicity heuristics score the packing, not the content.
+A related trap, worth keeping: the vendor's coefficient pages survive in DRAM across a RAM-boot at the addresses the replay arms, so a pipeline that does not generate its own tables runs correctly on **inherited** content and only fails on a cold boot. `ar-isp.c` generates every byte the hardware fetches (gamma page 0 and the DRC dynamic half from the tuning file; gamma page 1 and the DRC tail carried as decoded curves via `scripts/isp/gen-gamma-page1.py` and `scripts/isp/gen-drc-tail.py`). Packed multi-lane table formats are neither mostly zero nor monotonic read as flat `u32`, so zero-fraction and monotonicity heuristics score the packing, not the content.
 
 ## What the driver owns
 
@@ -468,7 +468,7 @@ Validated on hardware with seeding off, so nothing in the "ours" rows came from 
 | hdr_lsc | `0x1e38` | zero page | parity: the stage ends disabled and the vendor's own page is stale heap |
 | CCM | registers `0x3400`/`0x3800`, no DMA | tuning file, packed Q8 sign-magnitude | ours; all six words match the trace exactly |
 | BLC | CVISP registers `0x4200`, no DMA | tuning file, gain-blended calibration entries | ours; reproduces the traced registers exactly |
-| rnr | registers `0x1808`-`0x1834`, no DMA | tuning file, gain-ladder blend (`ar-isp-ladder.h`) | ours; band 0 is byte-identical to the replayed cold bank, and the vendor's live bank reproduces at abscissa 13.6-14.2 (`scripts/check-rnr-ladder.py`) |
+| rnr | registers `0x1808`-`0x1834`, no DMA | tuning file, gain-ladder blend (`ar-isp-ladder.h`) | ours; band 0 is byte-identical to the replayed cold bank, and the vendor's live bank reproduces at abscissa 13.6-14.2 (`scripts/isp/check-rnr-ladder.py`) |
 
 **Statistics buffers the hardware writes**, allocated and published by the driver, confirmed on silicon:
 
@@ -504,7 +504,7 @@ The vendor's operating point is pinned exactly: at gain **187** the band is 130 
 
 `rnr`, `lnr` and `de3d` all blend between two adjacent entries by an AE-supplied weight, exactly as BLC does, and truncate on the way to the registers. The weight's abscissa is a linear gain multiplier with unity at 1.0 (rnr's band edges are powers of two), but it is not the sensor analog multiplier: the vendor's live rnr bank demands 13.6-14.2 where the analog gain was 62, the same unresolved scale error BLC shows at 2.6x. The driver therefore takes the abscissa as the `rnr_gain` module parameter (Q8, default 1.0, which is the replayed cold bank exactly) rather than deriving it from the gain code; one vendor capture of the sensor gain register and ISP `0x1808` together pins the unit.
 
-**lnr additionally lost its static curves to the prefix cut.** The applied 1475-entry prefix truncates lnr's four 64-entry strength curves (`0x3d60` onward, stride `0x40`, normalised to `0x40`) mid-block, leaving the tail zero, which is gain zero rather than neutral. `ar_isp_lnr_fix[]` in `ar-isp.c` restores the 35 affected registers with the streaming vendor's live values, applied in both configure paths after the setup replay. Found by the register-state diff (`scripts/isp-regdiff.py`), which classifies every live difference against the driver's own tables; the sweep files carry window-relative row offsets, so that tool is the only sanctioned way to read them.
+**lnr additionally lost its static curves to the prefix cut.** The applied 1475-entry prefix truncates lnr's four 64-entry strength curves (`0x3d60` onward, stride `0x40`, normalised to `0x40`) mid-block, leaving the tail zero, which is gain zero rather than neutral. `ar_isp_lnr_fix[]` in `ar-isp.c` restores the 35 affected registers with the streaming vendor's live values, applied in both configure paths after the setup replay. Found by the register-state diff (`scripts/isp/isp-regdiff.py`), which classifies every live difference against the driver's own tables; the sweep files carry window-relative row offsets, so that tool is the only sanctioned way to read them.
 
 **The hdr-path descriptors are owned and quiescent.** `hdr_lsc` (bank `0x1dd0`, length `0x1e2c`, address `0x1e38`, valid `0x1e40`) gets a driver-owned zero page: the vendor's own live page at `0x2b2e8c00` is stale heap (the fill path never runs in the FPV configuration) and the stage's control word ends disabled on both sides, so zero is parity, not a placeholder. Both module-local valid bits (`0x1e40` and HDR's `0x1c60`) are cleared at the end of the output arm, matching the vendor's measured steady state of arm, fetch, de-validate; the driver previously left them set after publishing.
 
@@ -537,7 +537,7 @@ Background facts that remain true and useful: the cold sensor's floor sits below
 
 Descriptor ownership by vendor module: `0x4c34` is `isp_sub_lsc` (bank `0x4c00`), `0x1c6c` is `isp_sub_hdr` (bank `0x1c00`), and `0x2808`/`0x280c` are the shared `gtm2`/`ltm` pair (bank `0x2800`). A descriptor's name is worth nothing until its bank is attributed to a module; the attribution method is in the shading and colour section below.
 
-Compander needs no generator: the `0x7800` page is installed verbatim at ISP init from entry 6 of the descriptor array at VMA `0x472600` (`{u64 source, u64 length}` pairs), whose body at VMA `0x46a3b0` is byte-identical to the page captured off a streaming vendor unit. `scripts/gen-compander.py` extracts it and `ar_isp_compander_fill` rebuilds it.
+Compander needs no generator: the `0x7800` page is installed verbatim at ISP init from entry 6 of the descriptor array at VMA `0x472600` (`{u64 source, u64 length}` pairs), whose body at VMA `0x46a3b0` is byte-identical to the page captured off a streaming vendor unit. `scripts/isp/gen-compander.py` extracts it and `ar_isp_compander_fill` rebuilds it.
 
 Three quarters of the page is one 16-byte unity record repeated 1536 times and a further `0x700` bytes are zero, so only `0x900` bytes at the start and `0x800` at `0x1000` are carried: 4352 bytes rather than 30720. The generator script checks that structure against the library and refuses to emit if it has changed.
 
@@ -645,7 +645,7 @@ The float region past the LSC gate holds sixteen 10x10 grids, not one pair: grou
 
 **LUT3D is present, armed, and disabled on the streaming vendor.** The init handler copies ISP-init template entries 42 to 45 verbatim (`0x458960`, `0x4562e0`, `0x453c60`, `0x4515e0`, `0x2680` each, four distinct banks of 16-byte records with nine content bytes) into four DMA banks, writes per-descriptor length `0x280` in 16-byte records (an over-fetch, flush is `0x2800`), publishes the four addresses and valid bits, and never reads the tuning file for payload. The tuning gate at `raw + 0x7b634` only drives module control `0x5800` bit 0 through the apply-tuning command. The working bringup's last write to `0x5800` is 0 and the whole bank reads zero on the streaming unit, so the module is off and the driver reproduces the vendor by leaving it off. The four banks are deliberately not carried in-tree; `ar-isp-colour.h` records the register layout and the template VMAs to extract them if the stage is ever enabled.
 
-**CCM lands in registers, not a DMA page.** Both banks are `0x50` bytes: a packed 3x3 matrix at `+0x00`, a second copy at `+0x20`, a zero tail at `+0x40`. A matrix is six words, `{c0|c1<<16, c2, c3|c4<<16, c5, c6|c7<<16, c8}`, each coefficient 16-bit sign-magnitude Q8 with the magnitude truncated toward zero (`fcvtzs #8`; a negative v is encoded `0x8000 + |v|`). At init ccm1 gets an identity pair (template entry 33) and ccm2 gets the vendor's fixed matrix pair (entry 34, word-identical to the traced registers; its tuning gate at `raw + 0x2595c` reads 0, so it never moves). At runtime the AWB path packs an interpolated tuning matrix into ccm1's first copy only: gate `raw + 0x253fc` reads 1, the illuminant ladder is eight kelvins at `raw + 0x25438`, and four of eight matrix slots at `raw + 0x25470` (stride `0x24`, nine float32 row-major) hold data, matching the bank count in the selector block. The traced runtime write is bank 0 packed verbatim, which is the byte-for-byte proof: `scripts/gen-ccm.py` re-packs it and refuses to emit `ar-isp-ccm-init.h` on any mismatch. The packing functions are in `ar-isp-colour.h`. CCM enable is not a bank register: ccm2's enabled path clears bits 25 and 27 of the ISP global control word at `+0x0000` (both already 0 in the live streaming value `0xb0280052`).
+**CCM lands in registers, not a DMA page.** Both banks are `0x50` bytes: a packed 3x3 matrix at `+0x00`, a second copy at `+0x20`, a zero tail at `+0x40`. A matrix is six words, `{c0|c1<<16, c2, c3|c4<<16, c5, c6|c7<<16, c8}`, each coefficient 16-bit sign-magnitude Q8 with the magnitude truncated toward zero (`fcvtzs #8`; a negative v is encoded `0x8000 + |v|`). At init ccm1 gets an identity pair (template entry 33) and ccm2 gets the vendor's fixed matrix pair (entry 34, word-identical to the traced registers; its tuning gate at `raw + 0x2595c` reads 0, so it never moves). At runtime the AWB path packs an interpolated tuning matrix into ccm1's first copy only: gate `raw + 0x253fc` reads 1, the illuminant ladder is eight kelvins at `raw + 0x25438`, and four of eight matrix slots at `raw + 0x25470` (stride `0x24`, nine float32 row-major) hold data, matching the bank count in the selector block. The traced runtime write is bank 0 packed verbatim, which is the byte-for-byte proof: `scripts/isp/gen-ccm.py` re-packs it and refuses to emit `ar-isp-ccm-init.h` on any mismatch. The packing functions are in `ar-isp-colour.h`. CCM enable is not a bank register: ccm2's enabled path clears bits 25 and 27 of the ISP global control word at `+0x0000` (both already 0 in the live streaming value `0xb0280052`).
 
 ### Statistics: the eight per-frame addresses, and the AE input (recovered)
 
@@ -672,7 +672,7 @@ Bank `0x6400` holds **two** independent engines at a `0x34` stride, and `rro_fac
 
 **Two vendor modules register under a duplicate name.** `isp_sub_af_stats_creat` stores the name string `isp_sub_rro_stats`, the same pointer `isp_sub_rro_stats_creat` uses, and `isp_sub_derolling_stats_creat` stores `isp_sub_raw_hist_stats`. Bank attribution is unaffected because it comes from the attach handler, but any name-keyed lookup over this module set will collide.
 
-`ar-isp-stats.h` holds the indexing and `scripts/check-stats-layout.py` is the proof: it re-derives both layouts from the captures and fails if the structure, the 255 ceiling or the Bayer populations stop holding.
+`ar-isp-stats.h` holds the indexing and `scripts/isp/check-stats-layout.py` is the proof: it re-derives both layouts from the captures and fails if the structure, the 255 ceiling or the Bayer populations stop holding.
 
 ### LTM: the coefficient page is computed, not stored (recovered)
 
@@ -690,7 +690,7 @@ That makes LTM a 3A-class stage. Reproducing it is a computation over `ltm_stats
 
 **Buffer extents, from the vendor's allocation layout.** Each descriptor alternates between two addresses and the gap between them is the allocation: the LTM page and `ltm_stats` are both `0x80000`, `rro_stats` and `rro_face_stats` `0x8000`, `raw_hist_stats` `0x1000`, and `af_stats` `0x1200`. These are what the vendor allocates, not what it fills; the LTM page fills `0x4000` of its `0x80000` and the histogram fills `0x800` of its `0x1000`.
 
-`ar-isp-ltm.h` holds the geometry, the extents and an identity-page filler; `scripts/check-ltm-page.py` proves the geometry against the capture and reports the template divergence.
+`ar-isp-ltm.h` holds the geometry, the extents and an identity-page filler; `scripts/isp/check-ltm-page.py` proves the geometry against the capture and reports the template divergence.
 
 ### ml-isploop flags
 

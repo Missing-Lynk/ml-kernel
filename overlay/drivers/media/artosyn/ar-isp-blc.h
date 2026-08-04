@@ -12,7 +12,7 @@
  * first group of four is shifted left by 6 on its way to the registers and the
  * second group is not.
  *
- * The proof is kernel/scripts/check-blc.py.
+ * The proof is kernel/scripts/isp/check-blc.py.
  */
 
 #ifndef AR_ISP_BLC_H

@@ -33,7 +33,7 @@ What this checks:
 
 The trace and the tuning file are proprietary and are not in the repository.
 
-    kernel/scripts/check-gain-ladders.py \\
+    kernel/scripts/isp/check-gain-ladders.py \\
         --tuning out/air-gather/camera/nt99235_tuning_preview_fpv.bin \\
         --trace out/au-mmiotrace/mmio-isp.log
 """

@@ -20,7 +20,7 @@ handler.
 
 The library and the traces are proprietary and are not in the repository.
 
-    kernel/scripts/check-isp-bank-map.py \\
+    kernel/scripts/isp/check-isp-bank-map.py \\
         --lib out/air-gather/vendor-root/usr/lib/libmpp_service.so \\
         --trace out/au-mmiotrace/mmio-isp.log
 """

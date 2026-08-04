@@ -54,7 +54,7 @@ confirmation of the verdicts.
 
 The library is proprietary and is not in the repository.
 
-    kernel/scripts/check-module-arith.py \\
+    kernel/scripts/isp/check-module-arith.py \\
         --lib out/air-gather/vendor-root/usr/lib/libmpp_service.so
 """
 

@@ -10,7 +10,7 @@ on the replay path because it has an unresolved fixed bias before pack.
 
 The tuning file and captures are proprietary and are not in the repository.
 
-    kernel/scripts/check-lnr-ladder.py \\
+    kernel/scripts/isp/check-lnr-ladder.py \\
         --tuning out/air-gather/camera/nt99235_tuning_preview_fpv.bin \\
         --bright out/au-vendor-session/breath-light2-bright.txt \\
         --dark out/au-vendor-session/breath-light1.txt

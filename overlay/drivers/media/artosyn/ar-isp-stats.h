@@ -16,7 +16,7 @@
  * Module-to-bank attribution comes from each isp_sub_*_creat's second
  * registered handler, which maps the module's bank with the bank offset as an
  * immediate beside its ar_dev_pa2va calls. The proof is
- * kernel/scripts/check-stats-layout.py.
+ * kernel/scripts/isp/check-stats-layout.py.
  *
  * Pure indexing arithmetic: no register access, so the same source can be
  * compiled host-side against the captures.

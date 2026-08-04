@@ -14,7 +14,7 @@ it rather than installing it.
 
 Captures and the vendor library are proprietary and are not in the repository.
 
-    kernel/scripts/check-ltm-page.py --capture out/au-snapshot/tbl_isp_0x2808.bin \\
+    kernel/scripts/isp/check-ltm-page.py --capture out/au-snapshot/tbl_isp_0x2808.bin \\
         --lib out/air-gather/vendor-root/usr/lib/libmpp_service.so
 """
 

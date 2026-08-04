@@ -27,7 +27,7 @@ pass unless:
 
 The tuning file is proprietary and is not in the repository.
 
-    kernel/scripts/check-rnr-ladder.py \\
+    kernel/scripts/isp/check-rnr-ladder.py \\
         --tuning out/air-gather/camera/nt99235_tuning_preview_fpv.bin
 """
 

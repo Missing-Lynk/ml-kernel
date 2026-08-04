@@ -10,7 +10,7 @@ fit, and that the entry table really is five entries and stops there.
 
 The tuning file and the trace are proprietary and are not in the repository.
 
-    kernel/scripts/check-blc.py \\
+    kernel/scripts/isp/check-blc.py \\
         --blob out/air-gather/camera/nt99235_tuning_preview_fpv.bin \\
         --trace out/au-mmiotrace/wide-sweep.log
 """

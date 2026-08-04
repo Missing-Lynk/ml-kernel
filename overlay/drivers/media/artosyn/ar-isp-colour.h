@@ -12,7 +12,7 @@
  * 0x187a50, isp_sub_ccm2_creat 0x1af6e8, isp_sub_lut3d_creat 0x1c3400; each
  * module's second registered handler maps its register bank, its third is the
  * command handler that fills it) and validated word-for-word against the
- * vendor MMIO trace. The runnable proof is kernel/scripts/gen-ccm.py, which
+ * vendor MMIO trace. The runnable proof is kernel/scripts/isp/gen-ccm.py, which
  * packs the tuning-file matrix with this format and refuses to emit if it
  * stops matching the traced registers.
  *

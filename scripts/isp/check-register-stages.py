@@ -27,7 +27,7 @@ only trace that does.
 The traces and the header's source library are proprietary. The header is in
 the repository, so --header alone still checks coverage.
 
-    kernel/scripts/check-register-stages.py \\
+    kernel/scripts/isp/check-register-stages.py \\
         --trace out/au-mmiotrace/mmio-isp.log \\
         --wide out/au-mmiotrace/wide-sweep.log
 """

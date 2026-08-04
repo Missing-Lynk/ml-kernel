@@ -27,7 +27,7 @@
  * at their default of 50 and nothing in this stack sets a strength, so they
  * are not carried.
  *
- * The runnable proofs are kernel/scripts/check-rnr-ladder.py,
+ * The runnable proofs are kernel/scripts/isp/check-rnr-ladder.py,
  * check-lnr-ladder.py and check-de3d-ladder.py: the same arithmetic in
  * Python, refusing to pass if it stops reproducing the measured register
  * states from the tuning file.

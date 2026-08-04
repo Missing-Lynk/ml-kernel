@@ -14,7 +14,7 @@
  * established here is the geometry a producer has to fill and the extents a
  * driver has to allocate, both measured against a captured page.
  *
- * The proof is kernel/scripts/check-ltm-page.py.
+ * The proof is kernel/scripts/isp/check-ltm-page.py.
  */
 
 #ifndef AR_ISP_LTM_H

@@ -15,7 +15,7 @@ one quarter, one half and one quarter of the frame's pixels.
 
 Captures are proprietary and are not in the repository.
 
-    kernel/scripts/check-stats-layout.py --snapshot out/au-snapshot
+    kernel/scripts/isp/check-stats-layout.py --snapshot out/au-snapshot
 """
 
 import argparse
