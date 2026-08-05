@@ -893,6 +893,7 @@ static int ar_cvisp_start_streaming(struct vb2_queue *q, unsigned int count)
 					 list);
 	if (!first) {
 		spin_unlock_irqrestore(&cv->buffer_lock, flags);
+		ar_cvisp_return_buffers(cv, VB2_BUF_STATE_QUEUED);
 		return -EINVAL;
 	}
 
@@ -919,16 +920,22 @@ static void ar_cvisp_stop_streaming(struct vb2_queue *q)
 	unsigned long flags;
 
 	spin_lock_irqsave(&cv->buffer_lock, flags);
+
 	cv->streaming = false;
-	spin_unlock_irqrestore(&cv->buffer_lock, flags);
 
 	/*
 	 * Put the vendor ring back under the block before the buffers go. The
 	 * tick keeps firing after STREAMOFF, and it must not be left pointing at
 	 * memory that has been handed back to the allocator.
+	 *
+	 * Under the same lock as the tick: its not-streaming branch writes this
+	 * plane triplet and this index from ar_cvisp_queue, so an unlocked write
+	 * here interleaves with it and publishes a mixed slot.
 	 */
 	ar_cvisp_arm(cv, 0);
 	cv->next = 1 % ARRAY_SIZE(ar_cvisp_ring);
+
+	spin_unlock_irqrestore(&cv->buffer_lock, flags);
 
 	ar_cvisp_return_buffers(cv, VB2_BUF_STATE_ERROR);
 

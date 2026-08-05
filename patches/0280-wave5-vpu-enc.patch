@@ -6,7 +6,11 @@ additions.
 (1) finish_encode error path. Upstream returns without v4l2_m2m_job_finish,
 leaking the m2m job; the next STREAMOFF then deadlocks in v4l2_m2m_cancel_job
 (D-state with the device mutex held, VPU unusable until power cycle). Log the
-firmware error and finish the job.
+firmware error and finish the job. enc_output_info is zero-initialized because
+this branch reads error_reason out of it after the getter has failed, and the
+getter does not guarantee it was written on every failing return; zero is not
+WAVE5_SYSERR_VLC_BUF_FULL, so an unwritten struct classifies as ERROR rather
+than as a spurious recoverable failure.
 
 (2) Result-error buffer ownership. The error path returned the OUTPUT buffer with
 v4l2_m2m_src_buf_remove(), but start_encode() has already removed that source from
@@ -179,7 +183,8 @@ constraints round it. The source geometry is untouched.
  
  	return 0;
 @@ -245,12 +285,49 @@
- 	struct enc_output_info enc_output_info;
+-	struct enc_output_info enc_output_info;
++	struct enc_output_info enc_output_info = {};
  	struct vb2_v4l2_buffer *src_buf = NULL;
  	struct vb2_v4l2_buffer *dst_buf = NULL;
 +	bool recoverable_vlc_buf_full;
