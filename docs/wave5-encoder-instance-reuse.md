@@ -51,4 +51,4 @@ No camera, no bring-up, ~30 s on the device:
 glue/camera/au-enc-repeat.sh          # RUNS=, FRAMES=, EXTRA= (extra ml-cam2enc flags)
 ```
 
-`ml-cam2enc -e` feeds the encoder a fixed synthetic pattern from dma-heap buffers and prints `STREAM: <coded> coded, <bytes> bytes, hash <hex>` (FNV-1a over every coded byte), so repeat runs of one build must hash identically. Healthy 60-frame HEVC 1080p: `16306 bytes, 06b372ee507e0199`. Watchdog: `1 coded, 0 bytes`. Garbage: megabytes. `glue/camera/au-enc-holder.sh` is the sibling-instance variant.
+`ml-cam2enc -e` feeds the encoder a fixed synthetic pattern from dma-heap buffers and prints `STREAM: <coded> coded, <bytes> bytes, hash <hex>` (FNV-1a over every coded byte), so repeat runs of one build must hash identically. Healthy 60-frame HEVC 1080p: `16306 bytes, 06b372ee507e0199`. Watchdog: `1 coded, 0 bytes`. Garbage: megabytes.
