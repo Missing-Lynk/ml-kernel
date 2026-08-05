@@ -95,6 +95,7 @@ def check_rro(name: str, data: bytes) -> int:
           f"max sum {max(sums)} = {max(sums) / count:.1f} x count")
     print(f"    channel means {', '.join(f'{m:.2f}' for m in means)} "
           f"(green gap {green_gap:.3f} < outer gap {outer_gap:.3f})")
+
     return count
 
 

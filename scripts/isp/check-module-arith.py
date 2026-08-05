@@ -216,7 +216,8 @@ def materialised(code: dict[int, str], ext: dict[int, int]) -> set[int]:
 
 def recover(code: dict[int, str], exported: set[int],
             handlers_found: Sequence[int]) -> tuple[list[int], int]:
-    """Grow the seed set until no materialised address falls outside the body.
+    """
+    Grow the seed set until no materialised address falls outside the body.
 
     An address already covered by an extent is reached anyway, so only one that
     lies outside every span is a callback that changes what the module is.

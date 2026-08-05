@@ -18,14 +18,21 @@ Tags used below: **DONE** (working, hardware-validated) - **PARTIAL** (works, wi
 
 ## Air-unit camera capture
 
-Air units only; the goggle has no camera hardware. Architecture (which block is stock IP and which is Artosyn-specific) is in `PERIPHERALS.md`. State below is as of the 2026-07-26 hardware session.
+Air units only; the goggle has no camera hardware. Architecture (which block is stock IP and which is Artosyn-specific) is in `PERIPHERALS.md`.
+
+`docs/camera-stack.md` is the source of truth for this section: its "Status" heading carries the per-block parity evidence against the streaming vendor, and its later sections carry what each block owns and what is still frozen. The rows below are verdicts only and deliberately do not restate it.
 
 | Item | Status | Notes |
 |---|---|---|
-| NT99235 sensor subdev (`overlay/drivers/media/artosyn/nt99235.c`) | PARTIAL | driver + DT node (`i2c0` @ `0x1a`, `configs/camera.config`) in place and the sensor streams; the link is 2 lanes, measured, so the sensor's 4-lane modes are unusable |
-| CSI-2 receiver (`ar-csi2`) | PARTIAL | DesignWare host v1.20, IPI configuration matches a capture of the vendor stack byte for byte. The receiver takes in data but the packets are corrupt: uncorrectable header ECC plus frame-boundary and frame-sequence errors |
-| VIF capture front end (`ar-vif`) | PARTIAL | fully programmed and proven correct (FIFO partition, stride, DDR size, frame end all match the vendor); its status register reads 0, so it is never handed a frame. Not the blocker |
-| End-to-end capture (first frame) | NOT DONE | blocked upstream of the VIF, in CSI-2 D-PHY bring-up: the receiver is never told what bit rate it is receiving, which is what header-ECC corruption on an otherwise correct link means |
+| End-to-end capture (sensor -> CSI-2 -> VIF -> ISP -> CVISP) | DONE | the full chain captures processed colour frames at 1080p60 on the open stack, validated by marker count and by rendered images |
+| Per-block parity: sensor, CSI-2 link, VIF front end, ISP, CVISP | DONE | each vendor-identical over its modeled range; drivers in `overlay/drivers/media/artosyn/`, evidence per block in `docs/camera-stack.md` "Status" |
+| Gain-keyed ISP stages (`rnr`, `lnr`, `de3d`) | DONE | derived from the tuning-file ladders rather than transcribed, bit-exact at both measured vendor operating points; the proofs are `scripts/isp/check-{rnr,lnr,de3d}-ladder.py` |
+| AE closed loop | DONE | `native/ml-3a.c` meters the `rro_stats` zone grid and drives sensor exposure, sensor gain and the three ladder abscissas from one exposure-table index |
+| Camera -> wave5 encoder | PARTIAL | 1080p60 reaches the encoder, but only the first encoder instance per firmware boot is reliable; the defect is in the codec firmware, not the camera path (`docs/wave5-encoder-instance-reuse.md`) |
+| CGU camera leaves | PARTIAL | the open stack programs three of the fourteen registers the vendor programs; the rest are inherited from boot state, unexplained but measured harmless in the working chain |
+| VIF view-engine (bypass) path | NOT DONE | implemented from the register map but unvalidated: no bypass view has ever delivered a frame, on either stack, and the vendor holds the views in reset |
+| `cfa` and `cnf` recompute transforms | NOT DONE | the two remaining AEC-triggered stages; they run replayed state today. Next recovery target |
+| AWB, tone-table selection, LTM tile curves | NOT DONE | held constant where the vendor's 3A moves them; loops to implement, not registers to fix |
 
 ## RF chip (AR8030)
 
@@ -88,7 +95,7 @@ The vendor codec is a **Chips&Media WAVE521C** (H.264/H.265 encode+decode) plus 
 | Functional decode - clean linear (WTL) output | DONE | vb2 CAPTURE frames are **pixel-perfect**; the WAVE521C fixes (sec-AXI forced off, `reorder_enable=FALSE`, FBC recon height `ALIGN(h,64)`) are in the patches (`patches/README.md`) |
 | Decode output - byte-exact | DONE | **bit-exact vs ffmpeg** (mad 0.000 on all 3 planes, multiple resolutions, stable across repeated decoder instances) |
 | Decoder capability matrix (codecs / resolutions / rates) | DONE | **HEVC** at 640x360, 1280x720, 1920x1080 and **H.264** at 1280x720, all bit-exact; **323 fps @ 720p / 165 fps @ 1080p**. Full capability reference incl. the decoded GET_VPU_INFO bits, the 8-bit-only feature set, and the 1080p memory budget: `docs/wave5-codec-capabilities.md` |
-| Functional encode (WAVE521C -> HEVC/H.264) | DONE | all 4 combos verified by host-ffmpeg decode + PSNR vs source: **HEVC and H.264 at 1280x720 AND 1920x1080, 42-48 dB PSNR every plane**; **171 fps @ 720p / 108 fps @ 1080p**. The two encode fixes (sec-AXI off, `finish_encode` error-path job-finish) and the userspace buffer contract: `docs/wave5-codec-capabilities.md`. DVR integration DONE (concurrent-fit row below); RTSP: future work |
+| Functional encode (WAVE521C -> HEVC/H.264) | DONE | all 4 combos verified by host-ffmpeg decode + PSNR vs source: **HEVC and H.264 at 1280x720 AND 1920x1080, 42-48 dB PSNR every plane**; **171 fps @ 720p / 108 fps @ 1080p**. The encode fixes (no sec-AXI window declared to encoder instances, `finish_encode` error-path job-finish, `VLC_BUF_FULL` recovery, source stride and coded height) are `patches/0220` and `patches/0280`; the userspace buffer contract is in `docs/wave5-codec-capabilities.md`. DVR integration DONE (concurrent-fit row below); RTSP: future work |
 | Flash-prep: convert codec to module (`=m`), fw on rootfs | DONE | `VIDEO_WAVE_VPU=m`, embedded fw dropped; Image fits the 6 MiB slot (96.9%). `wave5.ko` + its v4l2/videobuf2 deps staged by `modules/build.sh`; `chagall.bin` installed on the rootfs at `/lib/firmware/cnm/` by `rootfs/build.sh`. Validated: `modprobe wave5` brings the codec up + decodes on HW |
 | Decode -> display (dma-buf to DRM YUV plane) | DONE | validated end to end via GStreamer: H.264/H.265 file -> wave5 decode -> dma-buf export -> PRIME import -> DRM I420 primary, **1080p60 at measured 60.00 fps / 0 drops, zero-copy**; no `ar_scaler` hop needed at native res (the DC scans the decoder's 64-aligned luma stride; `artosyn_vo` dumb-pitch is 64-px for 8-bpp). Tooling + full gotcha list: `../userspace/gstreamer/README.md` |
 | Concurrent 2x decode + 1080p60 encode fit (DVR) | DONE | the vendor-parity load (two RF-tile decoders + the 1080p60 H.264 DVR encoder) fits the MMZ pool via `patches/0300-dma-coherent-page-granular.patch` (page-granular first-fit instead of power-of-2 rounding). HW-validated 2026-07-12: 60 fps composite, 0 drops, playable 1920x1080@60 MP4. `dec_cap_bufs` must stay 0 (`docs/wave5-codec-capabilities.md`). Kernel1 flash pending |

@@ -94,6 +94,7 @@ def check_table(blob: bytes) -> list[tuple[list[int], list[int]]]:
           f"scale {table[0][0][0]}..{table[-1][0][0]}, "
           f"level {table[0][1][0]}..{table[-1][1][0]}")
     print(f"       nothing follows entry {ENTRIES - 1}")
+
     return table
 
 
@@ -109,6 +110,7 @@ def check_ladder(blob: bytes) -> list[tuple[float, float]]:
 
     print(f"ladder: {ENTRIES} float pairs at {LADDER:#x}, "
           f"{', '.join(f'({a:g},{b:g})' for a, b in pairs)}")
+
     return pairs
 
 

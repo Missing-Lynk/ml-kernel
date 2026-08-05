@@ -48,6 +48,9 @@ PAYLOAD = 0x963AC
 STRIDE = 0x2F8
 COUNT = 12
 
+# ar-isp-de3d.h calls this AR_ISP_DE3D_SLOPE_NUM.
+SLOPE_NUM = 65532
+
 REGS = [
     (0x2E00, 0x0000000C), (0x2E10, 0xFFFFFFFF), (0x2E14, 0xFFFFFFFF),
     (0x2E18, 0xFFFFFFFF), (0x2E1C, 0x00003FFF), (0x2E20, 0x01FF00FF),
@@ -144,26 +147,32 @@ def de3d_from_blob(blob: bytes, gain_q16: int) -> list[int]:
 
     def fld(off: int, width: int, t: int | None = None) -> int:
         t = t_q24 if t is None else t
-        v = word(blob, band, off)
+        value = word(blob, band, off)
         if t:
-            v = blend_s32(word(blob, band - 1, off), v, t)
-        return v & ((1 << width) - 1)
+            value = blend_s32(word(blob, band - 1, off), value, t)
+
+        return value & ((1 << width) - 1)
 
     def slope(hi_off: int, lo_off: int) -> int:
-        def f(off: int) -> int:
-            v = word(blob, band, off)
+        def blended(off: int) -> int:
+            value = word(blob, band, off)
             if t_q24:
-                v = blend_s32(word(blob, band - 1, off), v, t_q24)
-            return v
-        d = f(hi_off) - f(lo_off)
-        if not d:
+                value = blend_s32(word(blob, band - 1, off), value, t_q24)
+
+            return value
+
+        span = blended(hi_off) - blended(lo_off)
+        if not span:
             return 0
-        q = 65532 // d if d > 0 else -(65532 // -d)
-        return q & 0xFFFF
+
+        # Truncating toward zero, as the vendor's sdiv does.
+        quotient = SLOPE_NUM // span if span > 0 else -(SLOPE_NUM // -span)
+        return quotient & 0xFFFF
 
     asym = word(blob, band, 0x90)
     if t_q24:
         asym = blend_s32(word(blob, band - 1, 0x8C), asym, t_q24)
+
     asym &= 0xFF
 
     out = [
@@ -196,6 +205,7 @@ def de3d_from_blob(blob: bytes, gain_q16: int) -> list[int]:
         fld(0xBC, 8),
         fld(0xC0, 8),
     ]
+
     for i in range(32):
         base = 0xE0 + i * 16
         out.append((fld(base, 8) << 24) | (fld(base + 4, 8) << 16) |
@@ -227,12 +237,14 @@ def main() -> int:
         for (reg, mask), value in zip(REGS, got, strict=True):
             if reg not in want:
                 continue
+
             if (value & mask) != want[reg]:
                 bad += 1
                 print(f"  {reg:#06x}: want {want[reg]:#010x} "
                       f"got {value & mask:#010x}")
         if bad:
             sys.exit(f"abscissa {gain_q16 / 65536} misses {bad} registers")
+
         print(f"abscissa {gain_q16 / 65536:9.6f} -> bands {band - 1},{band} "
               f"t {t_q24 / (1 << 24):.7f}, all {len(want)} covered "
               f"registers exact")

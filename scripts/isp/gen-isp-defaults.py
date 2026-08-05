@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Extract the Artosyn ISP per-submodule default register blocks from the vendor
+"""
+Extract the Artosyn ISP per-submodule default register blocks from the vendor
 libmpp_service.so and emit them as a kernel header.
 
 The vendor library carries the static half of the ISP configuration as
@@ -119,7 +120,8 @@ def load_trace(path: str, stop: int) -> dict[int, int]:
 
 
 def load_setup_writes(path: str, stop: int) -> list[tuple[int, int]]:
-    """Every ISP write of the setup phase, in order, with runs collapsed.
+    """
+    Every ISP write of the setup phase, in order, with runs collapsed.
 
     Order is preserved because the block carries an enable ladder and several
     arm-then-load sequences whose result depends on it. Consecutive writes of
@@ -159,7 +161,8 @@ def load_window(path: str) -> dict[int, int]:
 
 def load_trim(vendor_path: str | None,
               our_path: str | None) -> list[tuple[int, int]]:
-    """Registers whose live value on the working device differs from ours.
+    """
+    Registers whose live value on the working device differs from ours.
 
     Live against live, which is the only valid comparison: our intended value is
     not a baseline, and a register can legitimately read back something else.
@@ -175,7 +178,8 @@ def load_trim(vendor_path: str | None,
 
 def agree_span(lib: bytes, bases: Sequence[int], lo: int,
                hi: int) -> tuple[int, int, bool]:
-    """Widest [start, end) around the traced span over which all copies agree.
+    """
+    Widest [start, end) around the traced span over which all copies agree.
 
     With a single copy there is nothing to cross-check, so the whole page is
     returned and the caller marks it unverified.
