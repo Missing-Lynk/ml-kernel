@@ -52,7 +52,19 @@ Because all banks share one DT node, a custom `of_xlate` (`#gpio-cells = 2`) tak
 | 100 | bank6 line6 | panel-power rail (its rising edge samples the scan straps); also the SD **vqmmc** I/O rail (fixed 3.3 V) | `gpio-hog` `output-high` (`panel_power_hog`); the SD side is currently hand-driven high before the card scan (`sd-card.md`) |
 | 107 | bank6 line13 | panel gate/vertical scan-direction strap | `gpio-hog` `output-low` (`panel_scan_v_hog`), before panel-power |
 
-Ordering matters: straps 42 and 107 must be low before the panel-power line (100) rises. gpio-42 is in bank1 (registered before bank6); gpio-107 shares bank6 with gpio-100 and its hog is listed first so it applies before the power hog. The panel power-on sequence (`display-backlight.md`) is `gpio95=0; gpio43=0; 10ms; gpio43=1; 10ms; gpio95=1; 10ms`, power-off `gpio43=0`.
+The table above is the goggle. The air unit (`../devices/betafpv-vr04-air/proxima-9311-air.dts`) has no panel and its own three consumers:
+
+| Global GPIO | Bank/line | Function | How driven |
+|-------------|-----------|----------|------------|
+| 0 | bank0 line0 | red bind-indicator LED, active low | `gpio-leds` (`docs/status-led.md`) |
+| 1 | bank0 line1 | green power LED, active low | `gpio-leds`, `default-state = "on"` |
+| 42 | bank1 line19 | bind button, active low (pressed = low) | `gpio-keys-polled`, 50 ms poll, 10 ms debounce, `KEY_CONNECT` (218); confirmed on hardware |
+
+Line 42 is the panel horizontal-scan strap on the goggle and the bind button here: same SoC line, different board wiring, so the per-board DTS is the only place the function is stated.
+
+**The button is polled, not interrupt-driven.** This gpiochip has no irqchip, so mainline `gpio-keys` cannot bind (it requires one interrupt per button) and `gpio-keys-polled` reads the line through `->get()` instead. Because `artosyn_gpio` is a module, the node defers until it loads: no `/dev/input/eventN` before that. The rootfs coldplugs it from the DT node, so this only shows up on a bare initramfs boot, where the module has to be insmodded by hand first. The input device is named `ml-bind-button` (the node's `label`), which is how its consumer finds it without depending on an event index. The vendor policy the button feeds - release after <= 2 s starts a TX pair window, > 2 s runs an OTA updater the open stack does not have - lives in userspace, not here; `test_tools/button_test.c` auto-detects the device and prints each press with its hold time.
+
+Ordering matters on the goggle: straps 42 and 107 must be low before the panel-power line (100) rises. gpio-42 is in bank1 (registered before bank6); gpio-107 shares bank6 with gpio-100 and its hog is listed first so it applies before the power hog. The panel power-on sequence (`display-backlight.md`) is `gpio95=0; gpio43=0; 10ms; gpio43=1; 10ms; gpio95=1; 10ms`, power-off `gpio43=0`.
 
 ## Driver ops [confirmed]
 

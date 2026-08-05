@@ -9,7 +9,8 @@ Tags used below: **DONE** (working, hardware-validated) - **PARTIAL** (works, wi
 | Item | Status | Notes |
 |---|---|---|
 | Status LED | DONE | `docs/status-led.md`, `test_tools/led_test.c` |
-| Front-panel buttons | DONE | `docs/artosyn-adc.md`, `test_tools/button_test.c` |
+| Front-panel buttons | DONE | goggle adc-keys ladder; `docs/artosyn-adc.md`, `test_tools/button_test.c` |
+| Bind button (air unit) | DONE | `gpio-keys-polled` on GPIO 42 (the derived bank1-line19 mapping, now confirmed live), `configs/gpio-keys.config`, `test_tools/button_test.c`. Validated on a RAM-booted open kernel: clean press/release pairs at 223-2520 ms, no bounce doubles, no autorepeat on a long hold. The consumer that turns the gesture into a pair (ml-linkd air role) is Phase B/C of `../plans/air-bind-button.md`, still open |
 | SoC temperature sensor | DONE | absolute-accuracy cross-check vs stock still pending; `docs/artosyn-protemp.md`, `test_tools/temp_read.sh` |
 | Buzzer + LCD backlight | DONE | `docs/buzzer.md`, `docs/display-backlight.md`, `test_tools/buzzer_test.c` |
 | Display controller (VO + MIPI-DSI + panel) | DONE | `docs/display-backlight.md`, `test_tools/{display_test,display_bounce,overlay_test,display_demo}.c` |
