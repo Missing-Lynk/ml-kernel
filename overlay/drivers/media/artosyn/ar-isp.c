@@ -243,14 +243,19 @@ struct ar_isp {
 	u32 irq_seen1;
 
 	const struct firmware *tuning;
+
 	void *gamma;
 	dma_addr_t gamma_dma;
+
 	void *drc;
 	dma_addr_t drc_dma;
+
 	void *tone;
 	dma_addr_t tone_dma;
+
 	void *lsc;
 	dma_addr_t lsc_dma;
+
 	void *hdr_lsc;
 	dma_addr_t hdr_lsc_dma;
 
@@ -266,6 +271,7 @@ struct ar_isp {
 	 */
 	void *rro;
 	dma_addr_t rro_dma;
+
 	void *rro_face;
 	dma_addr_t rro_face_dma;
 
@@ -275,8 +281,10 @@ struct ar_isp {
 	 */
 	void *ltm_page;
 	dma_addr_t ltm_page_dma;
+
 	void *ltm_stats;
 	dma_addr_t ltm_stats_dma;
+
 	void *hist;
 	dma_addr_t hist_dma;
 
@@ -407,9 +415,7 @@ static const struct ar_isp_reg ar_isp_output_arm[] = {
 static void ar_isp_apply(struct ar_isp *isp, const struct ar_isp_reg *tbl,
 			 size_t n)
 {
-	size_t i;
-
-	for (i = 0; i < n; i++)
+	for (size_t i = 0; i < n; i++)
 		writel(tbl[i].val, isp->base + tbl[i].off);
 }
 
@@ -477,11 +483,11 @@ static void ar_isp_de3d_publish(struct ar_isp *isp)
 		{ AR_ISP_DE3D_BUF1_A, AR_ISP_DE3D_BUF1_B },
 		{ AR_ISP_DE3D_BUF2_A, AR_ISP_DE3D_BUF2_B },
 	};
-	unsigned int i;
 
-	for (i = 0; i < ARRAY_SIZE(reg); i++) {
+	for (unsigned int i = 0; i < ARRAY_SIZE(reg); i++) {
 		if (!isp->de3d[i])
 			continue;
+
 		writel(lower_32_bits(isp->de3d_dma[i]), isp->base + reg[i][0]);
 		writel(lower_32_bits(isp->de3d_dma[i]), isp->base + reg[i][1]);
 	}
@@ -590,6 +596,7 @@ static void ar_isp_ccm_apply(struct ar_isp *isp)
 
 	for (i = 0; i < ARRAY_SIZE(ar_isp_ccm1_init); i++)
 		writel(ar_isp_ccm1_init[i], isp->base + AR_ISP_CCM1_BANK + i * 4);
+
 	for (i = 0; i < ARRAY_SIZE(ar_isp_ccm2_init); i++)
 		writel(ar_isp_ccm2_init[i], isp->base + AR_ISP_CCM2_BANK + i * 4);
 
@@ -649,7 +656,6 @@ static void ar_isp_rnr_apply(struct ar_isp *isp, bool verbose)
 {
 	u32 regs[AR_ISP_RNR_REGS];
 	const u8 *blob;
-	unsigned int i;
 
 	if (rnr_gain < 0)
 		return;
@@ -676,7 +682,7 @@ static void ar_isp_rnr_apply(struct ar_isp *isp, bool verbose)
 
 	ar_isp_rnr_from_blob(regs, blob, (u32)rnr_gain << 8);
 
-	for (i = 0; i < AR_ISP_RNR_REGS; i++)
+	for (unsigned int i = 0; i < AR_ISP_RNR_REGS; i++)
 		writel(regs[i], isp->base + AR_ISP_RNR_BANK +
 		       AR_ISP_RNR_LADDER + i * 4);
 
@@ -706,6 +712,7 @@ static void ar_isp_lnr_apply(struct ar_isp *isp, bool verbose)
 	if (!isp->tuning) {
 		if (verbose)
 			dev_info(isp->dev, "lnr: replayed bank only, no tuning file\n");
+
 		return;
 	}
 
@@ -715,6 +722,7 @@ static void ar_isp_lnr_apply(struct ar_isp *isp, bool verbose)
 			    AR_ISP_LADDER_HDR_ENABLE) != 1) {
 		if (verbose)
 			dev_info(isp->dev, "lnr: tuning gate clear, bank left replayed\n");
+
 		return;
 	}
 
@@ -727,6 +735,7 @@ static void ar_isp_lnr_apply(struct ar_isp *isp, bool verbose)
 		if (i == AR_ISP_LNR_SKIP_NEVER_WRITTEN ||
 		    i == AR_ISP_LNR_SKIP_BIASED)
 			continue;
+
 		writel(regs[i], isp->base + AR_ISP_LNR_BANK + i * 4);
 	}
 
@@ -752,7 +761,6 @@ static void ar_isp_de3d_apply(struct ar_isp *isp, bool verbose)
 {
 	u32 regs[AR_ISP_DE3D_REGS];
 	const u8 *blob;
-	unsigned int i;
 
 	if (de3d_gain < 0)
 		return;
@@ -760,6 +768,7 @@ static void ar_isp_de3d_apply(struct ar_isp *isp, bool verbose)
 	if (!isp->tuning) {
 		if (verbose)
 			dev_info(isp->dev, "de3d: replayed bank only, no tuning file\n");
+
 		return;
 	}
 
@@ -769,12 +778,13 @@ static void ar_isp_de3d_apply(struct ar_isp *isp, bool verbose)
 			    AR_ISP_LADDER_HDR_ENABLE) != 1) {
 		if (verbose)
 			dev_info(isp->dev, "de3d: tuning gate clear, bank left replayed\n");
+
 		return;
 	}
 
 	ar_isp_de3d_from_blob(regs, blob, (u32)de3d_gain << 8);
 
-	for (i = 0; i < AR_ISP_DE3D_REGS; i++) {
+	for (unsigned int i = 0; i < AR_ISP_DE3D_REGS; i++) {
 		u32 off = AR_ISP_DE3D_BANK + ar_isp_de3d_regs[i].off;
 		u32 mask = ar_isp_de3d_regs[i].mask;
 		u32 v = readl(isp->base + off);
@@ -1103,9 +1113,8 @@ static void ar_isp_tables_prepare(struct ar_isp *isp)
 			AR_ISP_DE3D_BUF0_SIZE, AR_ISP_DE3D_BUF1_SIZE,
 			AR_ISP_DE3D_BUF2_SIZE,
 		};
-		unsigned int i;
 
-		for (i = 0; i < ARRAY_SIZE(sz); i++)
+		for (unsigned int i = 0; i < ARRAY_SIZE(sz); i++)
 			isp->de3d[i] = dma_alloc_coherent(dev, sz[i],
 							  &isp->de3d_dma[i],
 							  GFP_KERNEL);
@@ -1119,6 +1128,7 @@ static void ar_isp_tables_prepare(struct ar_isp *isp)
 		dev_warn(dev, "no %s (%d), tables cannot be generated\n",
 			 AR_ISP_TUNING_FIRMWARE, ret);
 		isp->tuning = NULL;
+
 		return;
 	}
 
@@ -1136,33 +1146,42 @@ static void ar_isp_tables_release(struct ar_isp *isp)
 	if (isp->gamma)
 		dma_free_coherent(isp->dev, AR_ISP_GAMMA_SIZE, isp->gamma,
 				  isp->gamma_dma);
+
 	if (isp->drc)
 		dma_free_coherent(isp->dev, AR_ISP_DRC_SIZE, isp->drc,
 				  isp->drc_dma);
+
 	if (isp->tone)
 		dma_free_coherent(isp->dev, AR_ISP_TONE_ALLOC, isp->tone,
 				  isp->tone_dma);
+
 	if (isp->lsc)
 		dma_free_coherent(isp->dev, AR_ISP_LSC_SIZE, isp->lsc,
 				  isp->lsc_dma);
+
 	if (isp->hdr_lsc)
 		dma_free_coherent(isp->dev, AR_ISP_LSC_SIZE, isp->hdr_lsc,
 				  isp->hdr_lsc_dma);
+
 	if (isp->rro)
 		dma_free_coherent(isp->dev,
 				  AR_ISP_RRO_SIZE * AR_ISP_STATS_HALVES,
 				  isp->rro, isp->rro_dma);
+
 	if (isp->rro_face)
 		dma_free_coherent(isp->dev,
 				  AR_ISP_RRO_SIZE * AR_ISP_STATS_HALVES,
 				  isp->rro_face, isp->rro_face_dma);
+
 	if (isp->hist)
 		dma_free_coherent(isp->dev,
 				  AR_ISP_HIST_SIZE * AR_ISP_STATS_HALVES,
 				  isp->hist, isp->hist_dma);
+
 	if (isp->ltm_page)
 		dma_free_coherent(isp->dev, AR_ISP_LTM_PAGE_SIZE, isp->ltm_page,
 				  isp->ltm_page_dma);
+
 	if (isp->ltm_stats)
 		dma_free_coherent(isp->dev, AR_ISP_LTM_STATS_SIZE,
 				  isp->ltm_stats, isp->ltm_stats_dma);
@@ -1171,13 +1190,13 @@ static void ar_isp_tables_release(struct ar_isp *isp)
 			AR_ISP_DE3D_BUF0_SIZE, AR_ISP_DE3D_BUF1_SIZE,
 			AR_ISP_DE3D_BUF2_SIZE,
 		};
-		unsigned int i;
 
-		for (i = 0; i < ARRAY_SIZE(sz); i++)
+		for (unsigned int i = 0; i < ARRAY_SIZE(sz); i++)
 			if (isp->de3d[i])
 				dma_free_coherent(isp->dev, sz[i], isp->de3d[i],
 						  isp->de3d_dma[i]);
 	}
+
 	release_firmware(isp->tuning);
 
 	/*
@@ -1188,6 +1207,17 @@ static void ar_isp_tables_release(struct ar_isp *isp)
 	 */
 	of_reserved_mem_device_release(isp->dev);
 }
+
+/*
+ * The one lnr word the ladder does not fully own. The lnr ladder writes only
+ * bits [19:0] of 0x3d44; the vendor streams 0xfff in [31:20], written by the
+ * setup table past every prefix in practical use, so the prefix path would
+ * otherwise leave those bits at the earlier entry's zero. Applied before the
+ * ladder, which preserves them through its read-modify-write.
+ */
+static const struct ar_isp_reg ar_isp_lnr_fix[] = {
+	{ 0x3d44, 0xfffdf800 },
+};
 
 /*
  * Apply the whole configuration. The recovered table goes first: those are
@@ -1206,17 +1236,6 @@ static void ar_isp_tables_release(struct ar_isp *isp)
  * out to need a VIF or CSI-2 register at a particular point, this is where it
  * would show up.
  */
-/*
- * The one lnr word the ladder does not fully own. The lnr ladder writes only
- * bits [19:0] of 0x3d44; the vendor streams 0xfff in [31:20], written by the
- * setup table past every prefix in practical use, so the prefix path would
- * otherwise leave those bits at the earlier entry's zero. Applied before the
- * ladder, which preserves them through its read-modify-write.
- */
-static const struct ar_isp_reg ar_isp_lnr_fix[] = {
-	{ 0x3d44, 0xfffdf800 },
-};
-
 static void ar_isp_configure(struct ar_isp *isp)
 {
 	ar_isp_apply(isp, ar_isp_recovered, ARRAY_SIZE(ar_isp_recovered));
@@ -1255,28 +1274,6 @@ static void ar_isp_configure(struct ar_isp *isp)
 }
 
 /*
- * Apply the vendor's output-arm run on its own.
- *
- * The vendor's startup order is ISP bulk, then a full re-initialisation of the
- * CSI-2 receiver and the VIF, then these 69 writes. Ours configures the receiver
- * first and replays the whole ISP table afterwards, so the hand-off the vendor
- * performs, arming the output only once the receiver is live, has never been
- * reproduced. Applying this after the stream is running is what tests that.
- *
- * Deliberately does not touch the recovered or setup tables, so it can follow a
- * prefix without undoing it.
- */
-/*
- * Service the ISP interrupt the way the vendor's handler does: acknowledge
- * every status word by unconditional write-back, then dispatch. The line is
- * level triggered, so an unacknowledged source storms it, which is what
- * killed the VIF line before its handler serviced the full set. Nothing is
- * re-armed here, matching the vendor; this version acknowledges and counts,
- * and the per-frame statistics service will hang off the bit-8 event once it
- * exists. The clocks are on from probe, so the registers are safe to touch
- * whenever the line fires.
- */
-/*
  * The per-frame tick handed to the output stage. See ar-camera-hook.h for why
  * the ISP owns it.
  *
@@ -1300,6 +1297,16 @@ void ar_isp_set_frame_hook(void (*fn)(void *ctx), void *ctx)
 }
 EXPORT_SYMBOL_GPL(ar_isp_set_frame_hook);
 
+/*
+ * Service the ISP interrupt the way the vendor's handler does: acknowledge
+ * every status word by unconditional write-back, then dispatch. The line is
+ * level triggered, so an unacknowledged source storms it, which is what
+ * killed the VIF line before its handler serviced the full set. Nothing is
+ * re-armed here, matching the vendor; this version acknowledges and counts,
+ * and the per-frame statistics service will hang off the bit-8 event once it
+ * exists. The clocks are on from probe, so the registers are safe to touch
+ * whenever the line fires.
+ */
 static irqreturn_t ar_isp_irq(int irq, void *data)
 {
 	struct ar_isp *isp = data;
@@ -1322,14 +1329,6 @@ static irqreturn_t ar_isp_irq(int irq, void *data)
 		isp->irq_stats_events++;
 
 		/*
-		 * The frame that just ended wrote stats_cur, so that half is
-		 * now the readable one and the engines are pointed at the
-		 * other for the frame starting now. Arming before publishing
-		 * the index is what keeps a reader off the live half: the
-		 * moment stats_done names a half, the hardware has already
-		 * been sent elsewhere.
-		 */
-		/*
 		 * One statistics event per frame, so this is the frame tick the
 		 * output stage rotates its ring on.
 		 */
@@ -1338,6 +1337,14 @@ static irqreturn_t ar_isp_irq(int irq, void *data)
 			ar_isp_frame_hook(ar_isp_frame_hook_ctx);
 		spin_unlock(&ar_isp_hook_lock);
 
+		/*
+		 * The frame that just ended wrote stats_cur, so that half is
+		 * now the readable one and the engines are pointed at the
+		 * other for the frame starting now. Arming before publishing
+		 * the index is what keeps a reader off the live half: the
+		 * moment stats_done names a half, the hardware has already
+		 * been sent elsewhere.
+		 */
 		if (pingpong) {
 			unsigned int next = isp->stats_cur ^ 1;
 
@@ -1352,6 +1359,18 @@ static irqreturn_t ar_isp_irq(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+/*
+ * Apply the vendor's output-arm run on its own.
+ *
+ * The vendor's startup order is ISP bulk, then a full re-initialisation of the
+ * CSI-2 receiver and the VIF, then these 69 writes. Ours configures the receiver
+ * first and replays the whole ISP table afterwards, so the hand-off the vendor
+ * performs, arming the output only once the receiver is live, has never been
+ * reproduced. Applying this after the stream is running is what tests that.
+ *
+ * Deliberately does not touch the recovered or setup tables, so it can follow a
+ * prefix without undoing it.
+ */
 static void ar_isp_arm_output(struct ar_isp *isp)
 {
 	ar_isp_apply(isp, ar_isp_output_arm, ARRAY_SIZE(ar_isp_output_arm));
@@ -1561,9 +1580,8 @@ DEFINE_DEBUGFS_ATTRIBUTE(ar_isp_configure_fops, ar_isp_configure_get,
 static int ar_isp_regs_show(struct seq_file *s, void *unused)
 {
 	struct ar_isp *isp = s->private;
-	unsigned int i;
 
-	for (i = 0; i < ARRAY_SIZE(ar_isp_dump_regs); i++)
+	for (unsigned int i = 0; i < ARRAY_SIZE(ar_isp_dump_regs); i++)
 		seq_printf(s, "%-16s 0x%04x 0x%08x\n", ar_isp_dump_regs[i].name,
 			   ar_isp_dump_regs[i].off,
 			   readl(isp->base + ar_isp_dump_regs[i].off));
@@ -1620,6 +1638,7 @@ static int ar_isp_stats_show(struct seq_file *s, void *unused)
 			total += luma;
 			seq_printf(s, "%4u", luma);
 		}
+
 		seq_putc(s, '\n');
 	}
 

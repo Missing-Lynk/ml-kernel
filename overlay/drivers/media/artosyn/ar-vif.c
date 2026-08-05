@@ -861,6 +861,7 @@ static void ar_vif_poll_work(struct work_struct *work)
 
 	if (bp_status)
 		ar_vif_write(vif, AR_VIF_BP_INTR_STATUS, bp_status);
+
 	if (intr_status)
 		ar_vif_write(vif, AR_VIF_INTR_STATUS, intr_status);
 
@@ -964,6 +965,7 @@ static irqreturn_t ar_vif_irq(int irq, void *data)
 
 	if (bp_status)
 		ar_vif_write(vif, AR_VIF_BP_INTR_STATUS, bp_status);
+
 	if (intr_status)
 		ar_vif_write(vif, AR_VIF_INTR_STATUS, intr_status);
 
@@ -1115,6 +1117,7 @@ static int ar_vif_input_on(struct ar_vif *vif)
 
 		ar_vif_stop(vif);
 		clk_disable_unprepare(vif->axi_clk);
+
 		return ret;
 	}
 
