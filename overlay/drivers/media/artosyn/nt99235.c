@@ -169,9 +169,7 @@ MODULE_PARM_DESC(force_mode,
 		 "select a sensor mode by index regardless of the declared lane count (-1 to choose automatically)");
 
 /*
- * Test pattern. Nothing sets exposure or gain on this stack, so a correct
- * capture is black, and a black frame cannot be told apart from a broken one by
- * looking at it. A generated pattern removes the sensor's optics and exposure
+ * Test pattern. A generated pattern removes the sensor's optics and exposure
  * from the question entirely: content of known shape arriving in DRAM proves
  * sensor, CSI-2, VIF, ISP and CVISP end to end, and gives known-good data to
  * check the recovered geometry, stride and plane layout against.
