@@ -149,15 +149,23 @@
 		#size-cells = <2>;
 		ranges;
 
-		/* MMZ media pool for the wave5 codec. 48 MiB (0x25000000..0x28000000), a
-		 * no-map hole in the 256 MiB DRAM ending flush against cvisp-cma. The vendor
-		 * keeps its MMZ as a runtime ar_osal mmz= param rather than in the DTB, so
-		 * there is no vendor number to copy; too small and the wave5 firmware spins.
-		 * Two concurrent encoder instances take about 13 MiB of working buffers, and
-		 * the per-tile dma-heap buffers are drawn from this pool as well, because
-		 * `mmz` is the only dma-heap the board exposes. The codec claims the pool via
-		 * the `memory-region` phandle on video-codec@a080000. `no-map`: coherent
-		 * uncached carveout outside the kernel linear map. */
+		/* All four carveouts are no-map: coherent uncached regions with no
+		 * cacheable kernel linear-map alias, so no speculative writeback can land
+		 * under a DMA writer. The vendor kernel needs no such reservations - its
+		 * mem=128m cap hands the whole upper 128 MiB to the media allocator - but
+		 * the open kernel uses all 256 MiB, so every range the media path DMAs
+		 * into is carved out here. cvisp_cma and isp_cma replay vendor addresses
+		 * 1:1 and are pinned to them; mmz_pool and vif_cma are allocator-backed,
+		 * so their bases are free. */
+
+		/* MMZ media pool for the wave5 codec. 48 MiB (0x25000000..0x28000000).
+		 * The vendor keeps its MMZ as a runtime ar_osal mmz= param rather than in
+		 * the DTB, so there is no vendor number to copy; too small and the wave5
+		 * firmware spins. Two concurrent encoder instances take about 13 MiB of
+		 * working buffers, and the per-tile dma-heap buffers are drawn from this
+		 * pool as well, because `mmz` is the only dma-heap the board exposes. The
+		 * codec claims the pool via the `memory-region` phandle on
+		 * video-codec@a080000. */
 		mmz_pool: mmz@25000000 {
 			compatible = "shared-dma-pool";
 			reg = <0 0x25000000 0 0x03000000>;
@@ -165,42 +173,26 @@
 		};
 
 		/* CVISP output ring. CVISP, not the ISP, is what writes frames to DRAM in
-		 * the vendor's capture path, and it rotates five Y/U/V buffer sets whose
-		 * planes run from 0x28014000 to 0x2902c000. Those addresses are replayed
-		 * 1:1 out of the recovered configuration, so the range has to be reserved
-		 * no-map for the same reason isp_cma is: the open kernel does not cap
-		 * memory, so it would otherwise be live kernel RAM under a DMA writer.
-		 * Covers 0x28000000..0x29a00000 (26 MiB). The vendor ring plus the tail of
-		 * its last slot needs only 17 MiB; the rest is capture depth for the open
-		 * path, which allocates through vb2 rather than at the replayed addresses.
-		 * One buffer is three planes of 2048*1088 + 1024*544 + 1024*544 = 3342336
+		 * the vendor's capture path; it rotates five Y/U/V buffer sets whose
+		 * planes run from 0x28014000 to 0x2902c000, replayed 1:1 out of the
+		 * recovered configuration. Covers 0x28000000..0x29a00000 (26 MiB): the
+		 * vendor ring needs 17 MiB, the rest is capture depth for the open path,
+		 * which allocates through vb2 rather than at the replayed addresses. One
+		 * buffer is three planes of 2048*1088 + 1024*544 + 1024*544 = 3342336
 		 * bytes, exactly 816 pages, and the pool allocator is page-granular
-		 * first-fit, so 8 buffers occupy 25.5 MiB and 26 MiB leaves 512 KiB spare.
-		 * Eight is what lets the zero-copy encoder feed hold frames without
-		 * starving the block's rotation: it completes a buffer only when one is
-		 * queued, and the consumer holds each one for a whole encode.
-		 *
-		 * The 9 MiB of growth comes out of the unreserved 0x29100000..0x2a000000
-		 * hole, so no other carveout moves and no replayed address changes.
-		 *
-		 * This is why vif_cma moved below: the ring's last slot runs 0x2c000 past
-		 * 0x29000000, where vif_cma used to start.
-		 */
+		 * first-fit, so 8 buffers occupy 25.5 MiB with 512 KiB spare. Eight lets
+		 * the zero-copy encoder feed hold frames without starving the block's
+		 * rotation: it completes a buffer only when one is queued, and the
+		 * consumer holds each one for a whole encode. */
 		cvisp_cma: cvisp-cma@28000000 {
 			compatible = "shared-dma-pool";
 			reg = <0 0x28000000 0 0x01a00000>;
 			no-map;
 		};
 
-		/* VIF capture buffers. Previously at 0x29000000 to sit beside the vendor's
-		 * own capture buffer at 0x2902d000; moved to 0x2c000000 because the CVISP
-		 * ring above occupies that range. ar-vif allocates these through vb2
-		 * dma-contig rather than replaying a fixed vendor address, so only the
-		 * properties matter, not the base: no-map (not reusable) to match the
-		 * vendor's MMZ carveout, a coherent uncached region with no cacheable
-		 * kernel linear-map alias, so no speculative writeback can land over the
-		 * VIF's DMA writes.
-		 */
+		/* VIF capture buffers. 16 MiB. ar-vif allocates these through vb2
+		 * dma-contig rather than replaying a fixed vendor address, so the base is
+		 * arbitrary. */
 		vif_cma: vif-cma@2c000000 {
 			compatible = "shared-dma-pool";
 			reg = <0 0x2c000000 0 0x01000000>;
@@ -208,14 +200,8 @@
 		};
 
 		/* ISP capture carveout. The vendor's online/ISP capture path DMAs its
-		 * frame ring into the upper DRAM (observed addresses 0x2a600000..
-		 * 0x2b704000, plus the descriptor buffers at 0x2b2exxxx), a region the
-		 * vendor keeps free by handing the whole upper 128 MiB to its media
-		 * allocator with mem=128m. The open kernel does not cap memory, so this
-		 * range is otherwise ordinary kernel RAM; reserving it no-map lets the
-		 * vendor's exact ISP addresses be replayed 1:1 without the DMA landing on
-		 * live kernel memory. Covers 0x2a000000..0x2c000000 (32 MiB).
-		 */
+		 * frame ring at 0x2a600000..0x2b704000 plus the descriptor buffers at
+		 * 0x2b2exxxx, replayed 1:1. Covers 0x2a000000..0x2c000000 (32 MiB). */
 		isp_cma: isp-cma@2a000000 {
 			compatible = "shared-dma-pool";
 			reg = <0 0x2a000000 0 0x02000000>;
