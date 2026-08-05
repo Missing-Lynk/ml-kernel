@@ -10,6 +10,7 @@
 #include <dt-bindings/interrupt-controller/arm-gic.h>
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
 #include <dt-bindings/leds/common.h>
 
 / {
@@ -799,8 +800,22 @@
 		 * removed. pixclk (CGU, above) stays - it also clocks the CPU/peripherals. */
 	};
 
-	/* No backlight, no front-panel keypad, no MPP proc-shuttle on the air unit. (The vendor
-	 * DTB has one gpio-key on gpio19 - a bind button - not modelled here yet.) */
+	/* No backlight, no front-panel keypad, no MPP proc-shuttle on the air unit. */
+
+	/* Bind button: global GPIO 42 (vendor bank 1 pin 19), active low. Polled because
+	 * artosyn_gpio has no irqchip, so interrupt-driven gpio-keys cannot bind. */
+	bind_button: gpio-keys-polled {
+		compatible = "gpio-keys-polled";
+		poll-interval = <50>;
+		label = "ml-bind-button";
+
+		key-bind {
+			label = "bind";
+			gpios = <&gpio 42 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_CONNECT>;
+			debounce-interval = <10>;
+		};
+	};
 
 	/*
 	 * Red on global GPIO 0, green on GPIO 1, both ACTIVE LOW. The two share a supply through

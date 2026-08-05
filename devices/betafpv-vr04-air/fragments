@@ -4,11 +4,13 @@
 #
 # Air unit (TX: camera -> encode -> RF): the shared SoC + codec + storage + DMA + clocks + RTC,
 # MINUS the goggle's display/keypad/LED (no panel, no button ladder, no status LED confirmed).
+# The one input device here is the single bind button, a GPIO line rather than a ladder.
 # The camera fragment brings in the whole capture graph: the NT99235 sensor subdev, the
 # CSI-2 receiver and the VIF capture front end.
 
 modules      # re-enable MMC/SDIO (SD + RF) + IKCONFIG that trim turned off (FB is unused here)
 iio          # IIO core - SAR ADC (battery voltage ch1) + protemp (SoC temp) telemetry; no adc-keys
+gpio-keys    # evdev + gpio-keys-polled for the bind button on GPIO 42 (polled: artosyn_gpio has no irqchip)
 codec        # open V4L2 wave5 codec - the encoder is the air unit's whole point
 camera       # NT99235 sensor + CSI-2 receiver + VIF capture, and the V4L2 framework they need
 dma-heap     # DMA-BUF heaps core - ml_mmzheap's /dev/dma_heap/mmz encoder pool (goggle gets it via display)
