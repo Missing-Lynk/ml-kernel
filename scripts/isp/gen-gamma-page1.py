@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""
+Extract the ISP gamma table's second page from the vendor library as a kernel header.
+
+The gamma allocation's first 0x1000 bytes are the only part the hardware fetches, and they
+are two 0x800 pages. Page 0 is AE-selected out of the tuning file and is generated at
+runtime by ar-isp-codec.h. Page 1 is not in the tuning file in any form: it is a prepacked
+constant in the vendor service library, which the dynamic gamma handler copies into its
+working allocation before the packer overwrites page 0 and leaves page 1 alone.
+
+The constant is byte-identical to page 1 of every capture on file. Three sibling 0x1000
+blocks at VMA 0x47e1a0, 0x47f1a0 and 0x4801a0 are identical to each other, and each is the
+same 0x800 page stored twice, matching the three gamma descriptors that alias one buffer.
+
+Emitted decoded, as a sample array rather than packed bytes, because the packing already
+lives in ar-isp-codec.h and a curve is reviewable where a blob is not.
+
+The library is proprietary and not in the repository; supply it with --lib. The generated
+header is checked in, so this script is rerun only if the vendor library changes.
+
+    kernel/scripts/isp/gen-gamma-page1.py \\
+        --lib out/air-gather/vendor-root/usr/lib/libmpp_service.so \\
+        > overlay/drivers/media/artosyn/vendor-tables/ar-isp-gamma-page1.h
+"""
+
+import argparse
+import struct
+import sys
+from collections.abc import Sequence
+
+import arlib
+
+PAGE1_VMA = 0x47E1A0
+PAGE = 0x800
+RECORDS = 128
+SAMPLES = 512
+
+# Packing, mirrored from ar-isp-codec.h: each record is four words holding four 12-bit
+# samples at fixed positions, plus a forward field mirroring the sample after the page.
+RECORD_BYTES = 16
+SAMPLE_BITS = 12
+SAMPLE_MASK = (1 << SAMPLE_BITS) - 1
+SAMPLE_SHIFTS = ((0, 0), (0, 12), (1, 16), (2, 8))
+FORWARD_SHIFT = 20
+
+
+# Emitted table width.
+ROWS_PER_LINE = 8
+
+def decode_page(data: bytes, base: int) -> list[int]:
+    """Undo the packing in ar-isp-codec.h: 128 records of four twelve-bit samples."""
+    out = []
+    for record in range(RECORDS):
+        words = struct.unpack_from("<4I", data, base + record * RECORD_BYTES)
+        out.extend((words[w] >> shift) & SAMPLE_MASK for w, shift in SAMPLE_SHIFTS)
+
+    return out
+
+
+def forward_field(data: bytes, base: int) -> int:
+    """The last record's mirror of the sample after the page. Not derivable from the samples."""
+    word2 = struct.unpack_from("<I", data, base + (RECORDS - 1) * RECORD_BYTES + 8)[0]
+    return (word2 >> FORWARD_SHIFT) & SAMPLE_MASK
+
+
+def emit(samples: Sequence[int], tail: int) -> None:
+    guard_open, guard_close = arlib.guard("AR_ISP_GAMMA_PAGE1_H")
+    print(arlib.banner("kernel/scripts/isp/gen-gamma-page1.py", (
+        "The gamma table's second page.",
+        "",
+        "Page 0 is AE-selected from the tuning file and generated at runtime. This one is",
+        "not in the tuning file at all, in packed or unpacked form, so it is carried: it is",
+        "a prepacked constant in the vendor service library, byte-identical to page 1 of",
+        "every capture on file.",
+        "",
+        "The tail is the last record's forward field, which mirrors the sample after the",
+        "page and cannot be derived from the samples. Leaving it zero maps the brightest",
+        "inputs to black; see ar_isp_gamma_pack_page.",
+    )), end="")
+    print()
+    print(guard_open, end="")
+    print()
+    print(f"#define AR_ISP_GAMMA_PAGE1_TAIL\t\t{tail}")
+    print()
+    print("static const u16 ar_isp_gamma_page1[AR_ISP_GAMMA_SAMPLES] = {")
+    print(arlib.rows(samples, ROWS_PER_LINE, "4d"), end="")
+    print("};")
+    print()
+    print(guard_close, end="")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--lib", required=True, help="vendor libmpp_service.so")
+    args = ap.parse_args()
+
+    with open(args.lib, "rb") as handle:
+        lib = handle.read()
+
+    block = arlib.lib_slice(lib, PAGE1_VMA, 2 * PAGE,
+                            f"{args.lib}: gamma page 1")
+    if block[:PAGE] != block[PAGE:]:
+        sys.exit(f"{args.lib}: the two halves at 0x{PAGE1_VMA:x} differ; the layout has changed")
+
+    samples = decode_page(block, 0)
+    for i in range(1, SAMPLES):
+        if samples[i] < samples[i - 1]:
+            sys.exit(f"{args.lib}: sample {i} decreases; this is not a transfer curve")
+
+    emit(samples, forward_field(block, 0))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

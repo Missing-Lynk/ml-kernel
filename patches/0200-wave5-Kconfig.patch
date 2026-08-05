@@ -6,9 +6,7 @@ depends/selects are unchanged.
 
 --- a/drivers/media/platform/chips-media/wave5/Kconfig
 +++ b/drivers/media/platform/chips-media/wave5/Kconfig
-@@ -1,9 +1,8 @@
- # SPDX-License-Identifier: GPL-2.0
- config VIDEO_WAVE_VPU
+@@ -3,7 +3,6 @@
  	tristate "Chips&Media Wave Codec Driver"
  	depends on V4L_MEM2MEM_DRIVERS
  	depends on VIDEO_DEV && OF

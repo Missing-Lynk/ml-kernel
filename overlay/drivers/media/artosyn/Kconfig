@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: GPL-2.0
+
+config VIDEO_ARTOSYN_NT99235
+	tristate "Novatek NT99235 sensor support"
+	depends on OF && I2C && VIDEO_DEV
+	select MEDIA_CONTROLLER
+	select VIDEO_V4L2_SUBDEV_API
+	select V4L2_FWNODE
+	help
+	  Subdev driver for the Novatek NT99235 MIPI CSI-2 image sensor, the
+	  camera fitted to the BetaFPV VR04 air unit.
+
+	  To compile this driver as a module, choose M here: the module will be
+	  called nt99235.
+
+config VIDEO_ARTOSYN_CSI2
+	tristate "Artosyn MIPI CSI-2 receiver"
+	depends on OF && VIDEO_DEV
+	select MEDIA_CONTROLLER
+	select VIDEO_V4L2_SUBDEV_API
+	select V4L2_FWNODE
+	help
+	  Receiver subdev for the MIPI CSI-2 block on Artosyn Proxima SoCs.
+	  Each instance is a Synopsys DesignWare CSI-2 host controller behind a
+	  small Artosyn wrapper.
+
+	  To compile this driver as a module, choose M here: the module will be
+	  called ar-csi2.
+
+config VIDEO_ARTOSYN_VIF
+	tristate "Artosyn VIF input front end"
+	depends on OF && VIDEO_DEV
+	select MEDIA_CONTROLLER
+	select VIDEO_V4L2_SUBDEV_API
+	select V4L2_FWNODE
+	help
+	  Input driver for the video interface block on Artosyn Proxima SoCs,
+	  which receives frames from the CSI-2 receiver and hands them to the
+	  ISP. It exposes no capture device of its own: the frames leave through
+	  the CVISP output stage, which owns the V4L2 node. It hosts the media
+	  graph the sensor and receiver register their subdevs against.
+
+	  To compile this driver as a module, choose M here: the module will be
+	  called ar-vif.
+
+config VIDEO_ARTOSYN_ISP
+	tristate "Artosyn ISP capture path"
+	depends on OF && VIDEO_DEV
+	help
+	  Bring-up driver for the ISP block on Artosyn Proxima SoCs, the route
+	  the vendor stack captures through. Applies the vendor register
+	  configuration for the 2-lane 1080p60 sensor mode and starts the
+	  block; it does not allocate buffers or expose a V4L2 interface.
+
+	  To compile this driver as a module, choose M here: the module will be
+	  called ar-isp.
+
+config VIDEO_ARTOSYN_CVISP
+	tristate "Artosyn CVISP output stage"
+	depends on OF && VIDEO_DEV
+	select VIDEOBUF2_DMA_CONTIG
+	help
+	  Capture driver for the CVISP block on Artosyn Proxima SoCs, the stage
+	  that writes frames to memory in the vendor's capture path. The ISP
+	  feeds it; CVISP owns the output queue. Applies the recovered vendor
+	  register configuration and provides a V4L2 capture device, falling
+	  back to the vendor's fixed ring of DRAM addresses, driven from
+	  debugfs, whenever that device is not streaming.
+
+	  To compile this driver as a module, choose M here: the module will be
+	  called ar-cvisp.

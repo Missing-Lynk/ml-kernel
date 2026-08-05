@@ -1,4 +1,4 @@
-Why: three WAVE521C defects in upstream wave5-hw.c. (1) The sec-AXI size
+Why: four WAVE521C defects in upstream wave5-hw.c. (1) The sec-AXI size
 accounting is a mainline TODO: only WAVE515 computes the line-buffer sizes, so
 on WAVE521C the driver enables sec-AXI into the 64 KiB SRAM with zero sizes
 (USE_SEC_AXI=0x8201), corrupting the write-back; forced to 0 (what the vendor
@@ -10,7 +10,11 @@ vpu_buf copies while the same dma handles were already published into
 p_enc_info->vb_*; wave5_vpu_enc_close() then frees them a second time
 (observed live as 4x WARN in __dma_release_from_coherent when the vb_task
 allocation ENOMEMs). Free the p_enc_info copies instead so the free memsets
-the field close() looks at.
+the field close() looks at. (4) wave5_vpu_build_up_enc_param declares the one
+device-global 64 KiB sec-AXI SRAM window to every encoder instance at
+CREATE_INSTANCE, so two concurrent instances are handed completely
+overlapping scratch; the vendor never declares a sec-AXI window to an encoder
+instance, so the two writes are dropped.
 
 --- a/drivers/media/platform/chips-media/wave5/wave5-hw.c
 +++ b/drivers/media/platform/chips-media/wave5/wave5-hw.c
@@ -120,7 +124,28 @@ the field close() looks at.
  
  	reg_val = vpu_read_reg(inst->dev, W5_RET_QUEUE_STATUS);
  
-@@ -2117,16 +2166,29 @@
+@@ -1575,8 +1624,18 @@
+ 	vpu_write_reg(inst->dev, W5_ADDR_WORK_BASE, p_enc_info->vb_work.daddr);
+ 	vpu_write_reg(inst->dev, W5_WORK_SIZE, p_enc_info->vb_work.size);
+ 
+-	vpu_write_reg(inst->dev, W5_CMD_ADDR_SEC_AXI, vpu_dev->sram_buf.daddr);
+-	vpu_write_reg(inst->dev, W5_CMD_SEC_AXI_SIZE, vpu_dev->sram_buf.size);
++	/*
++	 * ML (Artosyn WAVE521C): no W5_CMD_ADDR_SEC_AXI / W5_CMD_SEC_AXI_SIZE in
++	 * the CREATE_INSTANCE register context. sram_buf is one device-global
++	 * 64 KiB window, so declaring it here gives every encoder instance the
++	 * same scratch and two concurrent instances overlap completely. The
++	 * vendor's Wave5VpuBuildUpEncParam writes only WORK_BASE, WORK_SIZE,
++	 * BS_PARAM, NUM_CQ_DEPTH_M1, ENC_SRC_OPTIONS and ENC_VCORE_INFO before
++	 * issuing CREATE_INSTANCE, and never declares a sec-AXI window to an
++	 * encoder instance at all. Its writes to 0x130/0x134 live in
++	 * Wave5VpuEncInitSeq, where the same mailbox offsets carry packed
++	 * ENC_SEQ bitfields rather than addresses.
++	 */
+ 
+ 	reg_val = (open_param->line_buf_int_en << 6) | BITSTREAM_ENDIANNESS_BIG_ENDIAN;
+ 	vpu_write_reg(inst->dev, W5_CMD_BS_PARAM, reg_val);
+@@ -2117,16 +2176,29 @@
  
  	return ret;
  
@@ -155,7 +180,7 @@ the field close() looks at.
  	return ret;
  }
  
-@@ -2140,6 +2202,16 @@
+@@ -2140,6 +2212,16 @@
  		return 0;
  
  	/*

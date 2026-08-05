@@ -3,7 +3,10 @@ sleep never completes - so the suspend/resume sleep and wake calls are skipped
 (the vendor never uses them either). (2) Upstream allocates codec DMA from the
 device's default (global CMA) path; this routes all codec DMA (DPB, WTL/display
 buffers, vb_task) to the SoC's dedicated mmz reserved-memory region via
-of_reserved_mem, keeping the codec working set out of general CMA.
+of_reserved_mem, keeping the codec working set out of general CMA. The
+attachment is released through a devres action: of_reserved_mem_device_init has
+no devres form, so without one it survives every probe-failure return below it
+and the remove path, and a rebind then inherits stale dma_mem state.
 
 --- a/drivers/media/platform/chips-media/wave5/wave5-vpu.c
 +++ b/drivers/media/platform/chips-media/wave5/wave5-vpu.c
@@ -43,7 +46,25 @@ of_reserved_mem, keeping the codec working set out of general CMA.
  	ret = clk_bulk_prepare_enable(vpu->num_clks, vpu->clks);
  	if (ret) {
  		dev_err(dev, "Enabling clocks, fail: %d\n", ret);
-@@ -278,6 +284,21 @@
+@@ -258,6 +264,17 @@
+ 	SET_RUNTIME_PM_OPS(wave5_pm_suspend, wave5_pm_resume, NULL)
+ };
+ 
++/*
++ * ML (Artosyn): of_reserved_mem_device_init has no devres form, so the
++ * attachment outlives every probe-failure return below it and the remove path.
++ * Released as a devres action rather than at each exit, so a probe step added
++ * later cannot reintroduce the leak.
++ */
++static void wave5_release_reserved_mem(void *data)
++{
++	of_reserved_mem_device_release(data);
++}
++
+ static int wave5_vpu_probe(struct platform_device *pdev)
+ {
+ 	int ret;
+@@ -278,6 +295,26 @@
  		return ret;
  	}
  
@@ -59,13 +80,18 @@ of_reserved_mem, keeping the codec working set out of general CMA.
 +		dev_err(&pdev->dev, "Failed to use reserved memory pool: %d\n", ret);
 +		return ret;
 +	}
-+	if (!ret)
++	if (!ret) {
 +		dev_info(&pdev->dev, "using dedicated codec memory pool (mmz)\n");
++		ret = devm_add_action_or_reset(&pdev->dev, wave5_release_reserved_mem,
++					       &pdev->dev);
++		if (ret)
++			return ret;
++	}
 +
  	dev = devm_kzalloc(&pdev->dev, sizeof(*dev), GFP_KERNEL);
  	if (!dev)
  		return -ENOMEM;
-@@ -325,6 +346,56 @@
+@@ -325,6 +362,56 @@
  
  	dev->sram_size = match_data->sram_size;
  
@@ -122,7 +148,7 @@ of_reserved_mem, keeping the codec working set out of general CMA.
  	dev->product_code = wave5_vdi_read_register(dev, VPU_PRODUCT_CODE_REGISTER);
  	ret = wave5_vdi_init(&pdev->dev);
  	if (ret < 0) {
-@@ -395,7 +466,16 @@
+@@ -395,7 +482,16 @@
  	pm_runtime_set_autosuspend_delay(&pdev->dev, 500);
  	pm_runtime_use_autosuspend(&pdev->dev);
  	pm_runtime_enable(&pdev->dev);

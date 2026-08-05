@@ -22,3 +22,7 @@ initramfs/build/
 
 # test_tools/ built binaries (the Makefile outputs only here)
 test_tools/build/
+
+# Python bytecode cache from running the scripts/ generators.
+__pycache__/
+*.pyc

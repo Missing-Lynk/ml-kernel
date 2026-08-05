@@ -149,19 +149,62 @@
 		#size-cells = <2>;
 		ranges;
 
-		/* MMZ media pool for the wave5 encoder + camera capture buffers. 48 MiB
-		 * (0x25000000..0x28000000), a no-map hole in the 256 MiB DRAM that splits kernel
-		 * RAM into 0x20000000..0x25000000 (80 MiB) + 0x28000000..0x30000000 (128 MiB) =
-		 * 208 MiB usable. SIZE IS A FIRST-CUT ESTIMATE for the encode-only path (one 1080p
-		 * capture ring + the encoder DPB/bitstream pool); TUNE ON HW - the vendor keeps its
-		 * MMZ as a runtime ar_osal mmz= param, not in the DTB, so there is no vendor number
-		 * to copy. Too small -> the wave5 firmware spins. There is room to grow or relocate
-		 * this pool within the 256 MiB DRAM. The wave5 codec claims
-		 * it via the `memory-region` phandle on video-codec@a080000. `no-map`: coherent
-		 * uncached carveout outside the kernel linear map. */
+		/* All four carveouts are no-map: coherent uncached regions with no
+		 * cacheable kernel linear-map alias, so no speculative writeback can land
+		 * under a DMA writer. The vendor kernel needs no such reservations - its
+		 * mem=128m cap hands the whole upper 128 MiB to the media allocator - but
+		 * the open kernel uses all 256 MiB, so every range the media path DMAs
+		 * into is carved out here. cvisp_cma and isp_cma replay vendor addresses
+		 * 1:1 and are pinned to them; mmz_pool and vif_cma are allocator-backed,
+		 * so their bases are free. */
+
+		/* MMZ media pool for the wave5 codec. 48 MiB (0x25000000..0x28000000).
+		 * The vendor keeps its MMZ as a runtime ar_osal mmz= param rather than in
+		 * the DTB, so there is no vendor number to copy; too small and the wave5
+		 * firmware spins. Two concurrent encoder instances take about 13 MiB of
+		 * working buffers, and the per-tile dma-heap buffers are drawn from this
+		 * pool as well, because `mmz` is the only dma-heap the board exposes. The
+		 * codec claims the pool via the `memory-region` phandle on
+		 * video-codec@a080000. */
 		mmz_pool: mmz@25000000 {
 			compatible = "shared-dma-pool";
 			reg = <0 0x25000000 0 0x03000000>;
+			no-map;
+		};
+
+		/* CVISP output ring. CVISP, not the ISP, is what writes frames to DRAM in
+		 * the vendor's capture path; it rotates five Y/U/V buffer sets whose
+		 * planes run from 0x28014000 to 0x2902c000, replayed 1:1 out of the
+		 * recovered configuration. Covers 0x28000000..0x29a00000 (26 MiB): the
+		 * vendor ring needs 17 MiB, the rest is capture depth for the open path,
+		 * which allocates through vb2 rather than at the replayed addresses. One
+		 * buffer is three planes of 2048*1088 + 1024*544 + 1024*544 = 3342336
+		 * bytes, exactly 816 pages, and the pool allocator is page-granular
+		 * first-fit, so 8 buffers occupy 25.5 MiB with 512 KiB spare. Eight lets
+		 * the zero-copy encoder feed hold frames without starving the block's
+		 * rotation: it completes a buffer only when one is queued, and the
+		 * consumer holds each one for a whole encode. */
+		cvisp_cma: cvisp-cma@28000000 {
+			compatible = "shared-dma-pool";
+			reg = <0 0x28000000 0 0x01a00000>;
+			no-map;
+		};
+
+		/* VIF capture buffers. 16 MiB. ar-vif allocates these through vb2
+		 * dma-contig rather than replaying a fixed vendor address, so the base is
+		 * arbitrary. */
+		vif_cma: vif-cma@2c000000 {
+			compatible = "shared-dma-pool";
+			reg = <0 0x2c000000 0 0x01000000>;
+			no-map;
+		};
+
+		/* ISP capture carveout. The vendor's online/ISP capture path DMAs its
+		 * frame ring at 0x2a600000..0x2b704000 plus the descriptor buffers at
+		 * 0x2b2exxxx, replayed 1:1. Covers 0x2a000000..0x2c000000 (32 MiB). */
+		isp_cma: isp-cma@2a000000 {
+			compatible = "shared-dma-pool";
+			reg = <0 0x2a000000 0 0x02000000>;
 			no-map;
 		};
 	};
@@ -262,22 +305,33 @@
 			status = "okay";
 
 			/* NT99235 camera sensor (P1_SKY): I2C 7-bit 0x1a, MIPI CSI-2, 12-bit
-			 * linear, modes 1080p60 / 720p90 / 540p120 (from libsns_nt99235.so). Reset
-			 * gpio107, power/enable gpio104 (sensor_board_cfg.cjson rst [_,6,13] / power
-			 * [_,6,10] -> artosyn_gpio bank6 base 94). Active levels, mclk, and the lane
-			 * count are TODO from the libsns/libmpi_vin RE; this node is inert until the
-			 * NT99235 V4L2 subdev + the artosyn CSI-2 driver land. */
+			 * linear. Reset gpio107, power/enable gpio104 (sensor_board_cfg.cjson
+			 * rst [_,6,13] / power [_,6,10] -> artosyn_gpio bank6 base 94).
+			 *
+			 * Both GPIOs are active low: nt99235_cmos_power_on drives the enable line
+			 * low and leaves it low for the whole streaming session, and asserts reset
+			 * low before releasing it high. The master clock is 24 MHz on
+			 * cgu_sensor_mclk0 and must be running before reset is released.
+			 *
+			 * Two lanes: the four sensor modes split into 4-lane (720p90, 1080p60) and
+			 * 2-lane (540p120, 1080p60-2lane) variants selected by sensor register
+			 * 0x0114, and the unit was captured running the 2-lane 1080p60 mode.
+			 * Whether the board routes more than two lanes is unresolved. */
 			nt99235: camera-sensor@1a {
 				compatible = "novatek,nt99235";
 				reg = <0x1a>;
 				reset-gpios = <&gpio 107 GPIO_ACTIVE_LOW>;
-				enable-gpios = <&gpio 104 GPIO_ACTIVE_HIGH>;
+				enable-gpios = <&gpio 104 GPIO_ACTIVE_LOW>;
+				clocks = <&pixclk 35>;		/* cgu_sensor_mclk0 */
+				clock-names = "mclk";
+				assigned-clocks = <&pixclk 35>;
+				assigned-clock-rates = <24000000>;
 				status = "okay";
 
 				port {
 					nt99235_out: endpoint {
 						remote-endpoint = <&mipi_in>;
-						data-lanes = <1 2>;	/* TODO confirm 1- vs 2-lane */
+						data-lanes = <1 2>;
 					};
 				};
 			};
@@ -505,12 +559,31 @@
 			reg = <0 0x8880000 0 0x10000>;
 			interrupts = <GIC_SPI 60 IRQ_TYPE_LEVEL_HIGH>,	/* vendor 0x3c */
 				     <GIC_SPI 61 IRQ_TYPE_LEVEL_HIGH>;	/* vendor 0x3d */
+			clocks = <&pixclk 13>, <&pixclk 15>;	/* cgu_mipi_csi_0_clk, cgu_mipi_pcs_clk */
+			clock-names = "csi", "pcs";
 			status = "okay";
 
-			port {
-				mipi_in: endpoint {
-					remote-endpoint = <&nt99235_out>;
-					data-lanes = <1 2>;
+			ports {
+				#address-cells = <1>;
+				#size-cells = <0>;
+
+				/* Sink: the sensor's D-PHY link. */
+				port@0 {
+					reg = <0>;
+
+					mipi_in: endpoint {
+						remote-endpoint = <&nt99235_out>;
+						data-lanes = <1 2>;
+					};
+				};
+
+				/* Source: the receiver's IPI output into the VIF. */
+				port@1 {
+					reg = <1>;
+
+					mipi_out: endpoint {
+						remote-endpoint = <&vif_in>;
+					};
 				};
 			};
 		};
@@ -519,13 +592,54 @@
 			compatible = "artosyn,vif";
 			reg = <0 0x8870000 0 0x10000>;
 			interrupts = <GIC_SPI 62 IRQ_TYPE_LEVEL_HIGH>;	/* vendor 0x3e */
+			clocks = <&pixclk 7>;		/* cgu_vif_axi_clk */
+			clock-names = "axi";
+			memory-region = <&vif_cma>;
 			status = "okay";
+
+			/* Sink: frames from the CSI-2 receiver's IPI output. */
+			port {
+				vif_in: endpoint {
+					remote-endpoint = <&mipi_out>;
+				};
+			};
 		};
 
+		/* The route the vendor stack captures through: the VIF hands frames to
+		 * this block rather than writing them out through its bypass views.
+		 * The capture buffers are not allocated by the driver, which uses the
+		 * vendor's own addresses out of the isp_cma reservation. */
 		isp: isp@8c00000 {
 			compatible = "artosyn,isp";
 			reg = <0 0x8c00000 0 0x200000>;
 			interrupts = <GIC_SPI 71 IRQ_TYPE_LEVEL_HIGH>;	/* vendor 0x47 */
+			clocks = <&pixclk 5>, <&pixclk 6>;	/* cgu_isp_clk, cgu_isp_hdr_clk */
+			clock-names = "isp", "isp_hdr";
+			memory-region = <&isp_cma>;
+			status = "okay";
+		};
+
+		/* The stage that actually writes frames to memory. The ISP feeds it and
+		 * CVISP owns the output queue, which is why an ISP configured to match the
+		 * vendor register for register still produced nothing.
+		 *
+		 * Absent from the vendor device tree; the block was found by tracing the
+		 * full 256 MiB register mapping the vendor makes in one call, and named
+		 * from the cvisp_* stack in its unstripped libmpp_service.so. Distinct
+		 * from scaler@08840000.
+		 *
+		 * No interrupt and no reset are declared. The block has its own completion
+		 * path (cvisp_device_irq_process, cvisp_dispatch_irq), but the hardware IRQ
+		 * number and its acknowledge register are still behind the vendor's generic
+		 * event layer, and no CVISP reset write appears anywhere in the trace.
+		 * Asserting either would be inventing it.
+		 */
+		cvisp: cvisp@8e00000 {
+			compatible = "artosyn,cvisp";
+			reg = <0 0x8e00000 0 0x10000>;
+			clocks = <&pixclk 9>;		/* cgu_rsz_clk */
+			clock-names = "rsz";
+			memory-region = <&cvisp_cma>;
 			status = "okay";
 		};
 

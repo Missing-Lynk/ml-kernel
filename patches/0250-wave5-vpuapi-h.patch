@@ -1,0 +1,21 @@
+Why: two struct vpu_instance fields consumed by other patches in this series.
+
+keep_dma_bufs marks an instance whose firmware was not successfully quiesced at
+close, so wave5_cleanup_instance (0210) leaks its FBC/DPB framebuffers and
+bitstream ring instead of freeing memory the firmware still DMAs into.
+
+active_enc_src_idx holds the one OUTPUT buffer the encoder firmware currently
+owns, so a firmware result error (0280) can return it from the vb2 queue
+directly rather than through v4l2_m2m_src_buf_remove(), which cannot find it:
+start_encode has already taken it off the ready queue.
+--- a/drivers/media/platform/chips-media/wave5/wave5-vpuapi.h
++++ b/drivers/media/platform/chips-media/wave5/wave5-vpuapi.h
+@@ -818,6 +818,8 @@
+ 	bool cbcr_interleave;
+ 	bool nv21;
+ 	bool eos;
++	bool keep_dma_bufs;
++	s32 active_enc_src_idx;
+ 	struct vpu_buf bitstream_vbuf;
+ 	dma_addr_t last_rd_ptr;
+ 	size_t remaining_consumed_bytes;

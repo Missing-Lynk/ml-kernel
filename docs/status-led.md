@@ -106,6 +106,52 @@ A `leds-class` driver (`CONFIG_LEDS_CLASS` + a small `leds-ws2812-spi`-style dri
 - **Only one colour is ever used on this board**, but the wire format and the vendor's own table support three LEDs and four colours. A future open feature (distinguishing more link/error states by colour, not just blink/solid) is available for free at the framing level - it only needs the userspace/driver side to pick a different frame, no format changes.
 - **The second identical SPI controller (`spi@08100000`, `0x1100000`) has no spidev child and no known consumer.** Worth a quick check on whether any other peripheral is wired to it before assuming it's unused.
 
+## Air unit (P1_SKY): plain GPIO LEDs, not WS2812 [confirmed]
+
+The air unit's LED is **not** the same part and not on SPI. The goggle's WS2812 path (`customerHmLedInit`/`customerHmLedCtrl`, spidev, 72-byte frames) is reached only from `customerHmRxInit`/`customerHmRxDeinit` - the receiver (goggle) side. The air side runs `customerC401TxInit` (`c401` = the air `DEV_BOARD_TYPE`), which touches no spidev at all: it drives **two plain GPIO lines** through `libhal_gpio.so` (`/sys/class/gpio`). The air rootfs contains no `spidev` string anywhere, and its vendor DTB caps `spidev01` at 2 MHz (the goggle caps it at 20 MHz and clocks it at 6.25 MHz), so the WS2812 timing is not even reachable there.
+
+### Lines
+
+`customerC401TxInit` (`0x46a590` in the P1_SKY `usr/bin/ar_lowdelay`) calls `ar_hal_gpio_name_to_num(0, 0, 0)` and `(0, 0, 1)` - group 0, port 0, pins 0 and 1. `ar_hal_gpio_name_to_num` maps (port, pin) to the vendor global line number with per-port bases `{0, 23, 45, 71, 77, 83, 94}` and sizes `{23, 22, 26, 6, 6, 11, 16}`, which is exactly the seven `arto,gpio-port` banks of `gpio@0A10A000` and exactly what `artosyn_gpio` registers. So the two LED lines are **global GPIO 0 and GPIO 1** - usable as `<&gpio 0 ...>` / `<&gpio 1 ...>` in the open DTS, and free (nothing else in `proxima-9311-air.dts` claims them).
+
+Init sequence per line: `export`, `set_dir(num, 1)` (output), `set_value(num, 0)`.
+
+### Control
+
+State lives in a 32-byte `calloc`'d struct held at a single global pointer:
+
+| Offset | Field |
+|--------|-------|
+| +0, +1 | the two GPIO line numbers (u8) |
+| +2     | stop flag for the flash thread |
+| +4, +8 | the "on-phase" level written to line 0 / line 1 |
+| +12, +16 | the levels sampled with `ar_hal_gpio_get_value` when flashing starts, restored when it stops |
+| +20    | half-period in ms |
+| +24    | flash thread handle |
+
+Only two entry points exist, both thin `b` stubs onto the `customerHm*` implementations:
+
+- `AR_LOWDEALY_TX_SYSCTRL_LED_FlashEnable(sel, period_ms)` -> `customerHmTxLedFlashEnable` (`0x469b10`): samples both current levels, picks the on-phase pair from a two-entry table (`sel = 0` -> `{0, 1}`, `sel = 1` -> `{1, 0}`; `sel >= 2` leaves the pair at its previous value, zero-initialised, so both lines flash), stores `period_ms`, and spawns the flash thread.
+- `AR_LOWDEALY_TX_SYSCTRL_LED_FlashDisable()` -> `customerHmTxLedFlashDisable` (`0x469bb0`): sets the stop flag only.
+
+The flash thread loops: write the on-phase pair, `usleep(period_ms * 1000)`, write `1` to **both** lines, `usleep(period_ms * 1000)`, repeat until the stop flag, then restore the sampled levels and exit. So the selected line toggles `0`/`1` while the other is parked at `1`.
+
+The only caller in the whole binary is `AR_LOWDELAY_CTRL_tx_binder_cmd`: `FlashEnable(0, 40)`, then `AR_AR8030_TX_PairById(...)`, then `FlashDisable()`. That is the entire air-side LED policy - line 0 blinks at a 40 ms half-period (~12.5 Hz) for the duration of a bind, and nothing else ever changes it. There is no link-state indication on the air unit, unlike the goggle's blink-vs-solid orange.
+
+### Polarity [confirmed on hardware]
+
+**Active high**, `1` = lit. Init drives both lines low, and on the stock unit the red LED is dark in normal operation and lights only during a bind. So the table pair is the *dark* phase of the blink, not the lit one: for `sel = 0` GPIO 0 alternates `0`/`1` (blinks) while GPIO 1 sits at `1` - **lit solid for the duration of the bind** - and both return to `0` when `FlashDisable` restores the sampled levels.
+
+### What is actually populated [confirmed on hardware]
+
+- **GPIO 0** is the red bind LED, and it is the only LED the vendor firmware ever drives: dark at boot, ~12.5 Hz blink for the duration of `AR_AR8030_TX_PairById`, dark again. There is no link-state or power indication from software on the air unit.
+- **GPIO 1** is configured identically but nothing visible on the board follows it (it would be lit solid throughout a bind). Unpopulated footprint on this variant.
+- The board's **green LED is not on this path at all**. It is on from power-up and gets brighter while video is transmitting, which no code here can produce: the air unit's two PWM controllers are `status = "disabled"` in the vendor DTB, and the only `/sys/class/gpio` writers in the whole air rootfs are `ar_lowdelay` (lines 0 and 1) and `start_ar813x.sh` (line 23, the AR8030 reset). `artosyn_sdio.ko` contains no LED code. Consistent with the green being wired to an RF activity / PA-enable signal, where apparent brightness tracks TX duty cycle - low on idle beacons, high while streaming. [inferred]
+
+`customerC401Txdeinit` (`0x46a7e0`) frees the state struct and then dereferences a NULL pointer to read the line number back (`0x46a80c`), so the vendor teardown never actually restores the lines. Shutdown-only, harmless, but do not use it as a reference for a deinit path.
+
+`devices/betafpv-vr04-air/device.mk` still carries `DEV_HAS_LED = 0`; that flag currently means "has the goggle's WS2812-on-SPI LED" (it gates `ml-ledd`, which is WS2812-only), so it is not simply a `1` - a GPIO LED wants a `gpio-leds` DT node plus its own indicator policy, not `ml-ledd`.
+
 ## Source
 
-Disassembly of the stripped `firmware/bin/ar_lowdelay` (aarch64) around the `customerHm*Led*` functions, the vendor device tree, and live captures (`1102000.spi` bound by `dw_spi_mmio`).
+Disassembly of the stripped `firmware/bin/ar_lowdelay` (aarch64) around the `customerHm*Led*` functions, the vendor device tree, and live captures (`1102000.spi` bound by `dw_spi_mmio`). The air-unit section is from the P1_SKY rootfs (`firmware/bin/P1_SKY/ubiblock0_0-rootfs.squashfs`): `usr/bin/ar_lowdelay`, `usr/lib/libhal_gpio.so`, and the P1_SKY vendor DTB.

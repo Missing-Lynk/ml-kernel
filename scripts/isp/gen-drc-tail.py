@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""
+Extract the static half of the Artosyn ISP's DRC page and emit it as a kernel header.
+
+The DRC DMA page is 0x2000 bytes of four 257-sample curves. The first two are
+rebuilt from the tuning file on every AE update and are generated at runtime by
+ar-isp-codec.h. The second two are never recomputed: they are a prepacked
+constant in the vendor service library, reached through the ISP-init descriptor
+array as {source 0x467460, length 0x2000}, and the runtime writes only the first
+half of what that descriptor loaded.
+
+The curves are not present in the tuning file, in packed or unpacked form, so
+they cannot be derived and have to be carried. They are emitted decoded, as
+sample arrays rather than packed bytes, because the packing is already in
+ar-isp-codec.h and a curve is reviewable where a blob is not.
+
+The library is proprietary and not in the repository; supply it with --lib. The
+generated header is checked in, so this script is rerun only if the vendor
+library changes.
+
+    kernel/scripts/isp/gen-drc-tail.py --lib out/air-gather/vendor-root/usr/lib/libmpp_service.so \\
+        > overlay/drivers/media/artosyn/vendor-tables/ar-isp-drc-tail.h
+"""
+
+import argparse
+import struct
+import sys
+from collections.abc import Sequence
+
+import arlib
+
+TEMPLATE_VMA = 0x467460
+TEMPLATE_LEN = 0x2000
+
+BANK = 0x800
+RECORDS = 128
+SAMPLES = 257
+
+# Packing, mirrored from ar-isp-codec.h: each record is sixteen bytes carrying three
+# 20-bit lanes that straddle the word boundaries, plus a duplicate of the middle lane.
+RECORD_BYTES = 16
+LANE_BITS = 20
+LANE_MAX = (1 << LANE_BITS) - 1
+
+
+# Emitted table width.
+ROWS_PER_LINE = 6
+
+def decode_bank(data: bytes, base: int) -> list[int]:
+    """Undo the packing in ar-isp-codec.h: 128 records, three overlapping 20-bit lanes."""
+    samples = []
+    for record in range(RECORDS):
+        offset = base + record * RECORD_BYTES
+        word0, word1 = struct.unpack_from("<II", data, offset)
+        half = struct.unpack_from("<H", data, offset + 8)[0]
+        lane0 = word0 & LANE_MAX
+        lane1 = ((word0 >> LANE_BITS) & 0xFFF) | ((word1 & 0xFF) << 12)
+        lane2 = ((word1 >> 28) & 0xF) | (half << 4)
+        duplicate = (word1 >> 8) & LANE_MAX
+
+        if lane1 != duplicate:
+            sys.exit(f"record {record} at 0x{base:x}: overlap 0x{lane1:x} != 0x{duplicate:x}")
+
+        if record == 0:
+            samples.extend((lane0, lane1, lane2))
+            continue
+
+        if lane0 != samples[-1]:
+            sys.exit(f"record {record} at 0x{base:x}: curve break 0x{lane0:x} != 0x{samples[-1]:x}")
+
+        samples.extend((lane1, lane2))
+
+    if len(samples) != SAMPLES:
+        sys.exit(f"decoded {len(samples)} samples, expected {SAMPLES}")
+
+    return samples
+
+
+def emit(banks: Sequence[Sequence[int]]) -> None:
+    guard_open, guard_close = arlib.guard("AR_ISP_DRC_TAIL_H")
+    print(arlib.banner("kernel/scripts/isp/gen-drc-tail.py", (
+        "The half of the DRC page the vendor never recomputes.",
+        "",
+        "Two 257-sample curves, decoded out of the prepacked 0x2000 template the vendor",
+        "service library loads through its ISP-init descriptor array. Neither curve appears",
+        "in the tuning file in any form, so unlike the first two banks they cannot be",
+        "generated and are carried here instead.",
+    )), end="")
+    print()
+    print(guard_open, end="")
+    for bank, samples in enumerate(banks):
+        print()
+        print(f"static const u32 ar_isp_drc_tail_bank{bank}[AR_ISP_DRC_SAMPLES] = {{")
+        print(arlib.rows(samples, ROWS_PER_LINE, "#07x"), end="")
+        print("};")
+
+    print()
+    print(guard_close, end="")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--lib", required=True, help="vendor libmpp_service.so")
+    args = ap.parse_args()
+
+    with open(args.lib, "rb") as handle:
+        lib = handle.read()
+
+    template = arlib.lib_slice(lib, TEMPLATE_VMA, TEMPLATE_LEN,
+                               f"{args.lib}: DRC template")
+    banks = [decode_bank(template, 0x1000), decode_bank(template, 0x1800)]
+    emit(banks)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

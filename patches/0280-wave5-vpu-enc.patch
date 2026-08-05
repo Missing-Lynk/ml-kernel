@@ -1,0 +1,409 @@
+Why: every downstream change to the wave5 encoder's V4L2 layer. Kept as one patch
+per upstream file, so a kernel bump that touches this file fails loudly once
+instead of cascading through several patches that each edit the previous one's
+additions.
+
+(1) finish_encode error path. Upstream returns without v4l2_m2m_job_finish,
+leaking the m2m job; the next STREAMOFF then deadlocks in v4l2_m2m_cancel_job
+(D-state with the device mutex held, VPU unusable until power cycle). Log the
+firmware error and finish the job. enc_output_info is zero-initialized because
+this branch reads error_reason out of it after the getter has failed, and the
+getter does not guarantee it was written on every failing return; zero is not
+WAVE5_SYSERR_VLC_BUF_FULL, so an unwritten struct classifies as ERROR rather
+than as a spurious recoverable failure.
+
+(2) Result-error buffer ownership. The error path returned the OUTPUT buffer with
+v4l2_m2m_src_buf_remove(), but start_encode() has already removed that source from
+the ready queue after a successful ENC_PIC queue, so the buffer could stay ACTIVE
+forever. Measured symptom: after a single WAVE5_SYSERR_VLC_BUF_FULL every
+dma-heap input slot of the air-unit feeder stayed held and the instance produced
+nothing further for the rest of its life. Track the one source buffer the firmware
+owns and return it from the vb2 queue directly. A pure VLC_BUF_FULL consumes the
+input frame, so complete OUTPUT as DONE. There is no valid access unit to hand
+downstream, and CAPTURE must not be completed as a zero-length DONE or ERROR
+buffer: GStreamer's v4l2 encoder path reads a zero-sized M2M CAPTURE buffer from
+its own pool as end-of-stream. Keep the CAPTURE buffer on the m2m ready queue
+instead. start_encode() only peeks that buffer, so after the firmware reports
+the failed picture done, the same buffer can be reused for the next ENC_PIC.
+Other firmware result failures still error both sides.
+
+(3) Coded (bitstream) sizeimage clamp, mirroring the decoder clamp (patch 0270).
+GStreamer requests a worst-case ~17 MiB coded buffer at 1080p and the CAPTURE vb2
+pool is drawn from the same fixed pool as the codec's working buffers, so the
+request must be refused. The ceiling is the uncompressed frame (w * h * 3 / 2)
+rather than a fixed byte count: a fixed 1 MiB follows from an average frame, and
+an average does not bound the frame after a total content change, which is how
+VLC_BUF_FULL above was provoked. A coded frame larger than the raw frame is
+pathological, so the geometry bounds the worst case without assuming anything
+about content. Applied in try_fmt_cap and again in s_fmt_out, which recomputes
+dst_fmt afterwards and is the value the CAPTURE pool actually allocates from; the
+two must not diverge.
+
+(4) OUTPUT plane data_offset. The encoder programmed each source plane address as
+the bare vb2_dma_contig_plane_dma_addr and ignored the queued plane's data_offset,
+which V4L2 defines as the offset of the plane data within the buffer. A DMABUF
+importer that queues several planes of one shared allocation sets it per plane,
+and dropping it makes every plane fetch from offset 0, so the encoder reads luma
+bytes as chroma. MMAP buffers carry 0, so the stock path is unchanged.
+
+(5) Source stride wider than the picture. The encoder recomputed bytesperline from
+the width and discarded the caller's, so a frame whose rows carry padding could
+only be encoded after a repack, which is the whole cost zero-copy import exists to
+avoid. The CVISP capture node on this SoC writes 1920 pixels on a 2048-byte
+stride. The hardware takes the source stride as its own field and programs the
+width separately, so a wider stride is already supported and was simply never
+exposed. A caller leaving bytesperline at zero gets the computed value unchanged.
+
+(6) Coded height. The coded picture was sized from the source height after source
+alignment, so padding rows landed in the stream. The two sides differ:
+W5_ENC_RAW_STEP_HEIGHT is 16, W5_ENC_CODEC_STEP_HEIGHT is 8. Encoding 1920x1080
+gave a correct 1088-row source geometry and then a 1088-row coded picture, whose
+last eight rows are whatever the frame writer left in the tail of its allocation,
+shown by every decoder as a strip along the bottom edge. Take the caller's
+requested picture size for the coded side and let the codec's own frmsize
+constraints round it. The source geometry is untouched.
+
+--- a/drivers/media/platform/chips-media/wave5/wave5-vpu-enc.c
++++ b/drivers/media/platform/chips-media/wave5/wave5-vpu-enc.c
+@@ -125,6 +125,30 @@
+ 	return -EINVAL;
+ }
+ 
++static struct vb2_v4l2_buffer *wave5_vpu_enc_active_src_buf(struct vpu_instance *inst)
++{
++	struct v4l2_m2m_ctx *m2m_ctx = inst->v4l2_fh.m2m_ctx;
++	struct vb2_buffer *vb;
++
++	if (inst->active_enc_src_idx < 0)
++		return NULL;
++
++	vb = vb2_get_buffer(v4l2_m2m_get_src_vq(m2m_ctx), inst->active_enc_src_idx);
++	if (!vb) {
++		dev_warn(inst->dev->dev, "%s: no active source buffer with index: %d\n",
++			 __func__, inst->active_enc_src_idx);
++		return NULL;
++	}
++
++	if (vb->state != VB2_BUF_STATE_ACTIVE) {
++		dev_warn(inst->dev->dev, "%s: source buffer (%d) was not active: %i\n",
++			 __func__, inst->active_enc_src_idx, vb->state);
++		return NULL;
++	}
++
++	return to_vb2_v4l2_buffer(vb);
++}
++
+ static int start_encode(struct vpu_instance *inst, u32 *fail_res)
+ {
+ 	struct v4l2_m2m_ctx *m2m_ctx = inst->v4l2_fh.m2m_ctx;
+@@ -172,24 +196,35 @@
+ 		else
+ 			return -EAGAIN;
+ 	} else {
++		/* data_offset locates the plane data inside an imported DMABUF (several
++		 * planes can share one buffer at different offsets); MMAP buffers carry 0.
++		 */
++		struct vb2_plane *planes = src_buf->vb2_buf.planes;
++
+ 		if (inst->src_fmt.num_planes == 1) {
+ 			frame_buf.buf_y =
+-				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 0);
++				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 0) +
++				planes[0].data_offset;
+ 			frame_buf.buf_cb = frame_buf.buf_y + luma_size;
+ 			frame_buf.buf_cr = frame_buf.buf_cb + chroma_size;
+ 		} else if (inst->src_fmt.num_planes == 2) {
+ 			frame_buf.buf_y =
+-				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 0);
++				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 0) +
++				planes[0].data_offset;
+ 			frame_buf.buf_cb =
+-				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 1);
++				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 1) +
++				planes[1].data_offset;
+ 			frame_buf.buf_cr = frame_buf.buf_cb + chroma_size;
+ 		} else if (inst->src_fmt.num_planes == 3) {
+ 			frame_buf.buf_y =
+-				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 0);
++				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 0) +
++				planes[0].data_offset;
+ 			frame_buf.buf_cb =
+-				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 1);
++				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 1) +
++				planes[1].data_offset;
+ 			frame_buf.buf_cr =
+-				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 2);
++				vb2_dma_contig_plane_dma_addr(&src_buf->vb2_buf, 2) +
++				planes[2].data_offset;
+ 		}
+ 		frame_buf.stride = stride;
+ 		pic_param.src_idx = src_buf->vb2_buf.index;
+@@ -200,11 +235,11 @@
+ 	pic_param.code_option.encode_aud = inst->encode_aud;
+ 	ret = wave5_vpu_enc_start_one_frame(inst, &pic_param, fail_res);
+ 	if (ret) {
++		/* bring-up instrumentation: dev_dbg is compiled out on this kernel */
++		dev_warn(inst->dev->dev, "%s: wave5_vpu_enc_start_one_frame fail: %d (res: 0x%x)\n",
++			 __func__, ret, *fail_res);
+ 		if (*fail_res == WAVE5_SYSERR_QUEUEING_FAIL)
+ 			return -EINVAL;
+-
+-		dev_dbg(inst->dev->dev, "%s: wave5_vpu_enc_start_one_frame fail: %d\n",
+-			__func__, ret);
+ 		src_buf = v4l2_m2m_src_buf_remove(m2m_ctx);
+ 		if (!src_buf) {
+ 			dev_dbg(inst->dev->dev,
+@@ -219,20 +254,25 @@
+ 				__func__);
+ 			return -EINVAL;
+ 		}
++		inst->active_enc_src_idx = -1;
+ 		switch_state(inst, VPU_INST_STATE_STOP);
+ 		dst_buf->vb2_buf.timestamp = src_buf->vb2_buf.timestamp;
+ 		v4l2_m2m_buf_done(src_buf, VB2_BUF_STATE_ERROR);
+ 		v4l2_m2m_buf_done(dst_buf, VB2_BUF_STATE_ERROR);
+ 	} else {
+-		dev_dbg(inst->dev->dev, "%s: wave5_vpu_enc_start_one_frame success\n",
+-			__func__);
++		dev_dbg(inst->dev->dev, "%s: ENC_PIC queued (src_idx %d, end_flag %u)\n",
++			__func__, pic_param.src_idx, pic_param.src_end_flag);
+ 		/*
+ 		 * Remove the source buffer from the ready-queue now and finish
+ 		 * it in the videobuf2 framework once the index is returned by the
+ 		 * firmware in finish_encode
+ 		 */
+-		if (src_buf)
++		if (src_buf) {
++			inst->active_enc_src_idx = src_buf->vb2_buf.index;
+ 			v4l2_m2m_src_buf_remove_by_idx(m2m_ctx, src_buf->vb2_buf.index);
++		} else {
++			inst->active_enc_src_idx = -1;
++		}
+ 	}
+ 
+ 	return 0;
+@@ -245,12 +285,49 @@
+-	struct enc_output_info enc_output_info;
++	struct enc_output_info enc_output_info = {};
+ 	struct vb2_v4l2_buffer *src_buf = NULL;
+ 	struct vb2_v4l2_buffer *dst_buf = NULL;
++	bool recoverable_vlc_buf_full;
++	enum vb2_buffer_state src_state;
+ 
+ 	ret = wave5_vpu_enc_get_output_info(inst, &enc_output_info);
+ 	if (ret) {
+-		dev_dbg(inst->dev->dev,
+-			"%s: vpu_enc_get_output_info fail: %d  reason: %u | info: %u\n",
+-			__func__, ret, enc_output_info.error_reason, enc_output_info.warn_info);
++		/*
++		 * Mainline only dev_dbg's here and returns WITHOUT finishing the
++		 * m2m job, so a single failed ENC_PIC leaves the job active forever
++		 * and a later STREAMOFF deadlocks in v4l2_m2m_cancel_job (D-state,
++		 * device mutex held, whole VPU unusable). Log loudly and finish
++		 * the job so userspace gets its buffers back as errors.
++		 */
++		dev_warn(inst->dev->dev,
++			 "%s: vpu_enc_get_output_info fail: %d  reason: 0x%x | info: 0x%x\n",
++			 __func__, ret, enc_output_info.error_reason, enc_output_info.warn_info);
++		recoverable_vlc_buf_full =
++			enc_output_info.error_reason == WAVE5_SYSERR_VLC_BUF_FULL;
++		src_state = recoverable_vlc_buf_full ? VB2_BUF_STATE_DONE : VB2_BUF_STATE_ERROR;
++
++		src_buf = wave5_vpu_enc_active_src_buf(inst);
++		if (src_buf) {
++			inst->timestamp = src_buf->vb2_buf.timestamp;
++			v4l2_m2m_buf_done(src_buf, src_state);
++		}
++		inst->active_enc_src_idx = -1;
++
++		if (recoverable_vlc_buf_full) {
++			dst_buf = v4l2_m2m_next_dst_buf(m2m_ctx);
++			dev_warn(inst->dev->dev,
++				 "%s: vlc buf full recovery: src %s, dst %s kept queued, ready src %u dst %u\n",
++				 __func__, src_buf ? "done" : "missing",
++				 dst_buf ? "present" : "missing",
++				 v4l2_m2m_num_src_bufs_ready(m2m_ctx),
++				 v4l2_m2m_num_dst_bufs_ready(m2m_ctx));
++		} else {
++			dst_buf = v4l2_m2m_dst_buf_remove(m2m_ctx);
++			if (dst_buf) {
++				dst_buf->vb2_buf.timestamp = inst->timestamp;
++				dst_buf->field = V4L2_FIELD_NONE;
++				v4l2_m2m_buf_done(dst_buf, VB2_BUF_STATE_ERROR);
++			}
++		}
++		v4l2_m2m_job_finish(inst->v4l2_m2m_dev, m2m_ctx);
+ 		return;
+ 	}
+ 
+@@ -281,6 +358,7 @@
+ 			dev_warn(inst->dev->dev, "%s: no source buffer with index: %d found\n",
+ 				 __func__, enc_output_info.enc_src_idx);
+ 		}
++		inst->active_enc_src_idx = -1;
+ 	}
+ 
+ 	dst_buf = v4l2_m2m_dst_buf_remove(m2m_ctx);
+@@ -401,6 +479,24 @@
+ 
+ 	wave5_update_pix_fmt(&f->fmt.pix_mp, VPU_FMT_TYPE_CODEC,
+ 			     width, height, frmsize);
++	/*
++	 * Artosyn: clamp the coded (bitstream) sizeimage, mirroring the decoder
++	 * (wave5-vpu-dec.c). GStreamer asks for a worst-case ~17 MiB coded buffer at 1080p;
++	 * unclamped, the CAPTURE vb2 pool (from the 64 MiB CMA, shared during DVR with the two
++	 * tile decoders' capture pools) exhausts CMA and wedges the encoder.
++	 *
++	 * The ceiling is the uncompressed frame rather than a fixed byte count. A fixed 1 MiB
++	 * follows from an average (a 50 Mbit/s 60 fps stream averages ~104 KiB/frame), and an
++	 * average does not bound the frame after a total content change: at 1920x560 a
++	 * full-entropy source overflows it and the firmware returns WAVE5_SYSERR_VLC_BUF_FULL,
++	 * after which the instance produces nothing further. Rate control does not prevent it,
++	 * because it governs the average and not the first frame after the change. A coded
++	 * frame larger than the raw frame is pathological, so w*h*3/2 bounds the worst case
++	 * from the geometry instead of from an assumption about content, and stays far below
++	 * the ~17 MiB the clamp exists to refuse.
++	 */
++	f->fmt.pix_mp.plane_fmt[0].sizeimage = min(f->fmt.pix_mp.plane_fmt[0].sizeimage,
++						   (u32)width * height * 3 / 2);
+ 	f->fmt.pix_mp.colorspace = inst->colorspace;
+ 	f->fmt.pix_mp.ycbcr_enc = inst->ycbcr_enc;
+ 	f->fmt.pix_mp.quantization = inst->quantization;
+@@ -484,11 +580,44 @@
+ 	return 0;
+ }
+ 
++/*
++ * Artosyn: honour a caller-supplied luma stride wider than the picture.
++ *
++ * wave5_update_pix_fmt() ends in v4l2_fill_pixfmt_mp(), which derives
++ * bytesperline from the width and overwrites the caller's value, so a padded
++ * source can only be encoded through a repacked copy. The hardware has no such
++ * limit: start_encode() programs src_fmt.plane_fmt[0].bytesperline as the
++ * source stride, independent of the picture width.
++ *
++ * Only a wider stride is taken. Every plane scales by the same ratio so chroma
++ * keeps its relation to luma, and each sizeimage grows with its stride.
++ */
++static void wave5_widen_src_stride(struct v4l2_pix_format_mplane *pix_mp, unsigned int stride)
++{
++	unsigned int base = pix_mp->plane_fmt[0].bytesperline;
++
++	if (!base || stride <= base)
++		return;
++
++	for (unsigned int i = 0; i < pix_mp->num_planes; i++) {
++		unsigned int bpl = pix_mp->plane_fmt[i].bytesperline;
++		unsigned int rows;
++
++		if (!bpl)
++			continue;
++
++		rows = pix_mp->plane_fmt[i].sizeimage / bpl;
++		pix_mp->plane_fmt[i].bytesperline = bpl * stride / base;
++		pix_mp->plane_fmt[i].sizeimage = pix_mp->plane_fmt[i].bytesperline * rows;
++	}
++}
++
+ static int wave5_vpu_enc_try_fmt_out(struct file *file, void *fh, struct v4l2_format *f)
+ {
+ 	struct vpu_instance *inst = file_to_vpu_inst(file);
+ 	const struct v4l2_frmsize_stepwise *frmsize;
+ 	const struct vpu_format *vpu_fmt;
++	unsigned int stride = f->fmt.pix_mp.plane_fmt[0].bytesperline;
+ 	int width, height;
+ 
+ 	dev_dbg(inst->dev->dev, "%s: fourcc: %u width: %u height: %u num_planes: %u field: %u\n",
+@@ -510,6 +639,7 @@
+ 
+ 	wave5_update_pix_fmt(&f->fmt.pix_mp, VPU_FMT_TYPE_RAW,
+ 			     width, height, frmsize);
++	wave5_widen_src_stride(&f->fmt.pix_mp, stride);
+ 	return 0;
+ }
+ 
+@@ -518,6 +648,17 @@
+ 	struct vpu_instance *inst = file_to_vpu_inst(file);
+ 	const struct vpu_format *vpu_fmt;
+ 	const struct v4l2_format_info *info;
++	/*
++	 * Artosyn: the picture the caller asked for, before RAW alignment.
++	 *
++	 * The source and coded sides align differently, 16 rows against 8, and
++	 * the source rule is the coarser. Sizing the coded picture from the
++	 * aligned source height codes the buffer's padding rows as image: a
++	 * 1080-row frame becomes a 1088-row stream whose last 8 rows are
++	 * whatever the writer left in the allocation.
++	 */
++	unsigned int coded_width = f->fmt.pix_mp.width;
++	unsigned int coded_height = f->fmt.pix_mp.height;
+ 	int i, ret;
+ 
+ 	dev_dbg(inst->dev->dev, "%s: fourcc: %u width: %u height: %u num_planes: %u field: %u\n",
+@@ -566,8 +707,15 @@
+ 		return -EINVAL;
+ 
+ 	wave5_update_pix_fmt(&inst->dst_fmt, VPU_FMT_TYPE_CODEC,
+-			     f->fmt.pix_mp.width, f->fmt.pix_mp.height,
++			     coded_width, coded_height,
+ 			     vpu_fmt->v4l2_frmsize);
++	/* Artosyn: re-apply the coded sizeimage clamp (see wave5_vpu_enc_try_fmt_cap). s_fmt_out
++	 * recomputes dst_fmt after the CAPTURE clamp, and this is the value the CAPTURE vb2 pool
++	 * actually allocates from, so the ceiling here is the one that takes effect and the two
++	 * must not diverge. */
++	inst->dst_fmt.plane_fmt[0].sizeimage = min(inst->dst_fmt.plane_fmt[0].sizeimage,
++						   (u32)inst->dst_fmt.width *
++						   inst->dst_fmt.height * 3 / 2);
+ 	inst->conf_win.width = inst->dst_fmt.width;
+ 	inst->conf_win.height = inst->dst_fmt.height;
+ 
+@@ -1343,17 +1491,20 @@
+ 
+ 		ret = wave5_set_enc_openparam(&open_param, inst);
+ 		if (ret) {
+-			dev_dbg(inst->dev->dev, "%s: wave5_set_enc_openparam, fail: %d\n",
+-				__func__, ret);
++			/* bring-up instrumentation: dev_dbg is compiled out */
++			dev_warn(inst->dev->dev, "%s: wave5_set_enc_openparam, fail: %d\n",
++				 __func__, ret);
+ 			goto return_buffers;
+ 		}
+ 
+ 		ret = wave5_vpu_enc_open(inst, &open_param);
+ 		if (ret) {
+-			dev_dbg(inst->dev->dev, "%s: wave5_vpu_enc_open, fail: %d\n",
+-				__func__, ret);
++			dev_warn(inst->dev->dev, "%s: wave5_vpu_enc_open, fail: %d\n",
++				 __func__, ret);
+ 			goto return_buffers;
+ 		}
++		dev_info(inst->dev->dev, "%s: enc instance open (id %d)\n",
++			 __func__, inst->id);
+ 
+ 		if (inst->mirror_direction) {
+ 			wave5_vpu_enc_give_command(inst, ENABLE_MIRRORING, NULL);
+@@ -1376,6 +1527,8 @@
+ 			dev_warn(inst->dev->dev, "Sequence not found: %d\n", ret);
+ 			goto return_buffers;
+ 		}
++		dev_info(inst->dev->dev, "%s: enc seq init done (fbc_buf_count %u, min_src %u)\n",
++			 __func__, inst->fbc_buf_count, inst->min_src_buf_count);
+ 		ret = switch_state(inst, VPU_INST_STATE_INIT_SEQ);
+ 		if (ret)
+ 			goto return_buffers;
+@@ -1390,6 +1543,7 @@
+ 		}
+ 
+ 		ret = switch_state(inst, VPU_INST_STATE_PIC_RUN);
++		dev_info(inst->dev->dev, "%s: enc entering PIC_RUN\n", __func__);
+ 	}
+ 	if (ret)
+ 		goto return_buffers;
+@@ -1579,6 +1733,7 @@
+ 	inst->dev = dev;
+ 	inst->type = VPU_INST_TYPE_ENC;
+ 	inst->ops = &wave5_vpu_enc_inst_ops;
++	inst->active_enc_src_idx = -1;
+ 
+ 	inst->codec_info = kzalloc(sizeof(*inst->codec_info), GFP_KERNEL);
+ 	if (!inst->codec_info) {

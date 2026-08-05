@@ -1,6 +1,6 @@
 # SDIO RF link (AR8030 baseband over the DesignWare SDIO host)
 
-How the AR8030 RF baseband is brought up on the open kernel as an SDIO device, and how its IP-over-SDIO netdev (`sdio0`) works at the driver level. This is the kernel/transport layer only; the RF association, the `:10000`/`:10001` UDP handshake, and the video downlink protocol are the product story in `../../docs/reference/rf-video-downlink.md`. Each fact is tagged **[confirmed]** (direct evidence in the disassembly, DT, or on hardware), **[inferred]** (consistent but not proven), **[open]** (still to be determined).
+How the AR8030 RF baseband is brought up on the open kernel as an SDIO device, and how its IP-over-SDIO netdev (`sdio0`) works at the driver level. This is the kernel/transport layer only; the RF association, the `:10000`/`:10001` UDP handshake, and the video downlink protocol are the product story in `../../userspace/docs/rf-video-downlink.md`. Each fact is tagged **[confirmed]** (direct evidence in the disassembly, DT, or on hardware), **[inferred]** (consistent but not proven), **[open]** (still to be determined).
 
 ## Architecture
 
@@ -32,6 +32,14 @@ The microSD host `mmc@1c00000` (mmc1) is the same DesignWare IP, a different ins
 ## Reset line: `artosyn_gpio` GPIO23 [confirmed]
 
 `artosyn_gpio.c` is the open reimplementation of the vendor `artosyn,gpio` controller at `0x0A10A000`; it is needed because the AR8030 reset must be driven through gpiolib (ad-hoc `/dev/mem` pokes fail: the direction register is write-only/unreadable). GPIO23 = bank1 line0 is the AR8030 active-low reset (drive output low then high to release). The register model, the load-bearing `0xBC` (not `0xC0`) bank base, and the bank layout are `artosyn-gpio.md`.
+
+## Corrupt power-up device ID [confirmed]
+
+The AR8030 can power up in a state where it enumerates with the correct vendor (`0x4152`) but a garbage device ID (observed `0x2a22`), which is neither `0x8030` nor `0x8031`. `artosyn_sdio`'s `id_table` then never matches, so there is no probe, no firmware upload, no `/dev/artosyn_sdio` and no `sdio0`; `ml-linkd` loops on `open(/dev/artosyn_sdio): No such file or directory` and `ml-pipeline` stays at `rx=0`. Diagnose with `cat /sys/bus/sdio/devices/*/device`: anything other than `0x8030` (ROM loader) or `0x8031` (firmware running) is this state.
+
+The GPIO23 reset pulse does not clear it, so the wedge sits below the reset domain. The DTS carries no regulator or power-enable for the AR8030 and GPIO23 is the only control line, so software cannot power-cycle the chip: the remedy is a cold power cycle with the battery out, and a warm reboot may not be enough. Note this is not stale state from another slot; `ml-rf-bringup` pulses the reset and then waits for `0x8030` specifically, so the firmware and its config are re-downloaded on every bring-up.
+
+Possible debugging step (not implemented): `wait_ar8030()` in `ml-rf-bringup` reads every enumerated device ID while scanning and discards it, then reports `AR8030 never enumerated on SDIO` on timeout, which is misleading here because the chip did enumerate. Recording the observed `vendor:device` pairs and printing them on timeout would name this state at boot instead of leaving `ml-linkd` retrying without a reason. Whether a longer or repeated reset hold recovers the chip is untested.
 
 ## Clock glue: `dw_mci-artosyn` (mmc0 taps) [confirmed]
 
@@ -65,4 +73,4 @@ Two operational facts worth carrying: **do not warm-reload `artosyn_sdio`** (`rm
 
 ## Source
 
-Module sources `../modules/artosyn_sdio.c`, `../modules/dw_mci-artosyn.c`, `../modules/artosyn_gpio.c`; the DT nodes `../devices/betafpv-vr04-goggle/proxima-9311.dts`; the validation method `../modules/VERIFICATION.md`; the peripheral map `../PERIPHERALS.md` and board config `../modules/BOARD-CONFIG.md`. RF protocol above the driver: `../../docs/reference/rf-video-downlink.md`.
+Module sources `../modules/artosyn_sdio.c`, `../modules/dw_mci-artosyn.c`, `../modules/artosyn_gpio.c`; the DT nodes `../devices/betafpv-vr04-goggle/proxima-9311.dts`; the validation method `../modules/VERIFICATION.md`; the peripheral map `../PERIPHERALS.md` and board config `../modules/BOARD-CONFIG.md`. RF protocol above the driver: `../../userspace/docs/rf-video-downlink.md`.
