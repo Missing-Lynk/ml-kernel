@@ -10,6 +10,14 @@
 #ifndef AR_ISP_BYTES_H
 #define AR_ISP_BYTES_H
 
+/*
+ * IEEE-754 single fields. A stage converting to QN shifts the mantissa by
+ * AR_ISP_F32_MANT_BITS - N - exponent, so the mantissa width is exported
+ * alongside the accessors.
+ */
+#define AR_ISP_F32_MANT_BITS	23
+#define AR_ISP_F32_SIGN		0x80000000u
+
 static inline u32 ar_isp_get_le32(const u8 *p)
 {
 	return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) |
@@ -36,16 +44,11 @@ static inline void ar_isp_put_le16(u8 *p, u16 v)
 }
 
 /*
- * IEEE-754 single fields. The tuning file stores gains, matrix coefficients and
- * ladder bounds as float32 and the kernel has no FPU, so every stage decodes
- * them from the bit pattern. Each stage's own quantisation differs; only the
- * field extraction is shared.
- *
- * A stage converting to QN shifts the mantissa by AR_ISP_F32_MANT_BITS - N -
- * exponent, so the mantissa width is exported alongside the accessors.
+ * The tuning file stores gains, matrix coefficients and ladder bounds as
+ * float32 and the kernel has no FPU, so every stage decodes them from the bit
+ * pattern. Each stage's own quantisation differs; only the field extraction is
+ * shared.
  */
-#define AR_ISP_F32_MANT_BITS	23
-#define AR_ISP_F32_SIGN		0x80000000u
 
 /* The mantissa with its implicit leading one restored. */
 static inline u32 ar_isp_f32_mant(u32 bits)

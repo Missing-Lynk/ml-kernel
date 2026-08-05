@@ -247,6 +247,7 @@ static inline u16 ar_isp_f32_scale(u32 bits)
 {
 	u32 mant = ar_isp_f32_mant(bits);
 	int shift = (AR_ISP_F32_MANT_BITS - AR_ISP_LSC_Q) - ar_isp_f32_exp(bits);
+  u32 scaled;
 
 	if (bits & 0x80000000)
 		return 0;
@@ -257,8 +258,7 @@ static inline u16 ar_isp_f32_scale(u32 bits)
 	if (shift <= 0)
 		return 0xffff;
 
-	u32 scaled = mant >> shift;
-
+	scaled = mant >> shift;
 	return scaled > 0xffff ? 0xffff : (u16)scaled;
 }
 
