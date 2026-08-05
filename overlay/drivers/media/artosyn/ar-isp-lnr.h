@@ -183,19 +183,19 @@ static inline void ar_isp_lnr_pack_field(u32 *dst, const u8 *payload,
 static inline void ar_isp_lnr_from_blob(u32 *dst, const u8 *blob, u32 gain_q16)
 {
 	const u8 *payload = blob + AR_ISP_LNR_BLOB_PAYLOAD;
-	unsigned int band;
+	unsigned int band, i;
 	u32 t_q24;
 
 	ar_isp_ladder_select(&ar_isp_lnr_ladder, blob, gain_q16, &band, &t_q24);
 
-	for (unsigned int i = 0; i < AR_ISP_LNR_FIELDS; i++) {
+	for (i = 0; i < AR_ISP_LNR_FIELDS; i++) {
 		const struct ar_isp_lnr_field *f = &ar_isp_lnr_fields[i];
 
 		ar_isp_lnr_pack_field(dst, payload, band, t_q24, f->reg, f->off,
 				      f->shift, f->width);
 	}
 
-	for (unsigned int i = 0; i < AR_ISP_LNR_CURVE_REGS; i++) {
+	for (i = 0; i < AR_ISP_LNR_CURVE_REGS; i++) {
 		unsigned int reg = AR_ISP_LNR_CURVE_FIRST_REG + i;
 		unsigned int off = i < AR_ISP_LNR_CURVE_SPLIT ?
 				   AR_ISP_LNR_CURVE_OFF_LOW +
