@@ -20,7 +20,7 @@ This board uses CSI pair 0, core 0 at `0x08880400`. The DesignWare core version 
 
 **All four blocks are inside the SoC**, in its media subsystem. The NT99235 is a plain Bayer sensor: a pixel array, its own PLL, exposure and analogue gain, and a MIPI CSI-2 transmitter, nothing else. Every stage that turns its raw output into a picture runs on the Proxima-9311, so nothing in this document lives on the camera module.
 
-The chain is: sensor sends CSI-2 packets over the MIPI lanes; the **CSI-2 receiver** decodes the link and produces a pixel stream on its IPI output; the **VIF** is the SoC's capture front end, which accepts that pixel stream and routes it, either straight to DDR through its bypass views or onward into the ISP; the **ISP** converts Bayer to YUV; and **CVISP** takes the ISP's output, owns the frame queue, and writes frames to DDR.
+The chain is: sensor sends CSI-2 packets over the MIPI lanes; the **CSI-2 receiver** decodes the link and produces a pixel stream on its IPI output; the **VIF** is the SoC's capture front end, which accepts that pixel stream and routes it, either straight to DDR through its bypass views (a path that has never been proven to deliver a frame, on either stack) or onward into the ISP; the **ISP** converts Bayer to YUV; and **CVISP** takes the ISP's output, owns the frame queue, and writes frames to DDR.
 
 `VIF` is the vendor's own name for the block, used throughout `libmpp_service.so` (`vif_*`, 118 functions) and in the interrupt it registers (`ar_irq_reg_with_name(irq, handler, dev, "vif")`). It is the video interface between the receiver and the rest of the media block: it sees pixels, where the receiver sees packets. It also measures the incoming video timing, which is what makes `0x1f0` the front end's ground-truth register.
 
@@ -319,7 +319,7 @@ V4L2 bridge subdev driving the DesignWare CSI-2 host core plus the Artosyn glue 
 
 V4L2 video node plus VIF front-end and view-engine programming. Constants are captured from the vendor's live 1920x1080 RAW12 2-lane stream; only geometry and stride are computed.
 
-The front-end half of this driver is validated. The view-engine half implements the bypass view DMA, which the section above shows is not the vendor's capture path.
+The front-end half of this driver is validated. The view-engine half implements the bypass view DMA, but that path is **unvalidated: no bypass view has ever delivered a frame, on either stack**. The vendor holds the views in reset and streams through the ISP path instead (see "The VIF views serve the bypass path"), so the view-engine code is written from the register map without a working reference; treat every view-engine claim as untested (see "The capture node advertises raw Bayer but has never delivered a frame").
 
 - Probe claims the reserved capture pool, ioremaps `0x08870000`, gets the DT clock "axi" (`cgu_vif_axi_clk`), sets up a vb2 dma-contig queue and the V4L2/media devices, and registers an async notifier for the CSI source. Completion is interrupt-driven by default; `use_irq=0` falls back to polling.
 - The block loses all state when the axi clock gates.
