@@ -1,6 +1,6 @@
 # SDIO RF link (AR8030 baseband over the DesignWare SDIO host)
 
-How the AR8030 RF baseband is brought up on the open kernel as an SDIO device, and how its IP-over-SDIO netdev (`sdio0`) works at the driver level. This is the kernel/transport layer only; the RF association, the `:10000`/`:10001` UDP handshake, and the video downlink protocol are the product story in `../../docs/reference/rf-video-downlink.md`. Each fact is tagged **[confirmed]** (direct evidence in the disassembly, DT, or on hardware), **[inferred]** (consistent but not proven), **[open]** (still to be determined).
+How the AR8030 RF baseband is brought up on the open kernel as an SDIO device, and how its IP-over-SDIO netdev (`sdio0`) works at the driver level. This is the kernel/transport layer only; the RF association, the `:10000`/`:10001` UDP handshake, and the video downlink protocol are the product story in `../../userspace/docs/rf-video-downlink.md`. Each fact is tagged **[confirmed]** (direct evidence in the disassembly, DT, or on hardware), **[inferred]** (consistent but not proven), **[open]** (still to be determined).
 
 ## Architecture
 
@@ -73,4 +73,4 @@ Two operational facts worth carrying: **do not warm-reload `artosyn_sdio`** (`rm
 
 ## Source
 
-Module sources `../modules/artosyn_sdio.c`, `../modules/dw_mci-artosyn.c`, `../modules/artosyn_gpio.c`; the DT nodes `../devices/betafpv-vr04-goggle/proxima-9311.dts`; the validation method `../modules/VERIFICATION.md`; the peripheral map `../PERIPHERALS.md` and board config `../modules/BOARD-CONFIG.md`. RF protocol above the driver: `../../docs/reference/rf-video-downlink.md`.
+Module sources `../modules/artosyn_sdio.c`, `../modules/dw_mci-artosyn.c`, `../modules/artosyn_gpio.c`; the DT nodes `../devices/betafpv-vr04-goggle/proxima-9311.dts`; the validation method `../modules/VERIFICATION.md`; the peripheral map `../PERIPHERALS.md` and board config `../modules/BOARD-CONFIG.md`. RF protocol above the driver: `../../userspace/docs/rf-video-downlink.md`.

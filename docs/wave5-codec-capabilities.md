@@ -119,4 +119,6 @@ HEVC: `HEVC_PROFILE` Main or Main10 menu (default Main - **Main10 will not produ
 
 H.264: `H264_PROFILE` menu up to High 4:4:4 Predictive (default Baseline; the validated streams are Baseline), `H264_LEVEL` up to 5.1, `H264_{MIN,MAX}_QP` 0..63 (8/51), `H264_I_FRAME_QP` (30), `H264_I_PERIOD` 0..2047, `H264_ENTROPY_MODE` CAVLC/CABAC (default CAVLC), `H264_8X8_TRANSFORM` (default on), `H264_LOOP_FILTER_MODE` + alpha/beta, `H264_CONSTRAINED_INTRA_PREDICTION`, `H264_CHROMA_QP_INDEX_OFFSET` -12..12.
 
-Not exposed by the mainline driver (fw supports more via ENC_SET_PARAM, unmapped): B-frame GOP presets, custom GOP structure, ROI/custom QP maps, HVS-QP tuning knobs beyond the fixed defaults in `wave5_set_enc_openparam` (hvs_qp_scale 2, nr weights 7/4, rdo_skip 1, lambda_scaling 1).
+Not exposed by the mainline driver (fw supports more via ENC_SET_PARAM, unmapped): B-frame GOP presets, custom GOP structure, ROI/custom QP maps, HVS-QP tuning knobs beyond the fixed defaults in `wave5_set_enc_openparam` (hvs_qp_scale 2, hvs_max_delta_qp 10, nr weights 7/4, rdo_skip 1, lambda_scaling 1).
+
+Open parity gap on those two: the vendor sets `s32HvsQpScale = 4` and `s32HvsMaxDeltaQp = 4` through `AR_MPI_VENC_SetRcParam` (recovered values in `../../userspace/docs/venc-api.md`, comparison in `../../userspace/docs/air-video-benchmark.md`). There is one correct value per field on this hardware, so the fix belongs in `wave5_set_enc_openparam` rather than in a new control. Not yet written.

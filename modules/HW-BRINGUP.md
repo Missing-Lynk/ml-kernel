@@ -147,7 +147,7 @@ link end to end (enum -> firmware+config upload -> SDIO -> TX credit -> RF assoc
 parse 0xCC IP frames -> `netif_rx` -> `sdio0`). Requires an air-unit power-cycle after every
 slot-B reboot to re-associate.
 
-The full-rate video downlink on top of this is DONE (poll cadence + TX power + the UDP `:10000` params handshake; `../STATUS.md` "RF chip", canonical record `../../docs/reference/rf-video-downlink.md`). Phases 1-5 above cover the reference MPP modules (see the pivot note in `VERIFICATION.md`); only this phase is production.
+The full-rate video downlink on top of this is DONE (poll cadence + TX power + the UDP `:10000` params handshake; `../STATUS.md` "RF chip", canonical record `../../userspace/docs/rf-video-downlink.md`). Phases 1-5 above cover the reference MPP modules (see the pivot note in `VERIFICATION.md`); only this phase is production.
 
 ## If something breaks
 - A module oops doesn't kill SSH (dropbear is independent). `rmmod` it, fix, retry.
