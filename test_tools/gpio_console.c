@@ -7,7 +7,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <signal.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
@@ -47,6 +49,27 @@ static const char *state_name(enum state s)
 	}
 
 	return name;
+}
+
+/* The whole token has to be a line number. atoi() returns 0 for "red" and for a typo, and
+ * strtoul() alone accepts a "12abc" prefix, so either would select line 0 - a line the
+ * operator never named, on a chip where a neighbouring line may be a reset or a rail.
+ */
+static int parse_line(const char *tok, unsigned int *out)
+{
+	unsigned long v;
+	char *end;
+
+	if (tok[0] == '-')
+		return -1;
+
+	errno = 0;
+	v = strtoul(tok, &end, 0);
+	if (errno != 0 || end == tok || *end != '\0' || v > UINT_MAX)
+		return -1;
+
+	*out = (unsigned int)v;
+	return 0;
 }
 
 static int open_chip(const char *want)
@@ -109,8 +132,19 @@ int main(int argc, char **argv)
 	memset(&sa, 0, sizeof(sa));
 
 	if (argc > 2) {
-		for (i = 2; i < argc && count < MAX_LINES; i++)
-			line[count++] = (unsigned int)atoi(argv[i]);
+		if (argc - 2 > MAX_LINES) {
+			fprintf(stderr, "at most %d lines per session\n", MAX_LINES);
+			return 1;
+		}
+
+		for (i = 2; i < argc; i++) {
+			if (parse_line(argv[i], &line[count]) < 0) {
+				fprintf(stderr, "bad line number '%s'\n", argv[i]);
+				return 1;
+			}
+
+			count++;
+		}
 	} else {
 		/* The air unit's LED pair. */
 		line[count++] = 0;
@@ -162,6 +196,7 @@ int main(int argc, char **argv)
 	sigaction(SIGTERM, &sa, NULL);
 
 	while (!interrupted) {
+		unsigned int target = 0;
 		char *tok, *arg;
 		enum state want;
 		int all, hit;
@@ -171,6 +206,12 @@ int main(int argc, char **argv)
 
 		/* NULL is EOF or the EINTR from a caught signal; both end the session. */
 		if (!fgets(buf, sizeof(buf), stdin))
+			break;
+
+		/* A signal that arrived while the line was being typed, rather than while
+		 * fgets was blocked, must not let one more command through.
+		 */
+		if (interrupted)
 			break;
 
 		tok = strtok(buf, " \t\r\n");
@@ -214,10 +255,15 @@ int main(int argc, char **argv)
 		}
 
 		all = !strcmp(tok, "all");
+		if (!all && parse_line(tok, &target) < 0) {
+			printf("  '%s' is not a line number or 'all'\n", tok);
+			continue;
+		}
+
 		hit = 0;
 
 		for (i = 0; i < count; i++) {
-			if (!all && line[i] != (unsigned int)atoi(tok))
+			if (!all && line[i] != target)
 				continue;
 
 			hit = 1;
