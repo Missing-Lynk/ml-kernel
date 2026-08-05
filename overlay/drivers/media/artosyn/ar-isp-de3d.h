@@ -42,6 +42,16 @@
 #define AR_ISP_DE3D_CURVE_OFF		0xe0
 
 /*
+ * Where the curve starts in the register array: the control word plus the
+ * seventeen scalars. ar_isp_de3d_from_blob writes the scalars by index, so the
+ * two halves have to add up to the whole array.
+ */
+#define AR_ISP_DE3D_SCALAR_REGS		18
+
+_Static_assert(AR_ISP_DE3D_SCALAR_REGS + AR_ISP_DE3D_CURVE_REGS ==
+	       AR_ISP_DE3D_REGS, "de3d scalar and curve counts must cover the bank");
+
+/*
  * Ladder in the tuning file. The header words are enable, interpolate, band
  * count, abscissa selector.
  *
@@ -192,39 +202,47 @@ static inline void ar_isp_de3d_from_blob(u32 *dst, const u8 *blob, u32 gain_q16)
 #define F(off, w)	ar_isp_de3d_field(payload, band, t_q24, (off), (w))
 #define V(off, w)	ar_isp_de3d_field(payload, band, 0, (off), (w))
 #define S(hi, lo)	ar_isp_de3d_slope(payload, band, t_q24, (hi), (lo))
-	dst[0] = (V(0x04, 1) << 3) | (V(0x08, 1) << 2);
-	dst[1] = (S(0x18, 0x14) << 16) | (F(0x14, 8) << 8) | F(0x18, 8);
+
+	/*
+	 * Register per line, in ar_isp_de3d_regs order. The trailing address is
+	 * the bank register the slot lands in; the offsets inside each
+	 * expression are payload fields, which are a different space.
+	 */
+	dst[0] = (V(0x04, 1) << 3) | (V(0x08, 1) << 2);				/* 0x2e00 */
+	dst[1] = (S(0x18, 0x14) << 16) | (F(0x14, 8) << 8) | F(0x18, 8);	/* 0x2e10 */
 	dst[2] = (F(0x1c, 8) << 24) | (F(0x20, 8) << 16) | (F(0x24, 8) << 8) |
-		 F(0x28, 8);
-	dst[3] = (S(0x30, 0x2c) << 16) | (F(0x2c, 8) << 8) | F(0x30, 8);
-	dst[4] = F(0x34, 14);
-	dst[5] = (F(0x38, 9) << 16) | F(0x40, 8);
-	dst[6] = F(0x44, 9);
+		 F(0x28, 8);							/* 0x2e14 */
+	dst[3] = (S(0x30, 0x2c) << 16) | (F(0x2c, 8) << 8) | F(0x30, 8);	/* 0x2e18 */
+	dst[4] = F(0x34, 14);							/* 0x2e1c */
+	dst[5] = (F(0x38, 9) << 16) | F(0x40, 8);				/* 0x2e20 */
+	dst[6] = F(0x44, 9);							/* 0x2e28 */
 	dst[7] = (F(0x48, 8) << 24) | (F(0x4c, 8) << 16) | (F(0x50, 8) << 8) |
-		 F(0x54, 8);
-	dst[8] = F(0x5c, 14);
+		 F(0x54, 8);							/* 0x2e2c */
+	dst[8] = F(0x5c, 14);							/* 0x2e4c */
 	dst[9] = (F(0xc8, 1) << 26) | (F(0xcc, 1) << 27) | (F(0xd0, 1) << 28) |
 		 (F(0xd4, 1) << 29) | (F(0xd8, 3) << 4) | F(0xdc, 3) |
-		 (1u << 16);
-	dst[10] = (F(0x6c, 8) << 16) | (F(0x70, 8) << 8) | F(0x74, 8);
+		 (1u << 16);							/* 0x2e90 */
+	dst[10] = (F(0x6c, 8) << 16) | (F(0x70, 8) << 8) | F(0x74, 8);		/* 0x2e94 */
 	dst[11] = V(0x7c, 1) | (V(0x80, 1) << 1) | (V(0x84, 1) << 2) |
 		  (V(0x88, 1) << 3) | (V(0x2e0, 1) << 4) | (V(0x2e4, 1) << 5) |
 		  (V(0x2e8, 1) << 6) | (V(0x2ec, 1) << 7) | (F(0x2f0, 8) << 8) |
-		  (F(0x2f4, 8) << 16);
+		  (F(0x2f4, 8) << 16);						/* 0x2e9c */
 	dst[12] = F(0x8c, 8) | (asym << 8) | (F(0x94, 8) << 16) |
-		  (F(0x98, 8) << 24);
-	dst[13] = F(0x9c, 13) | (F(0xa0, 10) << 16);
-	dst[14] = F(0xa4, 12) | (F(0xa8, 10) << 16);
-	dst[15] = F(0xac, 9);
+		  (F(0x98, 8) << 24);						/* 0x2ea0 */
+	dst[13] = F(0x9c, 13) | (F(0xa0, 10) << 16);				/* 0x2ea4 */
+	dst[14] = F(0xa4, 12) | (F(0xa8, 10) << 16);				/* 0x2ea8 */
+	dst[15] = F(0xac, 9);							/* 0x2eac */
 	dst[16] = (F(0xb0, 8) << 24) | (F(0xb4, 8) << 16) | (F(0xb8, 8) << 8) |
-		  F(0xbc, 8);
-	dst[17] = F(0xc0, 8);
+		  F(0xbc, 8);							/* 0x2eb0 */
+	dst[17] = F(0xc0, 8);							/* 0x2eb4 */
 
+	/* The byte-packed curve, 0x2ebc..0x2f38. */
 	for (i = 0; i < AR_ISP_DE3D_CURVE_REGS; i++) {
 		unsigned int base = AR_ISP_DE3D_CURVE_OFF + i * 16;
 
-		dst[18 + i] = (F(base, 8) << 24) | (F(base + 4, 8) << 16) |
-			      (F(base + 8, 8) << 8) | F(base + 12, 8);
+		dst[AR_ISP_DE3D_SCALAR_REGS + i] =
+			(F(base, 8) << 24) | (F(base + 4, 8) << 16) |
+			(F(base + 8, 8) << 8) | F(base + 12, 8);
 	}
 #undef F
 #undef V
