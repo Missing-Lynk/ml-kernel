@@ -20,7 +20,10 @@
 	#address-cells = <2>;
 	#size-cells = <2>;
 
-	aliases { serial0 = &uart0; };
+	aliases {
+		serial0 = &uart0;
+		serial1 = &uart1;
+	};
 
 	chosen {
 		stdout-path = "serial0:1152000n8";
@@ -281,6 +284,16 @@
 			clocks = <&clk150m>;	/* full 8250_dw driver derives baud from this (150 MHz, DLF) */
 			/* No clock-frequency: keeps earlycon at U-Boot's already-set 1152000 baud
 			 * (with it, earlycon reprograms DLL to divisor 8 = 1171875, ~1.7% off). */
+			reg-shift = <2>;
+			reg-io-width = <4>;
+			status = "okay";
+		};
+
+		uart1: serial@1504000 {
+			compatible = "snps,dw-apb-uart";
+			reg = <0 0x1504000 0 0x400>;
+			interrupts = <GIC_SPI 13 IRQ_TYPE_LEVEL_HIGH>;	/* GIC 45 */
+			clocks = <&clk150m>;
 			reg-shift = <2>;
 			reg-io-width = <4>;
 			status = "okay";

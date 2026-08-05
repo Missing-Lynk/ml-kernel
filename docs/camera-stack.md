@@ -360,7 +360,7 @@ The open CGU provider models these as gate-only leaves, so `clk_prepare_enable` 
 
 ### What the vendor programs, measured
 
-Read live from a streaming stock unit and cross-checked against a read+write trace of the CGU window, which contains only 66 writes for the whole camera bringup. Reference copy: `glue/camera/cgu-vendor-streaming.txt`.
+Read live from a streaming stock unit and cross-checked against a read+write trace of the CGU window, which contains only 66 writes for the whole camera bringup.
 
 | Register | Vendor value | Open stack |
 |---|---|---|
