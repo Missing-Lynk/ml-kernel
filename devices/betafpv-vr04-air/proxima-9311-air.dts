@@ -10,6 +10,7 @@
 #include <dt-bindings/interrupt-controller/arm-gic.h>
 #include <dt-bindings/interrupt-controller/irq.h>
 #include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/leds/common.h>
 
 / {
 	model = "Artosyn Proxima-9311 (BetaFPV VR04 air unit)";
@@ -800,4 +801,33 @@
 
 	/* No backlight, no front-panel keypad, no MPP proc-shuttle on the air unit. (The vendor
 	 * DTB has one gpio-key on gpio19 - a bind button - not modelled here yet.) */
+
+	/*
+	 * Red on global GPIO 0, green on GPIO 1, both ACTIVE LOW. The two share a supply through
+	 * one series resistor, so lighting both starves the red: the states below are the useful
+	 * ones, and any indicator policy switches between the colours rather than combining them.
+	 *
+	 * An undriven line leaves its LED glowing faintly on leakage, and artosyn_gpio is a
+	 * module, so both are dim from power-on until it loads and leds-gpio applies these.
+	 *
+	 * Bind indication is a 40 ms half-period blink on the red, which the timer trigger
+	 * reproduces with delay_on = delay_off = 40. See docs/status-led.md.
+	 */
+	leds {
+		compatible = "gpio-leds";
+
+		led_bind: led-0 {
+			gpios = <&gpio 0 GPIO_ACTIVE_LOW>;
+			color = <LED_COLOR_ID_RED>;
+			function = LED_FUNCTION_INDICATOR;
+			default-state = "off";
+		};
+
+		led_power: led-1 {
+			gpios = <&gpio 1 GPIO_ACTIVE_LOW>;
+			color = <LED_COLOR_ID_GREEN>;
+			function = LED_FUNCTION_POWER;
+			default-state = "on";
+		};
+	};
 };
