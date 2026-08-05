@@ -681,9 +681,9 @@ static int nt99235_detect(struct nt99235 *nt99235)
 {
 	u8 hi, lo;
 	u16 id;
+	int ret;
 
-	int ret = nt99235_read(nt99235, NT99235_REG_MODEL_ID_HI, &hi);
-
+	ret = nt99235_read(nt99235, NT99235_REG_MODEL_ID_HI, &hi);
 	if (ret)
 		return ret;
 
@@ -849,8 +849,9 @@ static int nt99235_apply_live(void)
 
 static int nt99235_param_set(const char *val, const struct kernel_param *kp)
 {
-	int ret = param_set_int(val, kp);
+	int ret;
 
+	ret = param_set_int(val, kp);
 	if (ret)
 		return ret;
 

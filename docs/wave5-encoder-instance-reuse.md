@@ -66,7 +66,7 @@ What the SD card shows, by `ffprobe` on each file's header:
 
 Candidate differences between the real record bin and the isolated loop, none tested: the encoder imports composite dma-bufs (`output-io-mode=dmabuf-import`) where `ml-cam2enc -e` allocates its own dma-heap buffers; the bin is driven at real-time 60 fps through an appsrc rather than as fast as the encoder will go; and with the RTSP restream active an encoder instance also runs file-less between recordings (the current boot's log shows `DVR stopped -> no file (pushed=54468)`), so the instance lifetime is not simply one-per-recording.
 
-The measurement that would settle it, attempted and **not** obtained: two consecutive HEVC recordings through the real pipeline in one boot. With the air unit off there is no RF video, so all three attempts produced header-only files with `pushed=0` for want of input, which proves nothing about the encoder. Repeat with a live air unit.
+The measurement that would settle it, attempted and **not** obtained: two consecutive HEVC recordings through the real pipeline in one boot. With the air unit off there is no RF video, so all three attempts produced header-only files with `pushed=0` for want of input, which proves nothing about the encoder. Repeat with a live air unit; the experiment and what each outcome implies are in `plans/wave5-encoder-instance-reuse.md`.
 
 The codec DT nodes are identical apart from the memory pool (air 32 MiB at `0x25000000`, goggle 110 MiB at `0x29200000`).
 
