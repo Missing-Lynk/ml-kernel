@@ -20,9 +20,7 @@ This board uses CSI pair 0, core 0 at `0x08880400`. The DesignWare core version 
 
 **All four blocks are inside the SoC**, in its media subsystem. The NT99235 is a plain Bayer sensor: a pixel array, its own PLL, exposure and analogue gain, and a MIPI CSI-2 transmitter, nothing else. Every stage that turns its raw output into a picture runs on the Proxima-9311, so nothing in this document lives on the camera module.
 
-The chain is: sensor sends CSI-2 packets over the MIPI lanes; the **CSI-2 receiver** decodes the link and produces a pixel stream on its IPI output; the **VIF** is the SoC's capture front end, which accepts that pixel stream and routes it, either straight to DDR through its bypass views or onward into the ISP; the **ISP** converts Bayer to YUV; and **CVISP** takes the ISP's output and writes frames to DDR.
-
-**CVISP is the writer**: the ISP converts and hands off, CVISP owns the frame queue and the DRAM writes.
+The chain is: sensor sends CSI-2 packets over the MIPI lanes; the **CSI-2 receiver** decodes the link and produces a pixel stream on its IPI output; the **VIF** is the SoC's capture front end, which accepts that pixel stream and routes it, either straight to DDR through its bypass views or onward into the ISP; the **ISP** converts Bayer to YUV; and **CVISP** takes the ISP's output, owns the frame queue, and writes frames to DDR.
 
 `VIF` is the vendor's own name for the block, used throughout `libmpp_service.so` (`vif_*`, 118 functions) and in the interrupt it registers (`ar_irq_reg_with_name(irq, handler, dev, "vif")`). It is the video interface between the receiver and the rest of the media block: it sees pixels, where the receiver sees packets. It also measures the incoming video timing, which is what makes `0x1f0` the front end's ground-truth register.
 
@@ -121,7 +119,7 @@ These are the only visibility into whether pixels cross from the VIF front end i
 
 ### VIF debug counters: `0x32c` selects, `0x330`-`0x33c` report
 
-`0x330`, `0x334`, `0x338` and `0x33c` are **read-only debug counters behind a mux**. A vendor dump routine at `0x22ee80` (a local function, between the exported `vif_getmipitype_bits` and `vif_device_module_creat`) drives them: it read-modify-writes a channel index into `0x32c` bits [19:16], calls `ar_delay(100)`, then reads each counter and logs it as **two independent 16-bit fields**, high half and low half, through `ar_log_func_raw`. It loops, incrementing the channel index.
+`0x330`, `0x334`, `0x338` and `0x33c` are **read-only debug counters behind a mux**: `0x32c` bits [19:16] select the channel, and each counter reads as two independent 16-bit fields, high half and low half. Recovered from the vendor dump routine at `0x22ee80` in `libmpp_service.so`.
 
 Two consequences for anyone diffing a live VIF window:
 
@@ -198,11 +196,11 @@ U  0x28232000    0x2856a000    0x288a2000    0x28bda000    0x28f12000
 V  0x282bb000    0x285f3000    0x2892b000    0x28c63000    0x28f9b000
 ```
 
-Round robin, all three planes in lockstep, no deviation across 496 wraps. The range `0x28014000`-`0x2902c000` is reserved as `cvisp_cma` in the device tree; `vif_cma` moved to `0x2c000000` because the ring's last slot runs past where it used to start.
+Round robin, all three planes in lockstep, no deviation across 496 wraps. The range `0x28014000`-`0x2902c000` is reserved as `cvisp_cma` in the device tree, which owns the carveout layout and sizing.
 
 **Geometry is not settled.** `0x8028` carries `0x04380780` (1080 x 1920) and `0x8008` is written `0x021c03c0` (540 x 960) during setup but ends at `0x04380780`, while page `0x4000` carries 1920 x 1080 throughout. `0x021c03c0` is also what ISP `0x7080` reads on the streaming vendor. Which stage, if any, is scaled is open.
 
-**Clock.** `cgu_rsz_clk`, `0x0a104014` low half, gate bit 12, device tree index 9. This is from the vendor clock table: the trace contains **no CGU write for this block at all**, and `0x0a104014` does not appear in the live vendor CGU snapshot either. So the vendor streams with whatever state the boot leaves that leaf in, and enabling it is an assumption. It is the load-bearing one in `ar-cvisp.c`, which is why that driver reads no register at probe: if the leaf is wrong, the first access hangs the SoC, and a probe-time read would make that unavoidable on every boot.
+**Clock.** `cgu_rsz_clk`, `0x0a104014` low half, gate bit 12, device tree index 9, from the vendor clock table: the trace contains **no CGU write for this block at all** and `0x0a104014` is absent from the live vendor CGU snapshot, so the leaf's boot state is inherited (details in the validated section below). The leaf identity is the load-bearing assumption in `ar-cvisp.c`, which is why that driver reads no register at probe: if the leaf is wrong, the first access hangs the SoC, and a probe-time read would make that unavoidable on every boot.
 
 **No reset and no interrupt are declared.** No CVISP reset write appears anywhere in the trace and no reset leaf has been identified. The block does have its own completion path (`cvisp_device_irq_process` at `0x2424b8` dispatches through `cvisp_dispatch_irq` at `0x242390`, routing status bits 1 and 5 to output events `0x1001`/`0x1002` and bit 3 to `0x2c02`), which is good evidence that frame completion is serviced from CVISP rather than from VIF SPI 62 alone. But the hardware IRQ number and its acknowledge register are still behind the vendor's generic camera-module event layer, so asserting either in the device tree would be inventing it.
 
@@ -233,7 +231,7 @@ The vendor ships three tuning blobs, `nt99235`, `sc2210` and `sc231`, all exactl
 
 ### DRC upload and strength control (recovered)
 
-Dynamic-range control (DRC) is another ISP DMA payload. For this vendor `libmpp_service.so`, its immutable 8 KiB initial template is embedded at service-image VMA `0x467460` (file offset `0x457460`). The runtime configuration table at VMA `0x472760` supplies the exact pair `(source=0x467460, length=0x2000)`. The module's initial `0xb09` handler copies those bytes to its DMA allocation, flushes all `0x2000` bytes, stores the physical address in its descriptor and sets the descriptor apply bit (`0x1a5828..0x1a5940`). This is a firmware-build-specific constant; do not assume it is the same in another vendor build.
+Dynamic-range control (DRC) is another ISP DMA payload. For this vendor `libmpp_service.so`, its immutable 8 KiB initial template is embedded at service-image VMA `0x467460` (file offset `0x457460`), supplied to the module as the pair `(source=0x467460, length=0x2000)` by the runtime configuration table at VMA `0x472760`; the init handler at `0x1a5828..0x1a5940` copies, flushes, publishes and sets the descriptor apply bit. These are firmware-build-specific constants; do not assume they are the same in another vendor build.
 
 During normal operation the service overwrites only the first `0x1000` bytes of that page (`0x1a4200`). They are two `0x800` banks, each containing 128 16-byte records. A record packs three unsigned 20-bit values in its first ten bytes; the second value is duplicated, and adjacent records overlap. Thus one bank represents a 257-sample curve. The active DRC tuning profile starts at raw tuning offset `0x17b1c + index*0xc8c`; its first two 257-word curves are packed into the two banks. At neutral strength 50, a retained vendor DRC page decodes byte-for-byte to profile 3 of the NT99235 FPV blob.
 
@@ -298,7 +296,7 @@ One deviation exists. The open driver additionally writes `0x0383` = `0x01` at p
 
 Those 26 drift at runtime on the vendor and are expected to differ. Measured on slot A: 156 of 183 registers still hold exactly the value the vendor library programmed, and every one of the 27 that moved falls in those two ranges. The vendor's 3A layer writes them through the callbacks the sensor library registers (`AR_MPI_AE_SensorRegCallBack`, `AR_MPI_AWB_SensorRegCallBack`). The open driver programs the same initial values and never updates them, so a difference there is the vendor adapting.
 
-**Exposure and gain are left unset.** Neither the vendor mode table nor the open driver sets them. The vendor drives them from the 3A layer at runtime, so after mode init the open stack leaves the sensor at its power-on defaults. A correct capture may therefore be very dark or black. **Judge a capture by whether the DMA wrote, not by image brightness**: pre-fill the target buffer with a marker and check whether the marker was overwritten. A buffer full of zeros is indistinguishable from a DMA that never ran.
+**Exposure and gain are set outside the mode table.** The vendor drives them from its 3A layer at runtime; the mode table does not touch them. The open driver commits explicit defaults before stream-on (integration 1123 lines, gain code `0x3c`, the vendor's own operating point) through the writable `exposure` and `gain` module parameters, and `ml-3a` updates them live (see "Scene-adaptive state"). Brightness therefore reflects AE state, not pipeline health; judge a capture by the marker count (see "Judging a capture").
 
 Method: `glue/camera/au-chain-capture.sh` with `SLOT=a` then `SLOT=b`, diffed with `glue/camera/au-chain-diff.py`. Capture slot A first: it is the reference, and both captures are only meaningful if the front-end gate reads `0x0784043c`.
 
@@ -323,7 +321,7 @@ V4L2 video node plus VIF front-end and view-engine programming. Constants are ca
 
 The front-end half of this driver is validated. The view-engine half implements the bypass view DMA, which the section above shows is not the vendor's capture path.
 
-- Probe claims the reserved capture pool, ioremaps `0x08870000`, gets the DT clock "axi" (`cgu_vif_axi_clk`), sets up a vb2 dma-contig queue and the V4L2/media devices, and registers an async notifier for the CSI source. The completion IRQ is requested only when the `use_irq` param is set; the default is polling.
+- Probe claims the reserved capture pool, ioremaps `0x08870000`, gets the DT clock "axi" (`cgu_vif_axi_clk`), sets up a vb2 dma-contig queue and the V4L2/media devices, and registers an async notifier for the CSI source. Completion is interrupt-driven by default; `use_irq=0` falls back to polling.
 - The block loses all state when the axi clock gates.
 - `ar_vif_global_init`: replays the vendor `vif_reg_init` 28-pair table, a soft-reset pulse, the RGB2YUV coefficient and clip bank (BT.709 limited), input-pipe transient writes, a per-view output-FIFO reset, AXI master enable and run, frame-boundary and DDR-clip config, and the block-enable release. Runs once per session with the clock already on.
 - `ar_vif_configure`: front-end input format, geometry, blanking, stride strobe and value, view control, per-view FIFO partition, view mux/enable/threshold, crop window covering the full frame, frame-end check, and input-format select.
@@ -403,15 +401,17 @@ The cold-boot dark frame is clean (see "The cold-boot dark-frame blobs"); the ed
 
 ### Gain-keyed stages: parity by derivation
 
-Three ISP stages are recomputed by the vendor from gain-band ladders in the tuning file: `rnr`, `lnr` and `de3d`. All three share one blob layout (a header of enable, interpolate, band count and abscissa selector; sixteen `[low, high]` float32 band slots; one payload record per band) and one law: inside a band the record applies verbatim, between bands the fields blend linearly with truncation toward zero. The driver implements the shared band selection and blend in `ar-isp-ladder.h` and each stage in its own `ar-isp-rnr.h`, `ar-isp-lnr.h` and `ar-isp-de3d.h`, deriving every register from the tuning file at a caller-supplied abscissa (`rnr_gain`, `lnr_gain`, `de3d_gain`, Q8 module parameters until an AE loop produces the abscissa per frame). The proofs are `scripts/isp/check-rnr-ladder.py`, `check-lnr-ladder.py` and `check-de3d-ladder.py`: the same integer arithmetic in Python, refusing to pass unless every capture-covered register reproduces bit-exactly from the blob at both measured vendor operating points.
+Three ISP stages are recomputed by the vendor from gain-band ladders in the tuning file: `rnr`, `lnr` and `de3d`. All three share one blob layout (a header of enable, interpolate, band count and abscissa selector; sixteen `[low, high]` float32 band slots; one payload record per band) and one law: inside a band the record applies verbatim, between bands the fields blend linearly with truncation toward zero. The driver implements the shared band selection and blend in `ar-isp-ladder.h` and each stage in its own `ar-isp-rnr.h`, `ar-isp-lnr.h` and `ar-isp-de3d.h`, deriving every register from the tuning file at a caller-supplied abscissa (`rnr_gain`, `lnr_gain`, `de3d_gain`, Q8 module parameters; `ml-3a` writes them from its exposure-table index and re-arms through debugfs `ladders`). The proofs are `scripts/isp/check-rnr-ladder.py`, `check-lnr-ladder.py` and `check-de3d-ladder.py`: the same integer arithmetic in Python, refusing to pass unless every capture-covered register reproduces bit-exactly from the blob at both measured vendor operating points.
 
 Registers in these banks that are not ladder outputs are classified, not assumed: lnr `0x3d10` is never written by the vendor and `0x3d14` keeps a replayed value (unresolved pre-pack bias); de3d `0x2e98` is the block's hardware line-time latch and is never written; the de3d buffer addresses are driver-owned; the per-stage user-strength laws are the identity at the vendor's default of 50 and nothing in this stack sets a strength, so they are not carried. The de3d control and strength words (`0x2e00` enables, `0x2e1c`, `0x2e20`, `0x2e90`, `0x2eb4`) are packer outputs and derive with the rest; running them at the replayed pre-streaming state instead is what destroyed moving regions even with the threshold registers exact.
 
 The census over the whole tuning blob and bank map is closed: the powers-of-two ladder signature exists for exactly `blc`, `rnr`, `lnr` and `de3d` among enabled stages (plus disabled hits owned by `gib` and two unused tables). Checked and found static: `dpc` (init_config block), `rgb2yuv`, `qgg`, `lms`, `digigain1/2`. Two further enabled stages recompute on the AEC trigger through their own record blends rather than the shared ladder layout and still run replayed state here: `cfa` and `cnf`; their transforms are the next recovery. The AWB-triggered family (`ccm1`, `cm`, `cm2`, `acm`, `wb`, and LSC's selection among its four illuminant groups) and the tone tables (`gamma`, `drc`, `ltm`) recompute from their own 3A inputs and wait on the AWB and AE loops.
 
-### Scene-adaptive state still frozen
+### Scene-adaptive state: AE closed, the rest still frozen
 
-Parity above is at a fixed operating point. The vendor's 3A loops move state this stack holds constant: the sensor exposure and gain (AE, including its anti-flicker snap of the integration time to the mains half-period), the ladder abscissas (an AE product), the gamma table (regenerated continuously from 3A; ours is generated once), the AE-selected tone-table index over the gamma and DRC profiles, the LTM tile curves (recomputed per frame; ours ships an identity page), the AWB-driven colour state (ccm1, white-balance gains, and the sensor-MCU lens-shading tables behind `0x8201`), and possibly a scene-adaptive LSC region after the static grid (unconfirmed; ours ships zeros there). These are the remaining functional gaps, and they are loops to implement, not registers to fix.
+Parity above is at a fixed operating point. The AE loop is implemented and hardware-validated: `native/ml-3a.c` meters from the `rro_stats` zone grid and drives sensor exposure, sensor gain and the three ladder abscissas from one exposure-table index, through `/sys/module/nt99235/parameters/{exposure,gain}`, the ISP `*_gain` Q8 parameters and the debugfs `ladders` re-arm.
+
+Still frozen, held constant where the vendor's 3A moves them: the vendor AE's anti-flicker snap of the integration time to the mains half-period, the gamma table (regenerated continuously from 3A; ours is generated once), the AE-selected tone-table index over the gamma and DRC profiles, the LTM tile curves (recomputed per frame; ours ships an identity page), the AWB-driven colour state (ccm1, white-balance gains, and the sensor-MCU lens-shading tables behind `0x8201`), and possibly a scene-adaptive LSC region after the static grid (unconfirmed; ours ships zeros there). These are loops to implement, not registers to fix.
 
 ## Source map
 
@@ -492,16 +492,16 @@ The vendor's operating point is pinned exactly: at gain **187** the band is 130 
 
 **In practice BLC does not track gain at all.** Measured on a streaming vendor unit with the sensor dark and AE saturated: sensor gain code `0x5f` (62x) with the BLC bank still holding 961 and 272 on all four lanes, the same values as at the traced 14x point. The blend exists in code but the vendor runs one operating point of it, so the driver's fixed 187 is measured parity, not an approximation. BLC is also lane-uniform by construction (one level for all four lanes at every calibration entry), which excludes it as a source of any coloured field.
 
-**BLC is not the only stage that recomputes with gain, and the rest are still frozen at the operating point the capture happened to sit at.** Every stage below reaches the AE trigger and converts between integer and float inside its own code, which is what distinguishes a gain-indexed recomputation from static configuration. Auto-exposure moving gain therefore walks the picture away from the only point those stages are correct for, which is a prerequisite for AE being any good rather than a completeness item.
+**BLC is not the only stage that recomputes with gain.** Every stage below reaches the AE trigger and converts between integer and float inside its own code, which is what distinguishes a gain-indexed recomputation from static configuration.
 
 | Stage | Table | Status |
 |---|---|---|
-| `rnr` | `0x7a6c`, stride `0x160`, 12 entries | implemented: the driver derives the twelve registers from the ladder (`ar-isp-rnr.h`), validated against both measured points |
-| `lnr` | `0x89f18`, stride `0x428`, 11 entries | table pinned, source fields known, destination registers not established |
-| `de3d` | `0x963ac`, stride `0x2f8`, 12 entries | as `lnr` |
+| `rnr` | `0x7a6c`, stride `0x160`, 12 entries | implemented (`ar-isp-rnr.h`), validated against both measured points |
+| `lnr` | `0x89f18`, stride `0x428`, 11 entries | implemented (`ar-isp-lnr.h`); preserves `0x3d10`/`0x3d14`, see the gain-keyed section |
+| `de3d` | `0x963ac`, stride `0x2f8`, 12 entries | implemented (`ar-isp-de3d.h`); preserves the buffer addresses and `0x2e98` |
 | `acm`, `cfa`, `cnf` | not located | carry a recomputation path that did not fire during this capture |
 
-`rnr`, `lnr` and `de3d` all blend between two adjacent entries by an AE-supplied weight, exactly as BLC does, and truncate on the way to the registers. The weight's abscissa is a linear gain multiplier with unity at 1.0 (rnr's band edges are powers of two), but it is not the sensor analog multiplier: the vendor's live rnr bank demands 13.6-14.2 where the analog gain was 62, the same unresolved scale error BLC shows at 2.6x. The driver therefore takes the abscissa as the `rnr_gain` module parameter (Q8, default 1.0, which is the replayed cold bank exactly) rather than deriving it from the gain code; one vendor capture of the sensor gain register and ISP `0x1808` together pins the unit.
+`rnr`, `lnr` and `de3d` all blend between two adjacent entries by an AE-supplied weight, exactly as BLC does, and truncate on the way to the registers. The weight's abscissa is a linear gain multiplier with unity at 1.0 (rnr's band edges are powers of two), but it is not the sensor analog multiplier: the vendor's live rnr bank demands 13.6-14.2 where the analog gain was 62, the same unresolved scale error BLC shows at 2.6x. The driver takes the abscissa through the Q8 `rnr_gain`/`lnr_gain`/`de3d_gain` parameters (default 1.0, the replayed cold bank exactly); `ml-3a` supplies them from the vendor exposure table rather than deriving them from the gain code.
 
 **lnr additionally lost its static curves to the prefix cut.** The applied 1475-entry prefix truncates lnr's four 64-entry strength curves (`0x3d60` onward, stride `0x40`, normalised to `0x40`) mid-block, leaving the tail zero, which is gain zero rather than neutral. `ar_isp_lnr_fix[]` in `ar-isp.c` restores the 35 affected registers with the streaming vendor's live values, applied in both configure paths after the setup replay. Found by the register-state diff (`scripts/isp/isp-regdiff.py`), which classifies every live difference against the driver's own tables; the sweep files carry window-relative row offsets, so that tool is the only sanctioned way to read them.
 
@@ -524,13 +524,13 @@ Publishing has an ordering requirement that is easy to get wrong and was got wro
 | `af_stats` buffer | extent known (`0x1200`), autofocus is off and nothing writes it |
 | 18 further stages | register files |
 
-**The cold-boot dark-frame blobs were LSC fetching the vendor's dead page; resolved by the descriptor republish.** The setup table carries the vendor's own LSC descriptor write, so the table-time publish was overwritten and the block fetched shading from the vendor's decayed DRAM on every cold boot. Junk per-Bayer-channel gains are multiplicative, which is how the blobs were nearly pure chroma-axis excursions that could push a channel below its background (no additive source can): position-stable across power cycles because DRAM decay patterns are physically stable, amplitude and mix drifting with power-off time, absent on warm boots because the vendor's genuine page was still resident at the fetched address, and invisible on the test pattern because its bars are saturated where multiplicative errors clip. Fixed by republishing the LSC descriptor after the register replay (see the ordering note above); validated on two independent cold boots: dark frames neutral (every blob mask under 1.3 counts) with the vendor's radial shading shape (corners 34-37 against centre 23, vendor 37-40 against 23.2).
+**The cold-boot dark-frame blobs were LSC fetching the vendor's dead page; resolved by the descriptor republish.** The setup table carries the vendor's own LSC descriptor write, so the table-time publish was overwritten and the block fetched shading from the vendor's decayed DRAM on every cold boot. Junk per-Bayer-channel gains are multiplicative, which accounted for every observed symptom: near-pure chroma-axis excursions that push a channel below background, position stability across power cycles, drift with power-off time, absence on warm boots, invisibility on the saturated test pattern. Fixed by republishing the LSC descriptor after the register replay (see the ordering note above); validated on two independent cold boots: dark frames neutral (every blob mask under 1.3 counts) with the vendor's radial shading shape (corners 34-37 against centre 23, vendor 37-40 against 23.2).
 
 Background facts that remain true and useful: the cold sensor's floor sits below the pipeline's black clip while a warm sensor's dark current lifts it clear, so dark-frame judgments need the floor off the clip; no configuration state crosses a RAM boot (warm and cold sweeps differ only in counters); `libsns_nt99235.so` performs no dark or FPN calibration, and the sensor init is at parity to one register. Remaining dark-frame artifacts, both open: the ~16-column left-edge ramp (geometry words, see the register diff) and the hard ring contours with periodic dashes against the vendor's smoother floor (the gain-keyed noise stages run at a replayed operating point; the dashes are not dpc, measured by the live-disable test).
 
 **The LTM descriptors are owned.** The driver allocates and publishes both `0x2808` (coefficient page, `0x4000`) and `0x280c` (statistics buffer, `0x80000`) under the `ltm=` parameter, default on. The page carries an identity curve, 64 tiles each holding the linear ramp `i * 1003 / 127` over 128 `u16` samples; the statistics buffer is zeroed at prepare. Before this the descriptors still held vendor DRAM addresses, and they were the last DMA fetch the driver did not source: on a cold boot (no prior slot-A streaming) that DRAM is junk and every frame came out marbled and posterized regardless of driver version. With the identity page a cold boot with `seed=0` produces a clean frame. Replacing the identity curve with a per-frame recompute from `ltm_stats` is the remaining open item; the vendor's adaptation magnitude is about 2% of range.
 
-**LTM is computed per frame by the vendor, but the adaptation is small.** The page is 64 tiles of a 128-sample `u16` curve at `0x100` stride, monotonic 0 to about 1003. Exactly one of the three captured pages is well formed; the other two are noise and must not be used as oracles, and it deviates from the identity ramp `i * 8` by -14 to +34 counts of 1016, growing down the tile grid. The identity page is therefore within the vendor's own adaptation envelope; the real computation (CLAHE, see the LTM section below) is queued, not required for a usable image.
+**LTM is computed per frame by the vendor, but the adaptation is small**: the captured page deviates from the identity ramp `i * 8` by -14 to +34 counts of 1016, growing down the tile grid, so the identity page is within the vendor's own adaptation envelope, and the real computation (CLAHE, see the LTM section below) is queued, not required for a usable image. Exactly one of the three captured pages is well formed; the other two are noise and must not be used as oracles. Page geometry is in the LTM section.
 
 `ltm_stats` fills its **entire `0x80000`**, measured at 99.8% nonzero right to the last byte, so the half-megabyte figure is a real fill extent and not just an allocation.
 
@@ -549,7 +549,7 @@ LSC's fetch is `0x340`: 52 sixteen-byte records, 50 of grid and two zero. The bl
 
 **Region A is two 100-entry float32 arrays in the tuning file**, stored back to back at `raw + 0x910c` and `raw + 0x929c`, which is `0x7c` and `0x20c` past the LSC enable gate at `0x9090`. Each value is a gain, unity at the frame centre and rising to about 3.9 at the corners; the grid is a proper 10x10 bowl with an off-centre, anisotropic falloff. The table value is `floor(f * 2048)`, and truncation is measured rather than assumed: rounding matches 55 of 100 entries against a captured page, truncation matches all 100. Grid points pack two to a 16-byte record as `(x, x, y)` triplets, 50 records of data then two zero records. `ar_isp_lsc_from_blob` reproduces all 832 bytes exactly against two independent captures.
 
-The blob stores the grids unpacked as `float32`; searches for the packed `u16` form find nothing, which once produced a wrong "no stored source" conclusion. The scene-to-scene byte drift once attributed to a "region B" is heap churn in the unfetched slot remainder and means nothing.
+The blob stores the grids unpacked as `float32` only; the packed `u16` form does not exist in it. The scene-to-scene byte drift in the unfetched slot remainder is heap churn and means nothing.
 
 ### The coefficient pages overlap in DRAM
 
@@ -618,7 +618,7 @@ gamma, 5 curves            drc, 6 profiles
 
 The gaps between bands are the interpolation regions: inside a band one entry is used, between bands a Q12-weighted mix of the pair either side.
 
-The model was checked against something it was not fitted to. The bands come from the blob and the indices come from decoding captures, independently. One scalar drives both modules, so the bands our captures decode to must intersect, and they do:
+The bands come from the blob and the indices from decoding captures, independently; one scalar drives both modules, so the decoded bands must intersect, and they do:
 
 	session A   gamma curve 2 [150,250]  n  drc profile 3 [210,270]  =  [210,250]
 	session B   gamma curve 3 [280,330]  n  drc profile 4 [290,380]  =  [290,330]
@@ -704,6 +704,8 @@ Reading VIF with its clock gated hard-hangs the SoC into a watchdog reset to slo
 "The modules are still loaded" is not the same as "the pipeline is live". Scripts kill their grabber on exit, which puts the sensor into standby and gates the pixel domain, so a later standalone invocation hangs. Run captures only through a gated harness.
 
 ## The capture node advertises raw Bayer but has never delivered a frame
+
+This section is about the VIF bypass view node only. The working capture path is `ar-cvisp`'s V4L2 node, which with `chain=true` (the default) brings the whole chain up at STREAMON.
 
 `/dev/video2` advertises `V4L2_PIX_FMT_SRGGB12` and is wired to the VIF bypass view: 1920x1080, `RG12`, 3840 bytes per line, 4147200 bytes per frame, so 16-bit padded samples. That is what the node claims. **No frame has ever come out of it, on any run.**
 
