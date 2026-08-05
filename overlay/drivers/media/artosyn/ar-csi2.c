@@ -343,14 +343,12 @@ static int ar_csi2_phy_range_code(unsigned int rate_mbps)
  */
 static int ar_csi2_phy_lane_rate_mbps(struct ar_csi2 *csi2)
 {
-	s64 link_freq;
-
 	if (!csi2->sensor)
 		return -ENODEV;
 
-	link_freq = v4l2_get_link_freq(&csi2->sensor->entity.pads[csi2->sensor_source_pad],
-				       AR_CSI_BITS_PER_PIXEL,
-				       csi2->num_data_lanes);
+	s64 link_freq = v4l2_get_link_freq(&csi2->sensor->entity.pads[csi2->sensor_source_pad],
+					   AR_CSI_BITS_PER_PIXEL,
+					   csi2->num_data_lanes);
 	if (link_freq < 0)
 		return link_freq;
 
@@ -433,7 +431,6 @@ static void ar_csi2_phy_power_on_core(struct ar_csi2 *csi2, void __iomem *core)
 	}
 
 	ar_csi2_write(core, DW_CSI2_PHY_SHUTDOWNZ, 1);
-
 	udelay(AR_CSI_RESET_SETTLE_US);
 
 	ar_csi2_write(core, DW_CSI2_DPHY_RSTZ, 1);
@@ -510,19 +507,18 @@ static void ar_csi2_phy_power_off(struct ar_csi2 *csi2)
  */
 static void ar_csi2_configure(struct ar_csi2 *csi2, u8 data_type)
 {
-	u32 scenario;
-
 	/* Core reset, held briefly. Register 0xcc reads 1 on a streaming
 	 * vendor capture; leave it alone.
 	 */
 	ar_csi2_write(csi2->core, DW_CSI2_RESETN, 0);
 	udelay(AR_CSI_RESET_SETTLE_US);
-	ar_csi2_write(csi2->core, DW_CSI2_RESETN, 1);
 
+	ar_csi2_write(csi2->core, DW_CSI2_RESETN, 1);
 	ar_csi2_write(csi2->base, AR_CSI_WRAP_INIT_ZERO, 0);
 
 	/* Lane merge: a link wider than two lanes uses both cores of the pair. */
-	scenario = ar_csi2_read(csi2->base, AR_CSI_WRAP_SCENARIO);
+	u32 scenario = ar_csi2_read(csi2->base, AR_CSI_WRAP_SCENARIO);
+
 	if (csi2->num_data_lanes > 2)
 		scenario |= BIT(0);
 	else
@@ -547,8 +543,8 @@ static void ar_csi2_configure(struct ar_csi2 *csi2, u8 data_type)
 
 		ar_csi2_write(core1, DW_CSI2_RESETN, 0);
 		udelay(AR_CSI_RESET_SETTLE_US);
-		ar_csi2_write(core1, DW_CSI2_RESETN, 1);
 
+		ar_csi2_write(core1, DW_CSI2_RESETN, 1);
 		ar_csi2_write(csi2->base, AR_CSI_WRAP_LANE_MERGE, 1);
 	}
 
@@ -590,9 +586,8 @@ static void ar_csi2_stop(struct ar_csi2 *csi2)
 
 static int ar_csi2_clks_enable(struct ar_csi2 *csi2)
 {
-	int ret;
+	int ret = clk_prepare_enable(csi2->csi_clk);
 
-	ret = clk_prepare_enable(csi2->csi_clk);
 	if (ret)
 		return ret;
 
@@ -631,7 +626,6 @@ static void ar_csi2_report_lanes(struct ar_csi2 *csi2)
 static int ar_csi2_set_stream(struct v4l2_subdev *sd, int enable)
 {
 	struct ar_csi2 *csi2 = to_ar_csi2(sd);
-	int ret;
 
 	if (!csi2->sensor)
 		return -ENODEV;
@@ -644,7 +638,8 @@ static int ar_csi2_set_stream(struct v4l2_subdev *sd, int enable)
 		return 0;
 	}
 
-	ret = ar_csi2_clks_enable(csi2);
+	int ret = ar_csi2_clks_enable(csi2);
+
 	if (ret)
 		return ret;
 
@@ -722,11 +717,12 @@ static int ar_csi2_get_pad_format(struct v4l2_subdev *sd,
 	struct v4l2_subdev_format sensor_format = {
 		.which = V4L2_SUBDEV_FORMAT_ACTIVE,
 	};
-	int ret;
 
 	if (fmt->which == V4L2_SUBDEV_FORMAT_ACTIVE && csi2->sensor) {
 		sensor_format.pad = csi2->sensor_source_pad;
-		ret = v4l2_subdev_call_state_active(csi2->sensor, pad, get_fmt, &sensor_format);
+
+		int ret = v4l2_subdev_call_state_active(csi2->sensor, pad, get_fmt, &sensor_format);
+
 		if (ret == 0) {
 			fmt->format = sensor_format.format;
 			return 0;
@@ -760,10 +756,9 @@ static int ar_csi2_notify_bound(struct v4l2_async_notifier *notifier,
 				struct v4l2_async_connection *asc)
 {
 	struct ar_csi2 *csi2 = container_of(notifier, struct ar_csi2, notifier);
-	int pad;
 
-	pad = media_entity_get_fwnode_pad(&subdev->entity, subdev->fwnode,
-					  MEDIA_PAD_FL_SOURCE);
+	int pad = media_entity_get_fwnode_pad(&subdev->entity, subdev->fwnode,
+					      MEDIA_PAD_FL_SOURCE);
 	if (pad < 0) {
 		dev_err(csi2->dev, "%s has no source pad\n", subdev->name);
 		return pad;
@@ -803,8 +798,6 @@ static int ar_csi2_parse_and_register_sensor(struct ar_csi2 *csi2)
 	};
 	struct v4l2_async_connection *asc;
 	struct fwnode_handle *endpoint;
-	unsigned int declared;
-	int ret;
 
 	endpoint = fwnode_graph_get_endpoint_by_id(dev_fwnode(csi2->dev), AR_CSI2_PAD_SINK, 0,
 						   FWNODE_GRAPH_ENDPOINT_NEXT);
@@ -813,13 +806,15 @@ static int ar_csi2_parse_and_register_sensor(struct ar_csi2 *csi2)
 		return -ENXIO;
 	}
 
-	ret = v4l2_fwnode_endpoint_alloc_parse(endpoint, &bus_cfg);
+	int ret = v4l2_fwnode_endpoint_alloc_parse(endpoint, &bus_cfg);
+
 	if (ret) {
 		fwnode_handle_put(endpoint);
 		return ret;
 	}
 
-	declared = bus_cfg.bus.mipi_csi2.num_data_lanes;
+	unsigned int declared = bus_cfg.bus.mipi_csi2.num_data_lanes;
+
 	v4l2_fwnode_endpoint_free(&bus_cfg);
 
 	if (lanes > 0) {
@@ -862,8 +857,6 @@ static int ar_csi2_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct ar_csi2 *csi2;
-	u32 version;
-	int ret;
 
 	csi2 = devm_kzalloc(dev, sizeof(*csi2), GFP_KERNEL);
 	if (!csi2)
@@ -894,11 +887,13 @@ static int ar_csi2_probe(struct platform_device *pdev)
 	 * identifies the core; a mismatch means the register map below does
 	 * not describe this hardware.
 	 */
-	ret = clk_prepare_enable(csi2->csi_clk);
+	int ret = clk_prepare_enable(csi2->csi_clk);
+
 	if (ret)
 		return ret;
 
-	version = ar_csi2_read(csi2->core, DW_CSI2_VERSION);
+	u32 version = ar_csi2_read(csi2->core, DW_CSI2_VERSION);
+
 	clk_disable_unprepare(csi2->csi_clk);
 
 	if (version != DW_CSI2_VERSION_1_20) {

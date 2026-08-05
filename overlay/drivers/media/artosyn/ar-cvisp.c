@@ -1099,8 +1099,19 @@ static int ar_cvisp_probe(struct platform_device *pdev)
 	 * writeback can land over a frame. Without the pool vb2 would fall back
 	 * to the default CMA, which is ordinary kernel RAM.
 	 */
-	int ret = of_reserved_mem_device_init(dev);
+	int ret;
 
+	/*
+	 * The plane registers carry a 32-bit address, so constrain the DMA API
+	 * before the pool is attached and before vb2 can allocate or import.
+	 * ar_cvisp_buffer_prepare still rejects an unreachable address: the pool
+	 * is placed by the DTS, which the mask does not bound.
+	 */
+	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
+	if (ret)
+		return dev_err_probe(dev, ret, "no 32-bit DMA mask\n");
+
+	ret = of_reserved_mem_device_init(dev);
 	if (ret)
 		dev_warn(dev,
 			 "no dedicated capture pool (%d); buffers may be unreachable\n",

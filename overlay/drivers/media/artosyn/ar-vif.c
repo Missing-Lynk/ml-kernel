@@ -1369,6 +1369,14 @@ static int ar_vif_probe(struct platform_device *pdev)
 	struct ar_vif *vif;
 	int ret;
 
+	/* The view registers carry a 32-bit address, so constrain the DMA API
+	 * before anything is allocated or attached rather than truncating at the
+	 * write site.
+	 */
+	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
+	if (ret)
+		return dev_err_probe(dev, ret, "no 32-bit DMA mask\n");
+
 	/* Capture buffers must come from the low-RAM pool the AXI write master
 	 * can reach; without the pool the default CMA sits above 0x28000000 and
 	 * every DMA write vanishes.
@@ -1462,6 +1470,15 @@ static int ar_vif_probe(struct platform_device *pdev)
 	 */
 	vif->scratch = dmam_alloc_coherent(dev, vif->format.sizeimage,
 					   &vif->scratch_addr, GFP_KERNEL);
+	if (vif->scratch && upper_32_bits(vif->scratch_addr)) {
+		/* ar_vif_arm_buffer writes the low 32 bits only. Drop the frame
+		 * rather than latch a truncated address: the arm is guarded on
+		 * this pointer, so clearing it takes the same path as no scratch.
+		 */
+		dev_warn(dev, "scratch frame at %pad is above 4 GiB, dropping it\n",
+			 &vif->scratch_addr);
+		vif->scratch = NULL;
+	}
 	if (!vif->scratch)
 		dev_warn(dev,
 			 "no scratch frame: a bring-up with no queued buffer will not arm the view\n");

@@ -1033,15 +1033,19 @@ static void ar_isp_tables_prepare(struct ar_isp *isp)
 	struct device *dev = isp->dev;
 	int ret;
 
-	ret = of_reserved_mem_device_init(dev);
-	if (ret) {
-		dev_warn(dev, "no isp memory pool (%d), not owning tables\n", ret);
-		return;
-	}
-
+	/* Mask before the pool, matching vif and cvisp: the descriptor registers
+	 * carry a 32-bit address, so the DMA API is constrained before anything
+	 * is attached or allocated.
+	 */
 	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(32));
 	if (ret) {
 		dev_warn(dev, "no 32-bit dma mask (%d), not owning tables\n", ret);
+		return;
+	}
+
+	ret = of_reserved_mem_device_init(dev);
+	if (ret) {
+		dev_warn(dev, "no isp memory pool (%d), not owning tables\n", ret);
 		return;
 	}
 

@@ -1225,6 +1225,12 @@ static int nt99235_parse_endpoint(struct nt99235 *nt99235)
  * sequence runs when streaming starts. The higher stages exist so that a step
  * which wedges the machine can be identified from the console without
  * bisecting across reboots.
+ *
+ * Every stage unwinds what it turned on before returning, so probe leaves the
+ * hardware powered down whatever the stage was. A stage that wedges never
+ * reaches its unwind, which is the case the stages exist to find. Leaving the
+ * clock or the power domain on instead would contradict the suspended runtime
+ * PM state probe goes on to set, and remove skips its power-off on that state.
  */
 static int nt99235_probe_bringup(struct nt99235 *nt99235)
 {
@@ -1245,6 +1251,8 @@ static int nt99235_probe_bringup(struct nt99235 *nt99235)
 		dev_info(dev, "probe bring-up stage 1: master clock at %lu Hz\n",
 			 clk_get_rate(nt99235->mclk));
 
+		clk_disable_unprepare(nt99235->mclk);
+
 		return 0;
 	}
 
@@ -1255,18 +1263,18 @@ static int nt99235_probe_bringup(struct nt99235 *nt99235)
 	if (ret)
 		return ret;
 
-	if (bringup < NT99235_BRINGUP_DETECT)
+	if (bringup < NT99235_BRINGUP_DETECT) {
+		nt99235_power_off(dev);
 		return 0;
+	}
 
 	dev_info(dev, "probe bring-up stage 3: reading the chip id over i2c\n");
 
 	ret = nt99235_detect(nt99235);
-	if (ret) {
-		nt99235_power_off(dev);
-		return ret;
-	}
 
-	return 0;
+	nt99235_power_off(dev);
+
+	return ret;
 }
 
 /*
