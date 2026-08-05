@@ -53,22 +53,27 @@ The H.264 result contradicts the air unit, where h264-after-h264 self-sustained 
 
 **Rate control changes which failure you get.** With `-R 10000000` (CBR) at 1080p HEVC, the poisoned instances report 60 coded frames and emit 1411202 bytes, identically, run after run: the garbage mode wearing a healthy frame count. A bitrate-controlled caller therefore gets plausible-looking large corrupt files instead of obvious empty ones.
 
-## Why the goggle's DVR works anyway [confirmed, with one gap]
+## The DVR runs the exposed configuration, and works anyway [open]
 
-`mlp-record` rebuilds its record bin, encoder element included, on every start/stop, so every recording is a fresh instance. Recordings nevertheless succeed, and the SD card explains why rather than contradicting the defect:
+`mlp-record` rebuilds its record bin, encoder element included, on every start/stop, so every recording is a fresh instance. It records **HEVC** unless `ML_DVR_CODEC=h264`, and that variable is unset on the goggle (checked in the running `ml-pipeline`'s `/proc/<pid>/environ`, not just in `/etc`). So the shipped DVR runs HEVC 1080p, precisely the configuration the isolated loop above fails on every second instance. Recordings nevertheless succeed. That conflict is **unresolved**, and it is the live question here.
 
-- The one long chain of consecutive recordings on the card (Video087-090, four in a row ~50 s apart, so one boot) is **H.264 720p**, verified by `ffprobe`, and all four decode clean. That is the configuration measured above as chaining clean.
-- The newest recordings (Video099-101, 0.7-1.0 GB each) are **HEVC 1080p**, the configuration that alternates. Each is a single long recording, consistent with one per boot, where the first instance of a firmware boot is always clean.
-- The card also carries plenty of 0-byte and 663-byte (header-only) files from earlier development, so silent recording failures are not hypothetical on this device.
+What the SD card shows, by `ffprobe` on each file's header:
 
-The gap: driving two consecutive HEVC recordings through the real pipeline in one boot was attempted and is **not** measured. With the air unit off there is no RF video source, so all three attempts produced header-only files for want of input, which proves nothing about the encoder. Repeat it with a live air unit to close this.
+- Recordings up to Video090 are H.264; Video091 onward are HEVC. The switch is a build change, not a setting on this unit.
+- The long H.264 chain (Video087-090, four in a row ~50 s apart, so one boot) all decode clean, consistent with H.264 chaining clean above. It says nothing about the current HEVC default.
+- In the HEVC era: Video095-097 are three consecutive non-empty recordings, and Video099-101 are three more (0.7-1.0 GB each). Video092-094 are 0-byte and Video098 is header-only.
+- **Boot attribution is not available.** The unit has no RTC (mtimes read 1980) and `/mnt/sdcard/logs/run-*` only retains `DVR stopped` lines for the current boot. Whether Video095-097 were one session or three is therefore unknown. Video099-101 being ~1 GB each is consistent with one long recording per flight, where the first instance of a boot is always clean; Video095-097 are short and are not explained by that.
+
+Candidate differences between the real record bin and the isolated loop, none tested: the encoder imports composite dma-bufs (`output-io-mode=dmabuf-import`) where `ml-cam2enc -e` allocates its own dma-heap buffers; the bin is driven at real-time 60 fps through an appsrc rather than as fast as the encoder will go; and with the RTSP restream active an encoder instance also runs file-less between recordings (the current boot's log shows `DVR stopped -> no file (pushed=54468)`), so the instance lifetime is not simply one-per-recording.
+
+The measurement that would settle it, attempted and **not** obtained: two consecutive HEVC recordings through the real pipeline in one boot. With the air unit off there is no RF video, so all three attempts produced header-only files with `pushed=0` for want of input, which proves nothing about the encoder. Repeat with a live air unit.
 
 The codec DT nodes are identical apart from the memory pool (air 32 MiB at `0x25000000`, goggle 110 MiB at `0x29200000`).
 
 ## Consequences for callers
 
 - **One long-lived encoder instance per firmware boot**, which is also the vendor's usage pattern. Recording start/stop must gate the muxer/file branch, not the encoder.
-- **The goggle DVR's HEVC default is the exposed case.** `mlp-record` records HEVC unless `ML_DVR_CODEC=h264`, and rebuilds the encoder element per recording. One recording per boot is safe (first instance always clean) and H.264 is measured safe; a second HEVC recording in the same boot is the untested risk. `ML_DVR_CODEC=h264` is the cheap mitigation, and it is also what the vendor DVR records.
+- **The goggle DVR ships the exposed configuration** (HEVC, encoder element rebuilt per recording) and yet works in practice; see the open section above before acting on this. One recording per boot is safe either way. `ML_DVR_CODEC=h264` is measured safe in the isolated loop and is what the vendor DVR records, but it is **not a free hedge**: `mlp-rtsp` resolves the codec from the same variable (`mlp-rtsp.c`, `codec_is_h264()`), so flipping it switches the RTSP restream to H.264 as well. Do not flip it until the conflict above is resolved and the restream's codec requirement is checked.
 - **Judge a recording by decoding it, not by the file existing.** Header-only 663-byte files and, under rate control, plausibly-sized corrupt ones are both failure shapes seen on this hardware.
 - **A test harness that opens the encoder repeatedly is measuring this defect, not its subject.** A series of per-run instances produces ~50% corrupt output regardless of what is fed in. This holds on both units.
 - The decoder has shown no equivalent behaviour under heavy instance churn.

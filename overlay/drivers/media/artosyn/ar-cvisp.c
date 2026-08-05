@@ -868,7 +868,6 @@ static int ar_cvisp_start_streaming(struct vb2_queue *q, unsigned int count)
 	struct ar_cvisp *cv = vb2_get_drv_priv(q);
 	struct ar_cvisp_buffer *first;
 	unsigned long flags;
-	int ret;
 
 	if (!rotate) {
 		dev_err(cv->dev, "rotate=0: nothing would advance the queue\n");
@@ -877,7 +876,8 @@ static int ar_cvisp_start_streaming(struct vb2_queue *q, unsigned int count)
 	}
 
 	if (chain) {
-		ret = ar_cvisp_chain_start(cv);
+		int ret = ar_cvisp_chain_start(cv);
+
 		if (ret) {
 			ar_cvisp_return_buffers(cv, VB2_BUF_STATE_QUEUED);
 			return ret;
