@@ -138,19 +138,62 @@ The flash thread loops: write the on-phase pair, `usleep(period_ms * 1000)`, wri
 
 The only caller in the whole binary is `AR_LOWDELAY_CTRL_tx_binder_cmd`: `FlashEnable(0, 40)`, then `AR_AR8030_TX_PairById(...)`, then `FlashDisable()`. That is the entire air-side LED policy - line 0 blinks at a 40 ms half-period (~12.5 Hz) for the duration of a bind, and nothing else ever changes it. There is no link-state indication on the air unit, unlike the goggle's blink-vs-solid orange.
 
-### Polarity [confirmed on hardware]
+### Polarity [measured on the open kernel]
 
-**Active high**, `1` = lit. Init drives both lines low, and on the stock unit the red LED is dark in normal operation and lights only during a bind. So the table pair is the *dark* phase of the blink, not the lit one: for `sel = 0` GPIO 0 alternates `0`/`1` (blinks) while GPIO 1 sits at `1` - **lit solid for the duration of the bind** - and both return to `0` when `FlashDisable` restores the sampled levels.
+**Active low, both lines.** Driving a line low lights its LED, high extinguishes it, and leaving it as an input - its state until a driver claims it - leaves the LED glowing faintly on leakage rather than dark. Measured by stepping both lines through low, high and high-Z with `test_tools/gpio_console` on a RAM-booted open kernel and observing the board at each of the nine combinations.
+
+The vendor code is consistent with this throughout, once the shared supply below is taken into account:
+
+- `customerC401TxInit` writes `0` to both lines, lighting both. The green takes most of the shared current, so stock presents as a green power light with no apparent red.
+- The flash thread's on-phase pair for `sel = 0` is `{0, 1}`, and its off-phase writes `1` to both. GPIO 0 therefore alternates `0`/`1` while GPIO 1 sits high with the green off, so the phase the vendor calls "on" is the `0` phase, the lit one, and the red is visible during a bind precisely because the green is not competing for current.
 
 ### What is actually populated [confirmed on hardware]
 
-- **GPIO 0** is the red bind LED, and it is the only LED the vendor firmware ever drives: dark at boot, ~12.5 Hz blink for the duration of `AR_AR8030_TX_PairById`, dark again. There is no link-state or power indication from software on the air unit.
-- **GPIO 1** is configured identically but nothing visible on the board follows it (it would be lit solid throughout a bind). Unpopulated footprint on this variant.
-- The board's **green LED is not on this path at all**. It is on from power-up and gets brighter while video is transmitting, which no code here can produce: the air unit's two PWM controllers are `status = "disabled"` in the vendor DTB, and the only `/sys/class/gpio` writers in the whole air rootfs are `ar_lowdelay` (lines 0 and 1) and `start_ar813x.sh` (line 23, the AR8030 reset). `artosyn_sdio.ko` contains no LED code. Consistent with the green being wired to an RF activity / PA-enable signal, where apparent brightness tracks TX duty cycle - low on idle beacons, high while streaming. [inferred]
+Both lines carry a populated LED and both are **active low**, measured by driving each line low, high and high-Z from the open kernel and observing the board:
+
+- **GPIO 0** is the **red** LED. Low lights it, high extinguishes it.
+- **GPIO 1** is the **green** LED. Low lights it, high extinguishes it.
+- A line left as an input glows faintly on leakage rather than going dark, so both LEDs are dim from power-on until a driver claims the lines.
+
+**The two share a supply through one series resistor, so they compete rather than add.** With both lines low both conduct, and the green takes most of the current: the red is barely visible beside it. This is the single fact that makes the vendor behaviour legible:
+
+- `customerC401TxInit` drives **both** lines low, so stock shows a green power light and no apparent red. The green is not on a separate always-on net; it is GPIO 1 held low.
+- The bind flash's on-phase pair for `sel = 0` is `{0, 1}`: red on, green **off**. With the green no longer draining the shared supply the red stands out, so a bind reads as a red blink. The off-phase writes `1` to both, dark.
+- Keeping the red off puts the whole supply through the green, so the open stack can drive the green **brighter than stock**, which parks the red low alongside it.
+
+The reported brightening of the green while video is transmitting is consistent with the red line changing state underneath it rather than with any property of the green's own net, since anything that extinguishes the red hands the shared current to the green. Not confirmed against a running vendor stack. [inferred]
 
 `customerC401Txdeinit` (`0x46a7e0`) frees the state struct and then dereferences a NULL pointer to read the line number back (`0x46a80c`), so the vendor teardown never actually restores the lines. Shutdown-only, harmless, but do not use it as a reference for a deinit path.
 
-`devices/betafpv-vr04-air/device.mk` still carries `DEV_HAS_LED = 0`; that flag currently means "has the goggle's WS2812-on-SPI LED" (it gates `ml-ledd`, which is WS2812-only), so it is not simply a `1` - a GPIO LED wants a `gpio-leds` DT node plus its own indicator policy, not `ml-ledd`.
+### Open-kernel path
+
+Mainline `leds-gpio` covers both lines with no driver work: a top-level `leds` node in `devices/betafpv-vr04-air/proxima-9311-air.dts` with two children, both `GPIO_ACTIVE_LOW`.
+
+| child | line | colour | function | default-state | class device |
+|---|---|---|---|---|---|
+| `led-0` | `<&gpio 0>` | `LED_COLOR_ID_RED` | `LED_FUNCTION_INDICATOR` | `off` | `red:indicator` |
+| `led-1` | `<&gpio 1>` | `LED_COLOR_ID_GREEN` | `LED_FUNCTION_POWER` | `on` | `green:power` |
+
+That default deliberately diverges from the vendor's both-lines-low: with the red off, the whole shared supply goes through the green, so the green comes up brighter than stock rather than being drained by a red nobody can see. Because both lines are high-Z until `leds-gpio` claims them, both LEDs glow faintly from power-on and only take their `default-state` at probe. The class device names come from `led_compose_name`, which uses colour + function when the DT node carries no `label`.
+
+Driving them needs no daemon and no tool. Park the other LED first, since the shared resistor means a lit neighbour starves the one you are looking at:
+
+```sh
+echo 0 > /sys/class/leds/green:power/brightness      # park the neighbour
+echo 1 > /sys/class/leds/red:indicator/brightness    # red on
+echo timer > /sys/class/leds/red:indicator/trigger   # the vendor bind blink
+echo 40 > /sys/class/leds/red:indicator/delay_on
+echo 40 > /sys/class/leds/red:indicator/delay_off
+echo none > /sys/class/leds/red:indicator/trigger    # back to steady
+```
+
+An empty `/sys/class/leds` means `leds-gpio` is still in deferred probe: `artosyn_gpio` is a module and must load first. To check a pad independently of the class path, take the line back with `echo leds > /sys/bus/platform/drivers/leds-gpio/unbind` and drive it with `test_tools/gpio_console`, remembering that LOW is the lit state.
+
+No kernel config change is needed: `CONFIG_NEW_LEDS`, `CONFIG_LEDS_CLASS`, `CONFIG_LEDS_GPIO`, `CONFIG_LEDS_TRIGGERS` and `CONFIG_LEDS_TRIGGER_TIMER` are inherited `=y` from the arm64 defconfig and neither `trim.config` nor `artosyn.config` touches LEDs.
+
+`artosyn_gpio` is a module the air unit coldplugs, so `leds-gpio` stays in deferred probe until it loads - an empty `/sys/class/leds` is a missing provider, not a bad node. Once the driver holds line 0 the chardev tools (`gpio_hold`, `gpio_pulse`) get `EBUSY` on it; unbind the platform device to get the line back.
+
+`devices/betafpv-vr04-air/device.mk` carries `DEV_HAS_LED = 1` for this. The flag is documentation only: it becomes a `-DDEV_HAS_LED` for `ml-hud` (which the air unit does not build) and no source reads it. In particular it does not gate `ml-ledd` - that daemon is built unconditionally and reaches the goggle through `rootfs/devices/betafpv-vr04-goggle/overlay/etc/init.d/ml-ledd`, and it is WS2812-only, so it has nothing to do with this LED.
 
 ## Source
 

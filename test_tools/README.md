@@ -91,6 +91,23 @@ Confirms the `spi@1102000` controller + `spidev` child are in the DT and bound, 
 userspace can drive the LED (the frame encoding is byte-identical to the vendor's). The
 LED has this SPI bus/CS to itself - the display panel uses DSI + GPIO + PWM, not SPI.
 
+### `gpio_console` - drive several gpio lines by hand
+An interactive prompt that holds a set of lines open for the whole session and drives them from
+stdin, for working out how a net spanning more than one line behaves. Each line keeps a single
+chardev request, so a state change does not pass through high-Z the way a wrapper that kills and
+respawns `gpio_hold` does - which matters when an undriven line leaves an LED glowing on leakage
+and that glow is the thing being measured. High-Z is offered as an explicit third state (`z`).
+
+```sh
+make gpio_console
+ssh -t root@192.168.3.102 'echo leds > /sys/bus/platform/drivers/leds-gpio/unbind; \
+    /tmp/gpio_console ar-gpio0 0 1; echo leds > /sys/bus/platform/drivers/leds-gpio/bind'
+```
+Commands at the `gpio>` prompt: `<line> lo|hi|z`, `all lo|hi|z`, `s` for a readback of every held
+line, `q` to quit (which releases them all back to inputs). Needs a TTY, and the lines must be
+free: unbind `leds-gpio` first if it holds them, as above. This is what established that both air
+unit LEDs are active low and share one series resistor.
+
 ### `button_test` - front-panel buttons (adc-keys evdev)
 Reads the button input device and prints each press/release. The buttons are a resistor ladder
 on ADC channel 0, decoded by the in-kernel `adc-keys` driver (fed by the `artosyn_adc` IIO
