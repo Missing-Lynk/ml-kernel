@@ -1,0 +1,236 @@
+Why: the air-unit encoder must be able to change bitrate during an active
+stream. The closed low-delay stack updates encoder rate control on MCS changes
+without rebuilding the video pipeline; the open stack needs the same shape for
+future reception-driven adaptation.
+
+Keep the userspace API as ordinary V4L2 controls. BITRATE and S_PARM mark a
+pending live update while streaming; the encoder worker consumes that pending
+state before queuing the next picture and applies the dynamic bitrate/FPS fields
+through W5_ENC_SET_PARAM / OPT_CHANGE_PARAM using the same change flags as the
+vendor Wave5 stack. VBV remains a normal pre-stream control and is applied when
+the instance is opened.
+
+W5_ENC_SET_PARAM completes asynchronously and leaves one report on the instance
+report queue, for OPT_CHANGE_PARAM exactly as for the OPT_COMMON sequence init.
+Vendor ar_video_h26x_enc_msg_set_param_done() drains that report with
+VPU_EncGetOutputInfo() before letting the encoder resume, so the change command
+carries the same wait-then-GET_RESULT handshake here.
+
+--- a/drivers/media/platform/chips-media/wave5/wave5.h
++++ b/drivers/media/platform/chips-media/wave5/wave5.h
+@@ -106,6 +106,8 @@
+ 
+ int wave5_vpu_enc_init_seq(struct vpu_instance *inst);
+ 
++int wave5_vpu_enc_change_param(struct vpu_instance *inst, u32 enable);
++
+ int wave5_vpu_enc_get_seq_info(struct vpu_instance *inst, struct enc_initial_info *info);
+ 
+ int wave5_vpu_enc_register_framebuffer(struct device *dev, struct vpu_instance *inst,
+--- a/drivers/media/platform/chips-media/wave5/wave5-hw.c
++++ b/drivers/media/platform/chips-media/wave5/wave5-hw.c
+@@ -1943,6 +1943,76 @@
+ 	return send_firmware_command(inst, W5_ENC_SET_PARAM, true, NULL, NULL);
+ }
+ 
++/*
++ * OPT_CHANGE_PARAM runs while the instance is encoding, so the wait cannot use
++ * VPU_ENC_TIMEOUT (60 s) - that would park the m2m job queue. The instance
++ * command queue is empty at the point start_encode() issues the change, so the
++ * firmware only has this one command to retire.
++ */
++#define W5_ENC_CHANGE_PARAM_TIMEOUT	200
++
++int wave5_vpu_enc_change_param(struct vpu_instance *inst, u32 enable)
++{
++	struct enc_info *p_enc_info = &inst->codec_info->enc_info;
++	struct enc_open_param *p_open_param = &p_enc_info->open_param;
++	u32 reg_val;
++	int ret;
++
++	vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_SET_PARAM_OPTION, OPT_CHANGE_PARAM);
++	vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_SET_PARAM_ENABLE, enable);
++	if (enable & W5_ENC_CHANGE_RC_FRAME_RATE)
++		vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_RC_FRAME_RATE,
++			      p_open_param->frame_rate_info);
++	/*
++	 * Same register and same unit as the OPT_COMMON write in
++	 * wave5_vpu_enc_init_seq(): bits per second. Vendor
++	 * ar_video_h26x_enc_exe_set_dynamic_param() stores kbps << 10 into the
++	 * open-param field that feeds both writes, i.e. it approximates bps
++	 * with a shift; the startup path here already writes exact bps and
++	 * measures the requested rate, so the live path uses exact bps too.
++	 */
++	if (enable & W5_ENC_CHANGE_RC_TARGET_RATE)
++		vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_RC_TARGET_RATE,
++			      p_open_param->bit_rate);
++
++	reinit_completion(&inst->irq_done);
++
++	ret = send_firmware_command(inst, W5_ENC_SET_PARAM, true, NULL, NULL);
++	if (ret) {
++		dev_warn(inst->dev->dev, "%s: inst %d enable 0x%x queue fail: %d\n",
++			 __func__, inst->id, enable, ret);
++		return ret;
++	}
++
++	/*
++	 * The change command reports through INT_WAVE5_ENC_SET_PARAM like the
++	 * sequence init does, and leaves one report on the instance report
++	 * queue. Vendor ar_video_h26x_enc_msg_set_param_done() drains it with
++	 * VPU_EncGetOutputInfo(). Without the drain the report sits in front of
++	 * every later ENC_PIC report, the next finish_encode() consumes it
++	 * instead of its own frame, and the instance stalls for the rest of the
++	 * stream.
++	 */
++	ret = wave5_vpu_wait_interrupt(inst, W5_ENC_CHANGE_PARAM_TIMEOUT);
++	if (ret)
++		dev_warn(inst->dev->dev,
++			 "%s: inst %d no SET_PARAM interrupt, draining anyway\n",
++			 __func__, inst->id);
++
++	ret = wave5_send_query(inst->dev, inst, GET_RESULT);
++	if (ret) {
++		dev_warn(inst->dev->dev, "%s: inst %d GET_RESULT fail: %d\n",
++			 __func__, inst->id, ret);
++		return ret;
++	}
++
++	reg_val = vpu_read_reg(inst->dev, W5_RET_QUEUE_STATUS);
++	p_enc_info->instance_queue_count = (reg_val >> 16) & 0xff;
++	p_enc_info->report_queue_count = reg_val & QUEUE_REPORT_MASK;
++
++	return 0;
++}
++
+ int wave5_vpu_enc_get_seq_info(struct vpu_instance *inst, struct enc_initial_info *info)
+ {
+ 	int ret;
+--- a/drivers/media/platform/chips-media/wave5/wave5-vpuapi.c
++++ b/drivers/media/platform/chips-media/wave5/wave5-vpuapi.c
+@@ -922,6 +922,44 @@
+ 	return ret;
+ }
+ 
++int wave5_vpu_enc_update_rate(struct vpu_instance *inst, u32 enable)
++{
++	struct enc_info *p_enc_info = &inst->codec_info->enc_info;
++	struct vpu_device *vpu_dev = inst->dev;
++	int ret;
++
++	ret = mutex_lock_interruptible(&vpu_dev->hw_lock);
++	if (ret)
++		return ret;
++
++	p_enc_info->open_param.bit_rate = inst->bit_rate;
++	p_enc_info->open_param.frame_rate_info = inst->frame_rate;
++
++	ret = wave5_vpu_enc_change_param(inst, enable);
++
++	mutex_unlock(&vpu_dev->hw_lock);
++
++	return ret;
++}
++
++int wave5_vpu_enc_apply_pending_rate(struct vpu_instance *inst)
++{
++	u32 pending = inst->enc_rate_change_pending;
++
++	if (!pending)
++		return 0;
++
++	/*
++	 * Consume the request even when the firmware rejects it. Retrying on
++	 * the next frame would queue a SET_PARAM per picture behind an encoder
++	 * that is already unhappy; one attempt per userspace request keeps the
++	 * failure bounded and visible in the log.
++	 */
++	inst->enc_rate_change_pending = 0;
++
++	return wave5_vpu_enc_update_rate(inst, pending);
++}
++
+ int wave5_vpu_enc_get_output_info(struct vpu_instance *inst, struct enc_output_info *info)
+ {
+ 	struct enc_info *p_enc_info = &inst->codec_info->enc_info;
+--- a/drivers/media/platform/chips-media/wave5/wave5-vpuapi.h
++++ b/drivers/media/platform/chips-media/wave5/wave5-vpuapi.h
+@@ -820,6 +820,7 @@
+ 	bool eos;
+ 	bool keep_dma_bufs;
+ 	s32 active_enc_src_idx;
++	u32 enc_rate_change_pending;
+ 	struct vpu_buf bitstream_vbuf;
+ 	dma_addr_t last_rd_ptr;
+ 	size_t remaining_consumed_bytes;
+@@ -880,6 +881,13 @@
+ 					enum tiled_map_type map_type);
+ int wave5_vpu_enc_start_one_frame(struct vpu_instance *inst, struct enc_param *param,
+ 				  u32 *fail_res);
++
++/* W5_CMD_ENC_SEQ_SET_PARAM_ENABLE bits accepted under OPT_CHANGE_PARAM */
++#define W5_ENC_CHANGE_RC_FRAME_RATE	BIT(6)
++#define W5_ENC_CHANGE_RC_TARGET_RATE	BIT(8)
++
++int wave5_vpu_enc_update_rate(struct vpu_instance *inst, u32 enable);
++int wave5_vpu_enc_apply_pending_rate(struct vpu_instance *inst);
+ int wave5_vpu_enc_get_output_info(struct vpu_instance *inst, struct enc_output_info *info);
+ int wave5_vpu_enc_give_command(struct vpu_instance *inst, enum codec_command cmd, void *parameter);
+ 
+--- a/drivers/media/platform/chips-media/wave5/wave5-vpu-enc.c
++++ b/drivers/media/platform/chips-media/wave5/wave5-vpu-enc.c
+@@ -162,6 +162,10 @@
+ 	u32 luma_size = 0;
+ 	u32 chroma_size = 0;
+ 
++	ret = wave5_vpu_enc_apply_pending_rate(inst);
++	if (ret)
++		dev_warn(inst->dev->dev, "%s: live rate update fail: %d\n", __func__, ret);
++
+ 	memset(&pic_param, 0, sizeof(struct enc_param));
+ 	memset(&frame_buf, 0, sizeof(struct frame_buffer));
+ 
+@@ -832,6 +836,7 @@
+ static int wave5_vpu_enc_s_parm(struct file *file, void *fh, struct v4l2_streamparm *a)
+ {
+ 	struct vpu_instance *inst = file_to_vpu_inst(file);
++	u32 old_frame_rate = inst->frame_rate;
+ 
+ 	dev_dbg(inst->dev->dev, "%s: type: %u\n", __func__, a->type);
+ 
+@@ -851,6 +856,9 @@
+ 		__func__, a->parm.output.timeperframe.numerator,
+ 		a->parm.output.timeperframe.denominator);
+ 
++	if (inst->state >= VPU_INST_STATE_PIC_RUN && inst->frame_rate != old_frame_rate)
++		inst->enc_rate_change_pending |= W5_ENC_CHANGE_RC_FRAME_RATE;
++
+ 	return 0;
+ }
+ 
+@@ -894,6 +902,7 @@
+ static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
+ {
+ 	struct vpu_instance *inst = wave5_ctrl_to_vpu_inst(ctrl);
++	bool update_rate = false;
+ 
+ 	dev_dbg(inst->dev->dev, "%s: name: %s | value: %d\n", __func__, ctrl->name, ctrl->val);
+ 
+@@ -926,6 +935,7 @@
+ 		}
+ 		break;
+ 	case V4L2_CID_MPEG_VIDEO_BITRATE:
++		update_rate = inst->bit_rate != ctrl->val;
+ 		inst->bit_rate = ctrl->val;
+ 		break;
+ 	case V4L2_CID_MPEG_VIDEO_GOP_SIZE:
+@@ -1229,6 +1239,9 @@
+ 		return -EINVAL;
+ 	}
+ 
++	if (update_rate && inst->state >= VPU_INST_STATE_PIC_RUN)
++		inst->enc_rate_change_pending |= W5_ENC_CHANGE_RC_TARGET_RATE;
++
+ 	return 0;
+ }
+ 
