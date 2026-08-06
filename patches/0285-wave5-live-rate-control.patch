@@ -3,12 +3,11 @@ stream. The closed low-delay stack updates encoder rate control on MCS changes
 without rebuilding the video pipeline; the open stack needs the same shape for
 future reception-driven adaptation.
 
-Keep the userspace API as ordinary V4L2 controls. BITRATE and S_PARM mark a
-pending live update while streaming; the encoder worker consumes that pending
-state before queuing the next picture and applies the dynamic bitrate/FPS fields
+Keep the userspace API as ordinary V4L2 controls. BITRATE, VBV_SIZE and S_PARM
+mark a pending live update while streaming; the encoder worker consumes that
+pending state before queuing the next picture and applies the dynamic fields
 through W5_ENC_SET_PARAM / OPT_CHANGE_PARAM using the same change flags as the
-vendor Wave5 stack. VBV remains a normal pre-stream control and is applied when
-the instance is opened.
+vendor Wave5 stack.
 
 W5_ENC_SET_PARAM completes asynchronously and leaves one report on the instance
 report queue, for OPT_CHANGE_PARAM exactly as for the OPT_COMMON sequence init.
@@ -29,7 +28,7 @@ carries the same wait-then-GET_RESULT handshake here.
  int wave5_vpu_enc_register_framebuffer(struct device *dev, struct vpu_instance *inst,
 --- a/drivers/media/platform/chips-media/wave5/wave5-hw.c
 +++ b/drivers/media/platform/chips-media/wave5/wave5-hw.c
-@@ -1943,6 +1943,76 @@
+@@ -1943,6 +1943,113 @@
  	return send_firmware_command(inst, W5_ENC_SET_PARAM, true, NULL, NULL);
  }
  
@@ -64,6 +63,43 @@ carries the same wait-then-GET_RESULT handshake here.
 +	if (enable & W5_ENC_CHANGE_RC_TARGET_RATE)
 +		vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_RC_TARGET_RATE,
 +			      p_open_param->bit_rate);
++	if (enable & W5_ENC_CHANGE_RC_PARAM) {
++		struct enc_wave_param *p_param = &p_open_param->wave_param;
++		u32 vbv = p_open_param->vbv_buffer_size;
++		u32 rc_param;
++
++		/*
++		 * Vendor ar_video_h26x_enc_msg_change_param() floors the window
++		 * before handing it to the firmware, at the same value the open path
++		 * already rejects below.
++		 */
++		if (vbv < MIN_VBV_BUFFER_SIZE)
++			vbv = MIN_VBV_BUFFER_SIZE;
++		else if (vbv > MAX_VBV_BUFFER_SIZE)
++			vbv = MAX_VBV_BUFFER_SIZE;
++
++		/*
++		 * Vendor's Wave5VpuEncParaChange() writes only hvs_qp_enable,
++		 * hvs_qp_scale and the window into this register, leaving rc_enable,
++		 * the CU/MB-level RC bit and initial_rc_qp as zero. Nothing
++		 * distinguishes "the firmware ignores those fields under
++		 * OPT_CHANGE_PARAM" from "vendor never exercises this bit", and
++		 * zeroing bit 0 would read as rate control off. Compose the whole
++		 * word from current state the way the sequence init does, which is a
++		 * no-op in the first case and correct in the second.
++		 */
++		rc_param = p_open_param->rc_enable |
++			(p_param->hvs_qp_enable << 2) |
++			(p_param->hvs_qp_scale << 4) |
++			((p_param->initial_rc_qp & 0x3F) << 14) |
++			(vbv << 20);
++		if (inst->std == W_AVC_ENC)
++			rc_param |= p_param->mb_level_rc_enable << 1;
++		else if (inst->std == W_HEVC_ENC)
++			rc_param |= p_param->cu_level_rc_enable << 1;
++
++		vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_RC_PARAM, rc_param);
++	}
 +
 +	reinit_completion(&inst->irq_done);
 +
@@ -108,7 +144,7 @@ carries the same wait-then-GET_RESULT handshake here.
  	int ret;
 --- a/drivers/media/platform/chips-media/wave5/wave5-vpuapi.c
 +++ b/drivers/media/platform/chips-media/wave5/wave5-vpuapi.c
-@@ -922,6 +922,44 @@
+@@ -922,6 +922,50 @@
  	return ret;
  }
  
@@ -124,6 +160,12 @@ carries the same wait-then-GET_RESULT handshake here.
 +
 +	p_enc_info->open_param.bit_rate = inst->bit_rate;
 +	p_enc_info->open_param.frame_rate_info = inst->frame_rate;
++	/*
++	 * VBR pins the window at 3000 when the instance is opened; keep the live
++	 * path on that same rule so a mode change cannot be undone from here.
++	 */
++	if (inst->rc_mode != 0)
++		p_enc_info->open_param.vbv_buffer_size = inst->vbv_buf_size;
 +
 +	ret = wave5_vpu_enc_change_param(inst, enable);
 +
@@ -163,7 +205,7 @@ carries the same wait-then-GET_RESULT handshake here.
  	struct vpu_buf bitstream_vbuf;
  	dma_addr_t last_rd_ptr;
  	size_t remaining_consumed_bytes;
-@@ -880,6 +881,13 @@
+@@ -880,6 +881,14 @@
  					enum tiled_map_type map_type);
  int wave5_vpu_enc_start_one_frame(struct vpu_instance *inst, struct enc_param *param,
  				  u32 *fail_res);
@@ -171,6 +213,7 @@ carries the same wait-then-GET_RESULT handshake here.
 +/* W5_CMD_ENC_SEQ_SET_PARAM_ENABLE bits accepted under OPT_CHANGE_PARAM */
 +#define W5_ENC_CHANGE_RC_FRAME_RATE	BIT(6)
 +#define W5_ENC_CHANGE_RC_TARGET_RATE	BIT(8)
++#define W5_ENC_CHANGE_RC_PARAM		BIT(9)
 +
 +int wave5_vpu_enc_update_rate(struct vpu_instance *inst, u32 enable);
 +int wave5_vpu_enc_apply_pending_rate(struct vpu_instance *inst);
@@ -208,15 +251,24 @@ carries the same wait-then-GET_RESULT handshake here.
  	return 0;
  }
  
-@@ -894,6 +902,7 @@
+@@ -894,6 +902,8 @@
  static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
  {
  	struct vpu_instance *inst = wave5_ctrl_to_vpu_inst(ctrl);
 +	bool update_rate = false;
++	bool update_vbv = false;
  
  	dev_dbg(inst->dev->dev, "%s: name: %s | value: %d\n", __func__, ctrl->name, ctrl->val);
  
-@@ -926,6 +935,7 @@
+@@ -911,6 +921,7 @@
+ 		inst->rot_angle = ctrl->val;
+ 		break;
+ 	case V4L2_CID_MPEG_VIDEO_VBV_SIZE:
++		update_vbv = inst->vbv_buf_size != ctrl->val;
+ 		inst->vbv_buf_size = ctrl->val;
+ 		break;
+ 	case V4L2_CID_MPEG_VIDEO_BITRATE_MODE:
+@@ -926,6 +937,7 @@
  		}
  		break;
  	case V4L2_CID_MPEG_VIDEO_BITRATE:
@@ -224,12 +276,16 @@ carries the same wait-then-GET_RESULT handshake here.
  		inst->bit_rate = ctrl->val;
  		break;
  	case V4L2_CID_MPEG_VIDEO_GOP_SIZE:
-@@ -1229,6 +1239,9 @@
+@@ -1229,6 +1241,13 @@
  		return -EINVAL;
  	}
  
-+	if (update_rate && inst->state >= VPU_INST_STATE_PIC_RUN)
-+		inst->enc_rate_change_pending |= W5_ENC_CHANGE_RC_TARGET_RATE;
++	if (inst->state >= VPU_INST_STATE_PIC_RUN) {
++		if (update_rate)
++			inst->enc_rate_change_pending |= W5_ENC_CHANGE_RC_TARGET_RATE;
++		if (update_vbv)
++			inst->enc_rate_change_pending |= W5_ENC_CHANGE_RC_PARAM;
++	}
 +
  	return 0;
  }
