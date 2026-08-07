@@ -6,9 +6,9 @@
 0230-wave5-vdi.patch
 0240-wave5-vpuapi.patch
 0250-wave5-vpuapi-h.patch
+0255-wave5-h.patch
 0260-wave5-vpu.patch
 0270-wave5-vpu-dec.patch
 0280-wave5-vpu-enc.patch
-0285-wave5-live-rate-control.patch
 0300-dma-coherent-page-granular.patch
 0400-dwc2-gadget-buffer-dma.patch

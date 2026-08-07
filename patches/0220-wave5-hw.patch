@@ -16,6 +16,23 @@ CREATE_INSTANCE, so two concurrent instances are handed completely
 overlapping scratch; the vendor never declares a sec-AXI window to an encoder
 instance, so the two writes are dropped.
 
+Live encoder parameter changes. wave5_vpu_enc_change_param() issues
+W5_ENC_SET_PARAM with OPT_CHANGE_PARAM so a running instance can change its
+target bitrate, frame rate, VBV window and intra period without a
+STREAMOFF/STREAMON cycle. The firmware leaves one report on the instance report
+queue for that command, exactly as the seq-init path does, and it must be drained
+with a GET_RESULT query: left there it sits ahead of every later ENC_PIC report,
+finish_encode consumes it instead of its own frame, and the instance stalls after
+the first change.
+
+The change-mask bits are the vendor's (Wave5VpuEncParaChange): bit 1 intra
+parameters, bit 6 frame rate, bit 8 target rate, bit 9 rate-control parameters.
+The RC_PARAM write composes the whole word from current state rather than only
+the three fields the vendor rewrites, because a partial word reads as
+rc_enable = 0. Forcing a keyframe uses bit 1 with intra_period 1 for a single
+picture; the per-picture W5_CMD_ENC_PIC_PIC_PARAM force-picture-type route was
+swept across every plausible field layout on this firmware and produced no IDR.
+
 --- a/drivers/media/platform/chips-media/wave5/wave5-hw.c
 +++ b/drivers/media/platform/chips-media/wave5/wave5-hw.c
 @@ -7,6 +7,7 @@
@@ -145,7 +162,133 @@ instance, so the two writes are dropped.
  
  	reg_val = (open_param->line_buf_int_en << 6) | BITSTREAM_ENDIANNESS_BIG_ENDIAN;
  	vpu_write_reg(inst->dev, W5_CMD_BS_PARAM, reg_val);
-@@ -2117,16 +2176,29 @@
+@@ -1884,6 +1943,125 @@
+ 	return send_firmware_command(inst, W5_ENC_SET_PARAM, true, NULL, NULL);
+ }
+ 
++/*
++ * OPT_CHANGE_PARAM runs while the instance is encoding, so the wait cannot use
++ * VPU_ENC_TIMEOUT (60 s) - that would park the m2m job queue. The instance
++ * command queue is empty at the point start_encode() issues the change, so the
++ * firmware only has this one command to retire.
++ */
++#define W5_ENC_CHANGE_PARAM_TIMEOUT	200
++
++int wave5_vpu_enc_change_param(struct vpu_instance *inst, u32 enable)
++{
++	struct enc_info *p_enc_info = &inst->codec_info->enc_info;
++	struct enc_open_param *p_open_param = &p_enc_info->open_param;
++	u32 reg_val;
++	int ret;
++
++	vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_SET_PARAM_OPTION, OPT_CHANGE_PARAM);
++	vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_SET_PARAM_ENABLE, enable);
++	if (enable & W5_ENC_CHANGE_RC_FRAME_RATE)
++		vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_RC_FRAME_RATE,
++			      p_open_param->frame_rate_info);
++	/*
++	 * Same register and same unit as the OPT_COMMON write in
++	 * wave5_vpu_enc_init_seq(): bits per second. Vendor
++	 * ar_video_h26x_enc_exe_set_dynamic_param() stores kbps << 10 into the
++	 * open-param field that feeds both writes, i.e. it approximates bps
++	 * with a shift; the startup path here already writes exact bps and
++	 * measures the requested rate, so the live path uses exact bps too.
++	 */
++	/* Intra parameters. Composed exactly like the HEVC arm of the seq-init write so the fields we
++	 * are not changing keep their configured values; only intra_period differs, and only while a
++	 * forced keyframe is armed. */
++	if (enable & W5_ENC_CHANGE_INTRA_PARAM) {
++		struct enc_wave_param *ip = &p_open_param->wave_param;
++
++		vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_INTRA_PARAM,
++			      ip->decoding_refresh_type |
++			      (ip->intra_qp << ENC_HEVC_INTRA_QP_SHIFT) |
++			      (ip->forced_idr_header_enable << ENC_HEVC_FORCED_IDR_HEADER_SHIFT) |
++			      (ip->intra_period << ENC_HEVC_INTRA_PERIOD_SHIFT));
++	}
++	if (enable & W5_ENC_CHANGE_RC_TARGET_RATE)
++		vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_RC_TARGET_RATE,
++			      p_open_param->bit_rate);
++	if (enable & W5_ENC_CHANGE_RC_PARAM) {
++		struct enc_wave_param *p_param = &p_open_param->wave_param;
++		u32 vbv = p_open_param->vbv_buffer_size;
++		u32 rc_param;
++
++		/*
++		 * Vendor ar_video_h26x_enc_msg_change_param() floors the window
++		 * before handing it to the firmware, at the same value the open path
++		 * already rejects below.
++		 */
++		if (vbv < MIN_VBV_BUFFER_SIZE)
++			vbv = MIN_VBV_BUFFER_SIZE;
++		else if (vbv > MAX_VBV_BUFFER_SIZE)
++			vbv = MAX_VBV_BUFFER_SIZE;
++
++		/*
++		 * Vendor's Wave5VpuEncParaChange() writes only hvs_qp_enable,
++		 * hvs_qp_scale and the window into this register, leaving rc_enable,
++		 * the CU/MB-level RC bit and initial_rc_qp as zero. Nothing
++		 * distinguishes "the firmware ignores those fields under
++		 * OPT_CHANGE_PARAM" from "vendor never exercises this bit", and
++		 * zeroing bit 0 would read as rate control off. Compose the whole
++		 * word from current state the way the sequence init does, which is a
++		 * no-op in the first case and correct in the second.
++		 */
++		rc_param = p_open_param->rc_enable |
++			(p_param->hvs_qp_enable << 2) |
++			(p_param->hvs_qp_scale << 4) |
++			((p_param->initial_rc_qp & 0x3F) << 14) |
++			(vbv << 20);
++		if (inst->std == W_AVC_ENC)
++			rc_param |= p_param->mb_level_rc_enable << 1;
++		else if (inst->std == W_HEVC_ENC)
++			rc_param |= p_param->cu_level_rc_enable << 1;
++
++		vpu_write_reg(inst->dev, W5_CMD_ENC_SEQ_RC_PARAM, rc_param);
++	}
++
++	reinit_completion(&inst->irq_done);
++
++	ret = send_firmware_command(inst, W5_ENC_SET_PARAM, true, NULL, NULL);
++	if (ret) {
++		dev_warn(inst->dev->dev, "%s: inst %d enable 0x%x queue fail: %d\n",
++			 __func__, inst->id, enable, ret);
++		return ret;
++	}
++
++	/*
++	 * The change command reports through INT_WAVE5_ENC_SET_PARAM like the
++	 * sequence init does, and leaves one report on the instance report
++	 * queue. Vendor ar_video_h26x_enc_msg_set_param_done() drains it with
++	 * VPU_EncGetOutputInfo(). Without the drain the report sits in front of
++	 * every later ENC_PIC report, the next finish_encode() consumes it
++	 * instead of its own frame, and the instance stalls for the rest of the
++	 * stream.
++	 */
++	ret = wave5_vpu_wait_interrupt(inst, W5_ENC_CHANGE_PARAM_TIMEOUT);
++	if (ret)
++		dev_warn(inst->dev->dev,
++			 "%s: inst %d no SET_PARAM interrupt, draining anyway\n",
++			 __func__, inst->id);
++
++	ret = wave5_send_query(inst->dev, inst, GET_RESULT);
++	if (ret) {
++		dev_warn(inst->dev->dev, "%s: inst %d GET_RESULT fail: %d\n",
++			 __func__, inst->id, ret);
++		return ret;
++	}
++
++	reg_val = vpu_read_reg(inst->dev, W5_RET_QUEUE_STATUS);
++	p_enc_info->instance_queue_count = (reg_val >> 16) & 0xff;
++	p_enc_info->report_queue_count = reg_val & QUEUE_REPORT_MASK;
++
++	return 0;
++}
++
+ int wave5_vpu_enc_get_seq_info(struct vpu_instance *inst, struct enc_initial_info *info)
+ {
+ 	int ret;
+@@ -2117,16 +2295,29 @@
  
  	return ret;
  
@@ -180,7 +323,7 @@ instance, so the two writes are dropped.
  	return ret;
  }
  
-@@ -2140,6 +2212,16 @@
+@@ -2140,6 +2331,16 @@
  		return 0;
  
  	/*

@@ -8,14 +8,49 @@ active_enc_src_idx holds the one OUTPUT buffer the encoder firmware currently
 owns, so a firmware result error (0280) can return it from the vb2 queue
 directly rather than through v4l2_m2m_src_buf_remove(), which cannot find it:
 start_encode has already taken it off the ready queue.
+
+enc_rate_change_pending carries the W5_ENC_CHANGE_* mask that start_encode (0280)
+applies to a running instance. enc_force_idr, enc_idr_restore and
+enc_idr_saved_period sequence a forced keyframe: one picture at intra_period 1,
+then a restore to the configured value. The value is saved rather than
+re-derived, because for HEVC the seq-init path falls back to avc_idr_period when
+intra_period is zero, so enc_param is not the truth.
+
 --- a/drivers/media/platform/chips-media/wave5/wave5-vpuapi.h
 +++ b/drivers/media/platform/chips-media/wave5/wave5-vpuapi.h
-@@ -818,6 +818,8 @@
+@@ -818,6 +818,12 @@
  	bool cbcr_interleave;
  	bool nv21;
  	bool eos;
 +	bool keep_dma_bufs;
 +	s32 active_enc_src_idx;
++	u32 enc_rate_change_pending;
++	bool enc_force_idr; /* FORCE_KEY_FRAME seen; armed on the next start_encode */
++	bool enc_idr_restore; /* the forced intra_period 1 is live and must be put back */
++	u32 enc_idr_saved_period; /* intra_period as configured, saved across a forced keyframe */
  	struct vpu_buf bitstream_vbuf;
  	dma_addr_t last_rd_ptr;
  	size_t remaining_consumed_bytes;
+@@ -878,6 +884,22 @@
+ 					enum tiled_map_type map_type);
+ int wave5_vpu_enc_start_one_frame(struct vpu_instance *inst, struct enc_param *param,
+ 				  u32 *fail_res);
++
++/* W5_CMD_ENC_SEQ_SET_PARAM_ENABLE bits accepted under OPT_CHANGE_PARAM */
++/* Forcing a keyframe on a running instance goes through the same OPT_CHANGE_PARAM path as the live
++ * rate controls, not through a per-picture register: W5_CMD_ENC_PIC_PIC_PARAM was swept across every
++ * plausible force-picture-type layout on hardware and produced no IDR. Bit 1 of the change mask is
++ * the intra parameters (vendor Wave5VpuEncParaChange, libmpp_service.so 0xffa4c -> the 0x130 write),
++ * and W5_CMD_ENC_SEQ_INTRA_PARAM carries intra_period - so a keyframe is one frame at intra_period 1
++ * followed by a restore. */
++#define W5_ENC_CHANGE_INTRA_PARAM	BIT(1)
++
++#define W5_ENC_CHANGE_RC_FRAME_RATE	BIT(6)
++#define W5_ENC_CHANGE_RC_TARGET_RATE	BIT(8)
++#define W5_ENC_CHANGE_RC_PARAM		BIT(9)
++
++int wave5_vpu_enc_update_rate(struct vpu_instance *inst, u32 enable);
++int wave5_vpu_enc_apply_pending_rate(struct vpu_instance *inst);
+ int wave5_vpu_enc_get_output_info(struct vpu_instance *inst, struct enc_output_info *info);
+ int wave5_vpu_enc_give_command(struct vpu_instance *inst, enum codec_command cmd, void *parameter);
+ 

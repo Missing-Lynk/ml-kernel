@@ -63,6 +63,19 @@ shown by every decoder as a strip along the bottom edge. Take the caller's
 requested picture size for the coded side and let the codec's own frmsize
 constraints round it. The source geometry is untouched.
 
+(7) live rate control. V4L2_CID_MPEG_VIDEO_BITRATE, V4L2_CID_MPEG_VIDEO_VBV_SIZE
+and VIDIOC_S_PARM mark the change pending instead of only storing it, and
+start_encode applies the pending mask before queueing the next picture. Upstream
+stores these and acts on them only at the next seq init, so a change on a running
+instance is silently ignored.
+
+(8) V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME, which upstream does not implement for
+this encoder. The stream carries one IDR at session start and P-frames after it,
+so a receiver that joins later cannot decode and no amount of scene change
+repairs it: the encoder picks intra-vs-inter against its own reference, which is
+correct, so it never learns the receiver's is not. The control arms one picture
+at intra_period 1 and restores the configured value on the next.
+
 --- a/drivers/media/platform/chips-media/wave5/wave5-vpu-enc.c
 +++ b/drivers/media/platform/chips-media/wave5/wave5-vpu-enc.c
 @@ -125,6 +125,30 @@
@@ -96,7 +109,44 @@ constraints round it. The source geometry is untouched.
  static int start_encode(struct vpu_instance *inst, u32 *fail_res)
  {
  	struct v4l2_m2m_ctx *m2m_ctx = inst->v4l2_fh.m2m_ctx;
-@@ -172,24 +196,35 @@
+@@ -138,9 +162,36 @@
+ 	u32 luma_size = 0;
+ 	u32 chroma_size = 0;
+ 
++	ret = wave5_vpu_enc_apply_pending_rate(inst);
++	if (ret)
++		dev_warn(inst->dev->dev, "%s: live rate update fail: %d\n", __func__, ret);
++
+ 	memset(&pic_param, 0, sizeof(struct enc_param));
+ 	memset(&frame_buf, 0, sizeof(struct frame_buffer));
+ 
++	/* A forced keyframe is one frame encoded at intra_period 1, then a restore. The per-picture
++	 * PIC_PARAM route does not work on this firmware (swept on hardware, no IDR at any layout);
++	 * the vendor's own request lands on the OPT_CHANGE_PARAM path, change bit 1, which rewrites
++	 * W5_CMD_ENC_SEQ_INTRA_PARAM. Both edges go through the same pending mask the live rate
++	 * controls use, so they are applied by apply_pending_rate above on the following frame. */
++	if (inst->enc_force_idr) {
++		struct enc_wave_param *wp = &inst->codec_info->enc_info.open_param.wave_param;
++
++		inst->enc_force_idr = false;
++		inst->enc_idr_restore = true;
++		/* Save the live value rather than re-deriving it: for HEVC the seq-init path falls
++		 * back to avc_idr_period when intra_period is zero, so enc_param is not the truth. */
++		inst->enc_idr_saved_period = wp->intra_period;
++		wp->intra_period = 1;
++		inst->enc_rate_change_pending |= W5_ENC_CHANGE_INTRA_PARAM;
++		dev_dbg(inst->dev->dev, "%s: inst %d forcing a keyframe\n", __func__, inst->id);
++	} else if (inst->enc_idr_restore) {
++		inst->enc_idr_restore = false;
++		inst->codec_info->enc_info.open_param.wave_param.intra_period =
++			inst->enc_idr_saved_period;
++		inst->enc_rate_change_pending |= W5_ENC_CHANGE_INTRA_PARAM;
++	}
++
+ 	info = v4l2_format_info(inst->src_fmt.pixelformat);
+ 	if (!info)
+ 		return -EINVAL;
+@@ -172,24 +223,35 @@
  		else
  			return -EAGAIN;
  	} else {
@@ -138,7 +188,7 @@ constraints round it. The source geometry is untouched.
  		}
  		frame_buf.stride = stride;
  		pic_param.src_idx = src_buf->vb2_buf.index;
-@@ -200,11 +235,11 @@
+@@ -200,11 +262,11 @@
  	pic_param.code_option.encode_aud = inst->encode_aud;
  	ret = wave5_vpu_enc_start_one_frame(inst, &pic_param, fail_res);
  	if (ret) {
@@ -153,7 +203,7 @@ constraints round it. The source geometry is untouched.
  		src_buf = v4l2_m2m_src_buf_remove(m2m_ctx);
  		if (!src_buf) {
  			dev_dbg(inst->dev->dev,
-@@ -219,20 +254,25 @@
+@@ -219,20 +281,25 @@
  				__func__);
  			return -EINVAL;
  		}
@@ -182,7 +232,10 @@ constraints round it. The source geometry is untouched.
  	}
  
  	return 0;
-@@ -245,12 +285,49 @@
+@@ -242,15 +309,52 @@
+ {
+ 	struct v4l2_m2m_ctx *m2m_ctx = inst->v4l2_fh.m2m_ctx;
+ 	int ret;
 -	struct enc_output_info enc_output_info;
 +	struct enc_output_info enc_output_info = {};
  	struct vb2_v4l2_buffer *src_buf = NULL;
@@ -236,7 +289,7 @@ constraints round it. The source geometry is untouched.
  		return;
  	}
  
-@@ -281,6 +358,7 @@
+@@ -281,6 +385,7 @@
  			dev_warn(inst->dev->dev, "%s: no source buffer with index: %d found\n",
  				 __func__, enc_output_info.enc_src_idx);
  		}
@@ -244,7 +297,7 @@ constraints round it. The source geometry is untouched.
  	}
  
  	dst_buf = v4l2_m2m_dst_buf_remove(m2m_ctx);
-@@ -401,6 +479,24 @@
+@@ -401,6 +506,24 @@
  
  	wave5_update_pix_fmt(&f->fmt.pix_mp, VPU_FMT_TYPE_CODEC,
  			     width, height, frmsize);
@@ -269,7 +322,7 @@ constraints round it. The source geometry is untouched.
  	f->fmt.pix_mp.colorspace = inst->colorspace;
  	f->fmt.pix_mp.ycbcr_enc = inst->ycbcr_enc;
  	f->fmt.pix_mp.quantization = inst->quantization;
-@@ -484,11 +580,44 @@
+@@ -484,11 +607,44 @@
  	return 0;
  }
  
@@ -314,7 +367,7 @@ constraints round it. The source geometry is untouched.
  	int width, height;
  
  	dev_dbg(inst->dev->dev, "%s: fourcc: %u width: %u height: %u num_planes: %u field: %u\n",
-@@ -510,6 +639,7 @@
+@@ -510,6 +666,7 @@
  
  	wave5_update_pix_fmt(&f->fmt.pix_mp, VPU_FMT_TYPE_RAW,
  			     width, height, frmsize);
@@ -322,7 +375,7 @@ constraints round it. The source geometry is untouched.
  	return 0;
  }
  
-@@ -518,6 +648,17 @@
+@@ -518,6 +675,17 @@
  	struct vpu_instance *inst = file_to_vpu_inst(file);
  	const struct vpu_format *vpu_fmt;
  	const struct v4l2_format_info *info;
@@ -340,7 +393,7 @@ constraints round it. The source geometry is untouched.
  	int i, ret;
  
  	dev_dbg(inst->dev->dev, "%s: fourcc: %u width: %u height: %u num_planes: %u field: %u\n",
-@@ -566,8 +707,15 @@
+@@ -566,8 +734,15 @@
  		return -EINVAL;
  
  	wave5_update_pix_fmt(&inst->dst_fmt, VPU_FMT_TYPE_CODEC,
@@ -357,7 +410,72 @@ constraints round it. The source geometry is untouched.
  	inst->conf_win.width = inst->dst_fmt.width;
  	inst->conf_win.height = inst->dst_fmt.height;
  
-@@ -1343,17 +1491,20 @@
+@@ -684,6 +859,7 @@
+ static int wave5_vpu_enc_s_parm(struct file *file, void *fh, struct v4l2_streamparm *a)
+ {
+ 	struct vpu_instance *inst = file_to_vpu_inst(file);
++	u32 old_frame_rate = inst->frame_rate;
+ 
+ 	dev_dbg(inst->dev->dev, "%s: type: %u\n", __func__, a->type);
+ 
+@@ -703,6 +879,9 @@
+ 		__func__, a->parm.output.timeperframe.numerator,
+ 		a->parm.output.timeperframe.denominator);
+ 
++	if (inst->state >= VPU_INST_STATE_PIC_RUN && inst->frame_rate != old_frame_rate)
++		inst->enc_rate_change_pending |= W5_ENC_CHANGE_RC_FRAME_RATE;
++
+ 	return 0;
+ }
+ 
+@@ -746,6 +925,8 @@
+ static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
+ {
+ 	struct vpu_instance *inst = wave5_ctrl_to_vpu_inst(ctrl);
++	bool update_rate = false;
++	bool update_vbv = false;
+ 
+ 	dev_dbg(inst->dev->dev, "%s: name: %s | value: %d\n", __func__, ctrl->name, ctrl->val);
+ 
+@@ -763,6 +944,7 @@
+ 		inst->rot_angle = ctrl->val;
+ 		break;
+ 	case V4L2_CID_MPEG_VIDEO_VBV_SIZE:
++		update_vbv = inst->vbv_buf_size != ctrl->val;
+ 		inst->vbv_buf_size = ctrl->val;
+ 		break;
+ 	case V4L2_CID_MPEG_VIDEO_BITRATE_MODE:
+@@ -778,11 +960,15 @@
+ 		}
+ 		break;
+ 	case V4L2_CID_MPEG_VIDEO_BITRATE:
++		update_rate = inst->bit_rate != ctrl->val;
+ 		inst->bit_rate = ctrl->val;
+ 		break;
+ 	case V4L2_CID_MPEG_VIDEO_GOP_SIZE:
+ 		inst->enc_param.avc_idr_period = ctrl->val;
+ 		break;
++	case V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME:
++		inst->enc_force_idr = true;
++		break;
+ 	case V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE:
+ 		inst->enc_param.independ_slice_mode = ctrl->val;
+ 		inst->enc_param.avc_slice_mode = ctrl->val;
+@@ -1081,6 +1267,13 @@
+ 		return -EINVAL;
+ 	}
+ 
++	if (inst->state >= VPU_INST_STATE_PIC_RUN) {
++		if (update_rate)
++			inst->enc_rate_change_pending |= W5_ENC_CHANGE_RC_TARGET_RATE;
++		if (update_vbv)
++			inst->enc_rate_change_pending |= W5_ENC_CHANGE_RC_PARAM;
++	}
++
+ 	return 0;
+ }
+ 
+@@ -1343,17 +1536,20 @@
  
  		ret = wave5_set_enc_openparam(&open_param, inst);
  		if (ret) {
@@ -382,7 +500,7 @@ constraints round it. The source geometry is untouched.
  
  		if (inst->mirror_direction) {
  			wave5_vpu_enc_give_command(inst, ENABLE_MIRRORING, NULL);
-@@ -1376,6 +1527,8 @@
+@@ -1376,6 +1572,8 @@
  			dev_warn(inst->dev->dev, "Sequence not found: %d\n", ret);
  			goto return_buffers;
  		}
@@ -391,7 +509,7 @@ constraints round it. The source geometry is untouched.
  		ret = switch_state(inst, VPU_INST_STATE_INIT_SEQ);
  		if (ret)
  			goto return_buffers;
-@@ -1390,6 +1543,7 @@
+@@ -1390,6 +1588,7 @@
  		}
  
  		ret = switch_state(inst, VPU_INST_STATE_PIC_RUN);
@@ -399,7 +517,7 @@ constraints round it. The source geometry is untouched.
  	}
  	if (ret)
  		goto return_buffers;
-@@ -1579,6 +1733,7 @@
+@@ -1579,6 +1778,7 @@
  	inst->dev = dev;
  	inst->type = VPU_INST_TYPE_ENC;
  	inst->ops = &wave5_vpu_enc_inst_ops;
@@ -407,3 +525,12 @@ constraints round it. The source geometry is untouched.
  
  	inst->codec_info = kzalloc(sizeof(*inst->codec_info), GFP_KERNEL);
  	if (!inst->codec_info) {
+@@ -1740,6 +1940,8 @@
+ 	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
+ 			  V4L2_CID_MPEG_VIDEO_PREPEND_SPSPPS_TO_IDR,
+ 			  0, 1, 1, 0);
++	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
++			  V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME, 0, 0, 0, 0);
+ 
+ 	if (v4l2_ctrl_hdl->error) {
+ 		ret = -ENODEV;

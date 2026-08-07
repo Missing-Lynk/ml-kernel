@@ -14,6 +14,14 @@ wave5_cleanup_instance (0210) leaks them rather than freeing them.
 
 Also disables decoder reordering (reorder_enable=FALSE, the vendor's DEC_PIC
 configuration): the low-latency no-B streams need no reorder delay.
+
+Live rate changes are marked pending by the V4L2 control handlers (0280) and
+applied from start_encode rather than from the ioctl, because the firmware only
+accepts a parameter change between pictures. wave5_vpu_enc_update_rate() syncs
+the open-param copy the change command reads from, and
+wave5_vpu_enc_apply_pending_rate() clears the pending mask before it attempts the
+change, so a change that fails cannot re-arm itself on every following frame.
+
 --- a/drivers/media/platform/chips-media/wave5/wave5-vpuapi.c
 +++ b/drivers/media/platform/chips-media/wave5/wave5-vpuapi.c
 @@ -171,7 +171,9 @@
@@ -192,3 +200,54 @@ configuration): the low-latency no-B streams need no reorder delay.
  }
  
  int wave5_vpu_enc_register_frame_buffer(struct vpu_instance *inst, unsigned int num,
+@@ -867,6 +922,50 @@
+ 	return ret;
+ }
+ 
++int wave5_vpu_enc_update_rate(struct vpu_instance *inst, u32 enable)
++{
++	struct enc_info *p_enc_info = &inst->codec_info->enc_info;
++	struct vpu_device *vpu_dev = inst->dev;
++	int ret;
++
++	ret = mutex_lock_interruptible(&vpu_dev->hw_lock);
++	if (ret)
++		return ret;
++
++	p_enc_info->open_param.bit_rate = inst->bit_rate;
++	p_enc_info->open_param.frame_rate_info = inst->frame_rate;
++	/*
++	 * VBR pins the window at 3000 when the instance is opened; keep the live
++	 * path on that same rule so a mode change cannot be undone from here.
++	 */
++	if (inst->rc_mode != 0)
++		p_enc_info->open_param.vbv_buffer_size = inst->vbv_buf_size;
++
++	ret = wave5_vpu_enc_change_param(inst, enable);
++
++	mutex_unlock(&vpu_dev->hw_lock);
++
++	return ret;
++}
++
++int wave5_vpu_enc_apply_pending_rate(struct vpu_instance *inst)
++{
++	u32 pending = inst->enc_rate_change_pending;
++
++	if (!pending)
++		return 0;
++
++	/*
++	 * Consume the request even when the firmware rejects it. Retrying on
++	 * the next frame would queue a SET_PARAM per picture behind an encoder
++	 * that is already unhappy; one attempt per userspace request keeps the
++	 * failure bounded and visible in the log.
++	 */
++	inst->enc_rate_change_pending = 0;
++
++	return wave5_vpu_enc_update_rate(inst, pending);
++}
++
+ int wave5_vpu_enc_get_output_info(struct vpu_instance *inst, struct enc_output_info *info)
+ {
+ 	struct enc_info *p_enc_info = &inst->codec_info->enc_info;

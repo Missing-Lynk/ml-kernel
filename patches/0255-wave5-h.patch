@@ -1,0 +1,15 @@
+Why: the prototype for wave5_vpu_enc_change_param(), the live parameter-change
+entry point implemented in wave5-hw.c (0220) and called from the encoder's V4L2
+layer (0280). Upstream has no live parameter-change path, so it declares none.
+
+--- a/drivers/media/platform/chips-media/wave5/wave5.h
++++ b/drivers/media/platform/chips-media/wave5/wave5.h
+@@ -106,6 +106,8 @@
+ 
+ int wave5_vpu_enc_init_seq(struct vpu_instance *inst);
+ 
++int wave5_vpu_enc_change_param(struct vpu_instance *inst, u32 enable);
++
+ int wave5_vpu_enc_get_seq_info(struct vpu_instance *inst, struct enc_initial_info *info);
+ 
+ int wave5_vpu_enc_register_framebuffer(struct device *dev, struct vpu_instance *inst,
