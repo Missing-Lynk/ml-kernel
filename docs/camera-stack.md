@@ -4,7 +4,7 @@ The air unit (BetaFPV VR04, Proxima-9311) captures from an onboard NT99235 image
 
 This document keeps two things separate: **how the vendor drives the hardware**, recovered from a live MMIO write trace of the streaming stock unit, and **what the open stack implements and has validated on hardware**. Every statement is backed by a capture, a disassembly or a hardware observation; anything not yet established is listed under "Not known".
 
-Drivers: `overlay/drivers/media/artosyn/` (`nt99235.c`, `ar-csi2.c`, `ar-vif.c`, `ar-isp.c`, `ar-cvisp.c`). Device tree: `devices/betafpv-vr04-air/proxima-9311-air.dts`.
+Drivers: `overlay/drivers/media/artosyn/` (`nt99235.c`, `ar-csi2.c`, `ar-vif.c`, `ar-isp-main.c` + `ar-isp-tables.c`, `ar-cvisp.c`). Device tree: `devices/betafpv-vr04-air/proxima-9311-air.dts`.
 
 ## Blocks
 
@@ -420,7 +420,7 @@ Still frozen, held constant where the vendor's 3A moves them: the vendor AE's an
 | Sensor init, MCLK, stream-on | `overlay/drivers/media/artosyn/nt99235.c` |
 | CSI-2 D-PHY, lanes, IPI, deskew | `overlay/drivers/media/artosyn/ar-csi2.c` |
 | VIF front end, view arm, DMA | `overlay/drivers/media/artosyn/ar-vif.c` |
-| ISP configuration | `overlay/drivers/media/artosyn/ar-isp.c`, tables `vendor-tables/ar-isp-defaults.h` from `scripts/isp/gen-isp-defaults.py` |
+| ISP configuration | `overlay/drivers/media/artosyn/ar-isp-main.c`, fetched buffers `ar-isp-tables.c`, tables `vendor-tables/ar-isp-defaults.h` from `scripts/isp/gen-isp-defaults.py` |
 | CVISP output stage and queue | `overlay/drivers/media/artosyn/ar-cvisp.c`, tables `vendor-tables/ar-cvisp-defaults.h` from `scripts/isp/gen-cvisp-defaults.py` |
 | DT nodes (camera, CSI, VIF, ISP, CVISP, clocks, carveouts) | `devices/betafpv-vr04-air/proxima-9311-air.dts` |
 | Vendor MMIO write trace, per block and wide sweep | capture harness `glue/camera/au-slotA-mmiotrace.sh`, shim `native/mmiotrace.c`; the logs are capture artifacts, not in the tree |
@@ -449,7 +449,7 @@ All five ring slots hold distinct frames after a one-second window, differing by
 
 The crush was `0x2e2c` and `0x2e30`, whose corrected values sit past the prefix the replay applies; writing them recovers the whole shadow range (57% of pixels under luma 32 becomes 0.0%). See `ar_isp_output_fix` in `vendor-tables/ar-isp-defaults.h`.
 
-A related trap, worth keeping: the vendor's coefficient pages survive in DRAM across a RAM-boot at the addresses the replay arms, so a pipeline that does not generate its own tables runs correctly on **inherited** content and only fails on a cold boot. `ar-isp.c` generates every byte the hardware fetches (gamma page 0 and the DRC dynamic half from the tuning file; gamma page 1 and the DRC tail carried as decoded curves via `scripts/isp/gen-gamma-page1.py` and `scripts/isp/gen-drc-tail.py`). Packed multi-lane table formats are neither mostly zero nor monotonic read as flat `u32`, so zero-fraction and monotonicity heuristics score the packing, not the content.
+A related trap, worth keeping: the vendor's coefficient pages survive in DRAM across a RAM-boot at the addresses the replay arms, so a pipeline that does not generate its own tables runs correctly on **inherited** content and only fails on a cold boot. `ar-isp-tables.c` generates every byte the hardware fetches (gamma page 0 and the DRC dynamic half from the tuning file; gamma page 1 and the DRC tail carried as decoded curves via `scripts/isp/gen-gamma-page1.py` and `scripts/isp/gen-drc-tail.py`). Packed multi-lane table formats are neither mostly zero nor monotonic read as flat `u32`, so zero-fraction and monotonicity heuristics score the packing, not the content.
 
 ## What the driver owns
 
@@ -503,7 +503,7 @@ The vendor's operating point is pinned exactly: at gain **187** the band is 130 
 
 `rnr`, `lnr` and `de3d` all blend between two adjacent entries by an AE-supplied weight, exactly as BLC does, and truncate on the way to the registers. The weight's abscissa is a linear gain multiplier with unity at 1.0 (rnr's band edges are powers of two), but it is not the sensor analog multiplier: the vendor's live rnr bank demands 13.6-14.2 where the analog gain was 62, the same unresolved scale error BLC shows at 2.6x. The driver takes the abscissa through the Q8 `rnr_gain`/`lnr_gain`/`de3d_gain` parameters (default 1.0, the replayed cold bank exactly); `ml-3a` supplies them from the vendor exposure table rather than deriving them from the gain code.
 
-**lnr additionally lost its static curves to the prefix cut.** The applied 1475-entry prefix truncates lnr's four 64-entry strength curves (`0x3d60` onward, stride `0x40`, normalised to `0x40`) mid-block, leaving the tail zero, which is gain zero rather than neutral. `ar_isp_lnr_fix[]` in `ar-isp.c` restores the 35 affected registers with the streaming vendor's live values, applied in both configure paths after the setup replay. Found by the register-state diff (`scripts/isp/isp-regdiff.py`), which classifies every live difference against the driver's own tables; the sweep files carry window-relative row offsets, so that tool is the only sanctioned way to read them.
+**lnr additionally lost its static curves to the prefix cut.** The applied 1475-entry prefix truncates lnr's four 64-entry strength curves (`0x3d60` onward, stride `0x40`, normalised to `0x40`) mid-block, leaving the tail zero, which is gain zero rather than neutral. `ar_isp_lnr_fix[]` in `ar-isp-main.c` restores the 35 affected registers with the streaming vendor's live values, applied in both configure paths after the setup replay. Found by the register-state diff (`scripts/isp/isp-regdiff.py`), which classifies every live difference against the driver's own tables; the sweep files carry window-relative row offsets, so that tool is the only sanctioned way to read them.
 
 **The hdr-path descriptors are owned and quiescent.** `hdr_lsc` (bank `0x1dd0`, length `0x1e2c`, address `0x1e38`, valid `0x1e40`) gets a driver-owned zero page: the vendor's own live page at `0x2b2e8c00` is stale heap (the fill path never runs in the FPV configuration) and the stage's control word ends disabled on both sides, so zero is parity, not a placeholder. Both module-local valid bits (`0x1e40` and HDR's `0x1c60`) are cleared at the end of the output arm, matching the vendor's measured steady state of arm, fetch, de-validate; the driver previously left them set after publishing.
 
@@ -561,7 +561,7 @@ Measured, zero differing bytes in both directions:
 
 So the HDR page's `0xa00..0xfff` **is** the compander table's first `0x600` bytes, read because it over-fetches past its own content, and a `0x8000` dump of the compander runs into the LSC page. Its real payload is only the 512 bytes at `0x800..0x9ff`; `0x000..0x7ff` is zero.
 
-`ar-isp.c` reproduces this rather than working around it: the HDR page and the compander share **one allocation**, the HDR page at offset 0 and the compander at `+0xa00`, and the two descriptors are published into the same block. That reproduces the fetched bytes for both without copying the shared `0x600` twice. The compander span is the `0xf000` its length field at `0x0024` implies rather than the `0x7800` the table occupies: in gamma's proven 32-byte units that is a fetch the vendor cannot satisfy either, since `0xf000` past its compander runs into the gamma page, so the excess is ignored by the block and allocating it only keeps the DMA inside memory we own.
+`ar-isp-tables.c` reproduces this rather than working around it: the HDR page and the compander share **one allocation**, the HDR page at offset 0 and the compander at `+0xa00`, and the two descriptors are published into the same block. That reproduces the fetched bytes for both without copying the shared `0x600` twice. The compander span is the `0xf000` its length field at `0x0024` implies rather than the `0x7800` the table occupies: in gamma's proven 32-byte units that is a fetch the vendor cannot satisfy either, since `0xf000` past its compander runs into the gamma page, so the excess is ignored by the block and allocating it only keeps the DMA inside memory we own.
 
 ### The HDR page needs nothing generated
 
