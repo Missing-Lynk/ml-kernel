@@ -182,4 +182,6 @@ Host toolchains: docker (kernel `Image`), `gcc-aarch64-linux-gnu` (modules + bus
 
 ## Support
 
-This is unpaid nights-and-weekends work: reverse engineering, bricked-and-recovered hardware, and serial-console archaeology. Everything here is free and open, but if it saved you time or got video flowing off your goggles, you can [buy me a coffee](https://buymeacoffee.com/stylesuxx) - it genuinely helps keep work like this going.
+Everything here is free and open. The work behind it is unpaid nights and weekends: reverse engineering, bricked and recovered hardware, and a lot of time on a serial console. If it saved you some of your own, you can [buy me a coffee](https://buymeacoffee.com/stylesuxx).
+
+Not bought the hardware yet? The [project README](https://github.com/Missing-Lynk/MissingLynk#support-this-project) has affiliate links that support the work at no extra cost to you.
