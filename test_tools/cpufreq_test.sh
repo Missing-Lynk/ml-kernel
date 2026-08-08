@@ -14,6 +14,7 @@ PMU=${PMU:-/tmp/pmu_test}
 [ -x "$PMU" ] || { echo "FAIL: $PMU missing"; exit 1; }
 
 old_gov="$(cat "$CF/scaling_governor")"
+# shellcheck disable=SC2329  # invoked indirectly by the EXIT trap below
 restore() { echo "$old_gov" > "$CF/scaling_governor" 2>/dev/null; }
 trap restore EXIT
 
@@ -22,6 +23,7 @@ echo "available: $(cat "$CF/scaling_available_frequencies")"
 echo userspace > "$CF/scaling_governor"
 
 fail=0
+# shellcheck disable=SC2013  # one space-separated line: word splitting is the intent
 for khz in $(cat "$CF/scaling_available_frequencies"); do
 	echo "$khz" > "$CF/scaling_setspeed"
 	sleep 1
@@ -30,6 +32,7 @@ for khz in $(cat "$CF/scaling_available_frequencies"); do
 	# pmu_test prints "INFO: cpuN measured core clock: X.X MHz"; average the
 	# per-core numbers and compare against the requested kHz within 2 percent.
 	mhz="$($PMU 2>/dev/null | sed -n 's/.*measured core clock: \([0-9.]*\) MHz.*/\1/p')"
+	# shellcheck disable=SC2086  # splitting into one param per core is the point
 	set -- $mhz
 	[ $# -eq 2 ] || { echo "FAIL @$khz: pmu_test gave no per-core clocks"; fail=1; continue; }
 	ok=1

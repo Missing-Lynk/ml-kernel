@@ -38,11 +38,15 @@ if [ ! -d /sys/class/dma ]; then
 	fail "/sys/class/dma missing (CONFIG_DMA_ENGINE not built in?)"
 fi
 
-CHANS=$(ls -1 /sys/class/dma/ 2>/dev/null | grep '^dma[0-9]*chan[0-9]*$' || true)
+CHANS=""
+for d in /sys/class/dma/dma*chan*; do
+	[ -e "$d" ] || continue
+	CHANS="$CHANS ${d##*/}"
+done
 [ -n "$CHANS" ] || fail "no dmaNchanN channels registered under /sys/class/dma"
 say "registered channels:"
 for c in $CHANS; do
-	printf '    %s -> %s\n' "$c" "$(cat /sys/class/dma/$c/device/../of_node/name 2>/dev/null || echo '?')"
+	printf '    %s -> %s\n' "$c" "$(cat "/sys/class/dma/$c/device/../of_node/name" 2>/dev/null || echo '?')"
 done
 
 # 3. Load the dmatest client (idempotent).

@@ -19,6 +19,7 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
+# shellcheck source=../scripts/pin.env
 source "$REPO/scripts/pin.env"
 
 VERBOSE="${VERBOSE:-0}"
@@ -60,7 +61,7 @@ KTREE="$BUILD_DIR/linux"
 # .ko land in BUILD_OUT. Override BUILD_OUT= to relocate.
 BUILD_OUT="${BUILD_OUT:-$BUILD_DIR/ml-modules}"
 TC="$(find "$BUILD_DIR/toolchain" -name "${CROSS_COMPILE_PREFIX}gcc" | head -1)"
-TC="${TC%${CROSS_COMPILE_PREFIX}gcc}${CROSS_COMPILE_PREFIX}"
+TC="${TC%"${CROSS_COMPILE_PREFIX}"gcc}${CROSS_COMPILE_PREFIX}"
 
 [ -f "$KTREE/.config" ] || { echo "no configured kernel tree at $KTREE - run scripts/build.sh first"; exit 1; }
 

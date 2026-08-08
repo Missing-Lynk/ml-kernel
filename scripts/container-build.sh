@@ -120,6 +120,7 @@ if [ -z "$MINIMAL" ] && [ -f /repo/configs/artosyn.config ]; then
   [ -n "$DEBUGSDIO" ] && [ -f /repo/configs/debug-sdio.config ] && frags="$frags /repo/configs/debug-sdio.config"
   # -Q silences the (expected) "redefined by fragment" notices: defconfig enables many drivers
   # as =m and our fragments turn them off, so the override warning would fire on every build.
+  # shellcheck disable=SC2086  # $frags is a space-separated list and must word-split
   ./scripts/kconfig/merge_config.sh -m -Q .config $frags
 
   build_step olddefconfig make olddefconfig
