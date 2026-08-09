@@ -124,6 +124,42 @@ if [ -z "$MINIMAL" ] && [ -f /repo/configs/artosyn.config ]; then
   ./scripts/kconfig/merge_config.sh -m -Q .config $frags
 
   build_step olddefconfig make olddefconfig
+
+  # Verify the fragments actually took. merge_config writes what we asked for, but olddefconfig
+  # then resolves dependencies, and a symbol whose deps are unmet - or that upstream renamed or
+  # removed on a kernel bump - is silently dropped. The build still succeeds and the failure
+  # surfaces on-device. Compare the merged intent (last assignment wins, matching merge order)
+  # against the resolved .config:
+  #   asked ON  -> fail if the symbol is absent entirely (dropped or gone upstream)
+  #   asked OFF -> fail if it came back on (something select's it)
+  # m-vs-y is not compared: a select can legitimately promote =m to =y.
+  # Advisory by default because the tree carries known-stale entries; STRICT_FRAGMENTS=1 makes
+  # it fatal, which is where this should land once those are cleaned up.
+  for f in $frags; do
+    grep -E '^(CONFIG_[A-Za-z0-9_]+=|# CONFIG_[A-Za-z0-9_]+ is not set)' "$f"
+  done | awk '
+    /^#/ { want[$2] = "n"; next }
+    { split($0, a, "="); want[a[1]] = a[2] }
+    END { for (s in want) print s, want[s] }
+  ' | while read -r sym val; do
+    cur="$(sed -n "s/^$sym=\(.*\)\$/\1/p" .config)"
+    if [ "$val" = n ]; then
+      [ -n "$cur" ] && echo "fragment check: $sym asked off, .config has $sym=$cur"
+    else
+      [ -z "$cur" ] && echo "fragment check: $sym asked =$val, absent from .config"
+    fi
+  done > /tmp/fragcheck.out
+
+  if [ -s /tmp/fragcheck.out ]; then
+    cat /tmp/fragcheck.out >&2
+    if [ -n "$STRICT_FRAGMENTS" ]; then
+      echo "fragment check: FAILED ($(wc -l < /tmp/fragcheck.out) symbols); STRICT_FRAGMENTS is set" >&2
+      exit 1
+    fi
+    echo "fragment check: $(wc -l < /tmp/fragcheck.out) symbols did not take (advisory)" >&2
+  else
+    echo "[fragment check] OK"
+  fi
 fi
 
 build_step "Image+dtbs" make -j"$JOBS" Image dtbs
