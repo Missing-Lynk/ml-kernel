@@ -23,7 +23,12 @@ pass unless:
 
   the transform reproduces 0x002e002d, the vendor's live registers captured
   streaming at saturated AE, for some abscissa in the 13.6 to 14.2 window the
-  band arithmetic demands (plans/au-blend-engine-and-notch.md section 2).
+  band arithmetic demands (plans/au-blend-engine-and-notch.md section 2);
+
+  the tail transform reproduces all twenty-two of the vendor's writes to
+  0x1838..0x188c at every abscissa in the 4.0 to 8.0 bracket that cfa and cnf
+  jointly pin the capture to, and that at least one of them has moved by 16.0,
+  which is what makes deriving the run different from replaying it.
 
 The tuning file is proprietary and is not in the repository.
 
@@ -47,6 +52,49 @@ REGS = 12
 COLD_REG = 0x000F000A
 VENDOR_REG = 0x002E002D
 VENDOR_WINDOW = (13.6, 14.2)
+
+# The rest of the bank, 0x1838..0x188c: four triples of seven payload words
+# then two blocks of seventeen. See the ar-isp-rnr.h comment for the packer
+# evidence that fixes the word mapping.
+TAIL_BASE = 0x1838
+TAIL_REGS = 22
+TAIL_WORD = 26
+TRIPLES = 4
+TRIPLE_WORDS = 7
+BLOCKS = 2
+BLOCK_WORDS = 17
+
+# The vendor's own writes to the tail, from the final ISP run it issues once
+# the receiver is live. Transcribed here so this script needs no capture file.
+TAIL_MEASURED = (
+    0x06400C80, 0x00000258, 0x060A0D10,
+    0x06400C80, 0x00000258, 0x060A0D10,
+    0x06400C80, 0x00000258, 0x060A0D10,
+    0x06400C80, 0x00000258, 0x060A0D10,
+    0x3C281A0D, 0xC8A0785A, 0x00080806, 0x000C0A0A, 0x00100E0E,
+    0x3C281A0D, 0xC8A0785A, 0x00080806, 0x000C0A0A, 0x00100E0E,
+)
+
+# The abscissa the cfa and cnf ladders jointly bracket the setup-trace capture to.
+BRACKET = (4.0, 8.0)
+
+# A second measured point: the streaming vendor's live bank, captured on slot A
+# with the goggle bound and the link delivering. Its twelve ladder registers all
+# read 0x002c002d, which the ladder alone satisfies over 12.355..12.961, and the
+# tail below narrows that to 12.355..12.613. The point of carrying it is that
+# 12.4 is past the fourth band, so these tail values are ones the frozen replay
+# could not produce: it holds 0x00080806 at 0x1870 where the vendor holds
+# 0x000b0c0b.
+LIVE_LADDER_REG = 0x002C002D
+LIVE_TAIL = (
+    0x06400C80, 0x00000258, 0x060A0D10,
+    0x06400C80, 0x00000258, 0x060A0D10,
+    0x06400C80, 0x00000258, 0x060A0D10,
+    0x06400C80, 0x00000258, 0x060A0D10,
+    0x3C281A0D, 0xC8A0785A, 0x000B0C0B, 0x00090A0B, 0x00080809,
+    0x3C281A0D, 0xC8A0785A, 0x000B0C0B, 0x00090A0B, 0x00080809,
+)
+LIVE_WINDOW = (12.0, 13.5)
 
 
 def f32_q16(bits: int) -> int:
@@ -114,6 +162,68 @@ def rnr_from_blob(blob: bytes, gain_q16: int) -> list[int]:
     return regs
 
 
+def select(blob: bytes, gain_q16: int) -> tuple[int, int]:
+    """The band and blend fraction, the same walk rnr_from_blob does."""
+    interp = struct.unpack_from("<I", blob, HEADER + 0x4)[0]
+    edges = [f32_q16(struct.unpack_from("<I", blob, BANDS + i * 4)[0])
+             for i in range(COUNT * 2)]
+
+    band = COUNT - 1
+    for i in range(COUNT - 1):
+        if gain_q16 <= edges[i * 2 + 1]:
+            band = i
+            break
+
+    t_q24 = 0
+    if interp and band > 0:
+        lo, prev_hi = edges[band * 2], edges[band * 2 - 1]
+        if gain_q16 < lo and lo > prev_hi:
+            t_q24 = ((gain_q16 - prev_hi) << 24) // (lo - prev_hi)
+
+    return band, t_q24
+
+
+def word(blob: bytes, band: int, t_q24: int, index: int) -> int:
+    """One payload word, blended into the previous band's when mid-gap."""
+    value = struct.unpack_from("<I", blob, PAYLOAD + band * STRIDE + index * 4)[0]
+    if t_q24:
+        prev = struct.unpack_from("<I", blob,
+                                  PAYLOAD + (band - 1) * STRIDE + index * 4)[0]
+        value = blend(prev, value, t_q24)
+
+    return value
+
+
+def tail_from_blob(blob: bytes, gain_q16: int) -> list[int]:
+    """Mirror ar_isp_rnr_tail_from_blob word for word."""
+    band, t_q24 = select(blob, gain_q16)
+
+    def pack(index: int, n: int, mask: int, step: int) -> int:
+        out = 0
+        for i in range(n):
+            out |= (word(blob, band, t_q24, index + i) & mask) << (i * step)
+
+        return out
+
+    regs: list[int] = []
+    index = TAIL_WORD
+    for _ in range(TRIPLES):
+        regs.append(pack(index, 2, 0xFFF, 16))
+        regs.append(pack(index + 2, 1, 0xFFF, 0))
+        regs.append(pack(index + 3, 4, 0x1F, 8))
+        index += TRIPLE_WORDS
+
+    for _ in range(BLOCKS):
+        regs.append(pack(index, 4, 0xFF, 8))
+        regs.append(pack(index + 4, 4, 0xFF, 8))
+        regs.append(pack(index + 8, 3, 0x1F, 8))
+        regs.append(pack(index + 11, 3, 0x1F, 8))
+        regs.append(pack(index + 14, 3, 0x1F, 8))
+        index += BLOCK_WORDS
+
+    return regs
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--tuning", required=True, help="nt99235 tuning blob")
@@ -146,7 +256,55 @@ def main() -> int:
     print(f"abscissa {hits[0]:.3f}..{hits[-1]:.3f} -> {VENDOR_REG:#010x} x{REGS}, "
           f"the vendor's live bank")
 
-    print("\nrnr ladder agrees with ar-isp-rnr.h and the two measured points")
+    lo, hi = (int(b * 256) for b in BRACKET)
+    bad = [g / 256 for g in range(lo, hi + 1)
+           if tail_from_blob(blob, (g << 16) // 256) != list(TAIL_MEASURED)]
+    if bad:
+        sys.exit(f"the tail disagrees with the vendor's writes at abscissa "
+                 f"{bad[0]} ({len(bad)} of {hi - lo + 1} in the bracket)")
+
+    print(f"tail 0x{TAIL_BASE:04x}..0x{TAIL_BASE + 4 * (TAIL_REGS - 1):04x} "
+          f"reproduces all {TAIL_REGS} vendor writes across the whole "
+          f"{BRACKET[0]} to {BRACKET[1]} bracket")
+
+    # The point of deriving the tail rather than replaying it: past the fourth
+    # band the packed fields move, and a replay cannot follow them.
+    moved = sum(1 for a, b in zip(tail_from_blob(blob, 16 << 16), TAIL_MEASURED,
+                                  strict=True)
+                if a != b)
+    if not moved:
+        sys.exit("the tail does not move by abscissa 16.0, so the ladder walk "
+                 "is not reaching the later bands")
+
+    print(f"      and {moved} of them move by abscissa 16.0, which is what the "
+          f"replay had frozen")
+
+    # The live slot-A point. The ladder and the tail must agree on an abscissa
+    # jointly, and the tail must be the one that narrows the window: if it
+    # accepted everything the ladder does, it would not be constraining the
+    # arithmetic at all.
+    lo, hi = (int(b * 256) for b in LIVE_WINDOW)
+    from_ladder = [g / 256 for g in range(lo, hi + 1)
+                   if rnr_from_blob(blob, (g << 16) // 256) == [LIVE_LADDER_REG] * REGS]
+    joint = [g for g in from_ladder
+             if tail_from_blob(blob, int(g * 65536)) == list(LIVE_TAIL)]
+    if not joint:
+        sys.exit(f"no abscissa in {LIVE_WINDOW} satisfies both the live ladder "
+                 f"and the live tail")
+
+    if len(joint) >= len(from_ladder):
+        sys.exit("the tail accepts every abscissa the ladder does, so it is not "
+                 "constraining the arithmetic")
+
+    print(f"live slot-A bank: ladder alone allows {from_ladder[0]:.3f}.."
+          f"{from_ladder[-1]:.3f}, ladder and tail together allow "
+          f"{joint[0]:.3f}..{joint[-1]:.3f}")
+
+    frozen = sum(1 for a, b in zip(LIVE_TAIL, TAIL_MEASURED, strict=True) if a != b)
+    print(f"      {frozen} of the 22 differ from the setup-trace values, so the "
+          f"replay was wrong at this gain")
+
+    print("\nrnr ladder agrees with ar-isp-rnr.h and the three measured points")
     return 0
 
 

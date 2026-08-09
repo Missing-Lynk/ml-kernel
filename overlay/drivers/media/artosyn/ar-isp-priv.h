@@ -19,6 +19,7 @@
 #include <linux/types.h>
 
 #include "vendor-tables/ar-isp-defaults.h"
+#include "vendor-tables/ar-isp-library.h"
 
 struct device;
 struct dentry;
@@ -112,6 +113,17 @@ static inline void ar_isp_apply(struct ar_isp *isp, const struct ar_isp_reg *tbl
 }
 
 /*
+ * One register whose bits are shared between producers: the stage owns the mask
+ * and every other bit keeps the value the replay left.
+ */
+static inline void ar_isp_rmw(struct ar_isp *isp, u32 off, u32 mask, u32 val)
+{
+	u32 old = readl(isp->base + off);
+
+	writel((old & ~mask) | (val & mask), isp->base + off);
+}
+
+/*
  * ar-isp-tables.c. The whole crossing surface: everything else in that file is
  * reached through one of these.
  */
@@ -124,6 +136,8 @@ void ar_isp_dpc_apply(struct ar_isp *isp);
 void ar_isp_rnr_apply(struct ar_isp *isp, bool verbose);
 void ar_isp_lnr_apply(struct ar_isp *isp, bool verbose);
 void ar_isp_de3d_apply(struct ar_isp *isp, bool verbose);
+void ar_isp_cfa_apply(struct ar_isp *isp, bool verbose);
+void ar_isp_cnf_apply(struct ar_isp *isp, bool verbose);
 void ar_isp_tables_apply(struct ar_isp *isp);
 void ar_isp_tables_prepare(struct ar_isp *isp);
 void ar_isp_tables_release(struct ar_isp *isp);

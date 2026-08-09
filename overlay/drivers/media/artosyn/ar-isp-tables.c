@@ -15,7 +15,7 @@
  *
  * The register stages that read a ladder out of the tuning blob live here too,
  * because they are recomputed from the same blob on the same gain moves as the
- * pages are: rnr, lnr, de3d, ccm and dpc.
+ * pages are: rnr, lnr, de3d, cfa, cnf, ccm and dpc.
  *
  * ar-isp-main.c owns probe, configure, the interrupt, debugfs and remove, and
  * calls into this file through the declarations in ar-isp-priv.h.
@@ -41,6 +41,8 @@
 #include "ar-isp-rnr.h"
 #include "ar-isp-lnr.h"
 #include "ar-isp-de3d.h"
+#include "ar-isp-cfa.h"
+#include "ar-isp-cnf.h"
 
 /*
  * Only reachable now when the tuning file is missing or a table is switched off:
@@ -113,12 +115,12 @@ MODULE_PARM_DESC(ltm,
 		 "own the LTM page and statistics buffer, publishing an identity curve (default on)");
 
 /*
- * The ladder abscissa is 3A state the vendor computes per frame; without an AE
- * loop the operating point stands in for it. 1.0 selects band 0 verbatim,
- * which is byte-identical to the replayed cold bank, so the default changes no
- * register value, only its provenance. The abscissa's physical unit is not the
- * sensor analog multiplier (plans/au-blend-engine-and-notch.md section 2), so
- * no value derived from the gain code is wired up until that unit is pinned.
+ * The ladder abscissa is 3A state the vendor computes per frame: the commanded
+ * gain, the Q8 exposure-table value of the AE's selected entry divided by 256.
+ * The loop drives these parameters at frame rate through the ladders hook; the
+ * default of 1.0 is the operating point a boot starts from, and it selects band
+ * 0 verbatim, which is byte-identical to the replayed cold bank, so the default
+ * changes no register value, only its provenance.
  */
 static int rnr_gain = 256;
 module_param(rnr_gain, int, 0644);
@@ -134,6 +136,16 @@ static int de3d_gain = 256;
 module_param(de3d_gain, int, 0644);
 MODULE_PARM_DESC(de3d_gain,
 		 "de3d ladder abscissa as a Q8 linear gain (default 256 = 1.0, the cold band; -1 leaves the replayed bank alone)");
+
+static int cfa_gain = 256;
+module_param(cfa_gain, int, 0644);
+MODULE_PARM_DESC(cfa_gain,
+		 "cfa ladder abscissa as a Q8 linear gain (default 256 = 1.0, the cold band; -1 leaves the replayed bank alone)");
+
+static int cnf_gain = 256;
+module_param(cnf_gain, int, 0644);
+MODULE_PARM_DESC(cnf_gain,
+		 "cnf ladder abscissa as a Q8 linear gain (default 256 = 1.0, the cold band; -1 leaves the replayed bank alone)");
 
 /*
  * Copy the page the vendor left at a fixed physical address into one of our
@@ -362,15 +374,19 @@ void ar_isp_dpc_apply(struct ar_isp *isp)
 
 /*
  * Noise reduction. The replay carries the vendor's cold bank; this recomputes
- * the twelve ladder registers from the tuning file the way the vendor's rnr
- * driver does on every gain move, so the values are derived rather than
- * replayed. At the default abscissa of 1.0 the result is byte-identical to the
- * replay. The bank control word stays with the replay: its mode bit mirrors
+ * the twelve ladder registers and the twenty-two that follow them from the
+ * tuning file the way the vendor's rnr driver does on every gain move, so the
+ * values are derived rather than replayed. At the default abscissa of 1.0 the
+ * result is byte-identical to the replay, and the tail stays identical to it
+ * up to 8.09 because the fields it packs are the same in the first four bands.
+ * Past that six of the tail registers move, which is what the replay could not
+ * follow. The bank control word stays with the replay: its mode bit mirrors
  * the blob's header flag, and both read 0.
  */
 void ar_isp_rnr_apply(struct ar_isp *isp, bool verbose)
 {
 	u32 regs[AR_ISP_RNR_REGS];
+	u32 tail[AR_ISP_RNR_TAIL_REGS];
 	const u8 *blob;
 
 	if (rnr_gain < 0)
@@ -398,10 +414,15 @@ void ar_isp_rnr_apply(struct ar_isp *isp, bool verbose)
 	}
 
 	ar_isp_rnr_from_blob(regs, blob, (u32)rnr_gain << 8);
+	ar_isp_rnr_tail_from_blob(tail, blob, (u32)rnr_gain << 8);
 
 	for (unsigned int i = 0; i < AR_ISP_RNR_REGS; i++)
 		writel(regs[i], isp->base + AR_ISP_RNR_BANK +
 		       AR_ISP_RNR_LADDER + i * 4);
+
+	for (unsigned int i = 0; i < AR_ISP_RNR_TAIL_REGS; i++)
+		writel(tail[i], isp->base + AR_ISP_RNR_BANK +
+		       AR_ISP_RNR_TAIL + i * 4);
 
 	if (verbose)
 		dev_info(isp->dev, "rnr: ladder at gain %d.%03u, 0x%04x..0x%04x = 0x%08x\n",
@@ -514,6 +535,108 @@ void ar_isp_de3d_apply(struct ar_isp *isp, bool verbose)
 			 AR_ISP_DE3D_REGS,
 			 AR_ISP_DE3D_BANK + ar_isp_de3d_regs[0].off,
 			 AR_ISP_DE3D_BANK + ar_isp_de3d_regs[AR_ISP_DE3D_REGS - 1].off);
+}
+
+/*
+ * Demosaic. The vendor recomputes this bank from the cfa ladder on the same
+ * gain moves as rnr, lnr and de3d. The whole payload record lands in 41 of the
+ * bank's registers as four ascending runs; the registers the runs step over
+ * keep their replayed values, and 0x0800 shares its word with bits owned
+ * elsewhere, so it is read-modify-written under the ladder mask.
+ */
+void ar_isp_cfa_apply(struct ar_isp *isp, bool verbose)
+{
+	u32 regs[AR_ISP_CFA_REGS];
+	const u8 *blob;
+	unsigned int run, k, i = 0;
+
+	if (cfa_gain < 0)
+		return;
+
+	if (!isp->tuning) {
+		if (verbose)
+			dev_info(isp->dev, "cfa: replayed bank only, no tuning file\n");
+
+		return;
+	}
+
+	blob = isp->tuning->data;
+	if (ar_isp_get_le32(blob + AR_ISP_CFA_BLOB_HEADER +
+			    AR_ISP_LADDER_HDR_ENABLE) != 1) {
+		if (verbose)
+			dev_info(isp->dev, "cfa: tuning gate clear, bank left replayed\n");
+
+		return;
+	}
+
+	ar_isp_cfa_from_blob(regs, blob, (u32)cfa_gain << 8);
+
+	for (run = 0; run < AR_ISP_CFA_RUNS; run++) {
+		for (k = 0; k < ar_isp_cfa_runs[run].count; k++, i++) {
+			u32 off = AR_ISP_CFA_BANK + ar_isp_cfa_runs[run].reg +
+				  k * 4;
+
+			if (off == AR_ISP_CFA_BANK) {
+				ar_isp_rmw(isp, off, AR_ISP_CFA_HEAD_MASK,
+					   regs[i]);
+				continue;
+			}
+
+			writel(regs[i], isp->base + off);
+		}
+	}
+
+	if (verbose)
+		dev_info(isp->dev, "cfa: ladder at gain %d.%03u, %u registers in 0x%04x..0x%04x\n",
+			 cfa_gain >> 8, (cfa_gain & 0xff) * 1000 / 256,
+			 AR_ISP_CFA_REGS, AR_ISP_CFA_BANK,
+			 AR_ISP_CFA_BANK + ar_isp_cfa_runs[AR_ISP_CFA_RUNS - 1].reg +
+			 (ar_isp_cfa_runs[AR_ISP_CFA_RUNS - 1].count - 1) * 4);
+}
+
+/*
+ * Chroma noise filter. Three registers carry ladder output, all keyed on one
+ * strength: the strength itself and two reciprocal-square normalisations of it.
+ * Each shares its word with bits owned elsewhere, so each write is a
+ * read-modify-write under its own mask. This ladder carries no header, so there
+ * is no tuning gate to read: the module parameter is the only gate.
+ */
+void ar_isp_cnf_apply(struct ar_isp *isp, bool verbose)
+{
+	u32 strength;
+
+	if (cnf_gain < 0)
+		return;
+
+	if (!isp->tuning) {
+		if (verbose)
+			dev_info(isp->dev, "cnf: replayed bank only, no tuning file\n");
+
+		return;
+	}
+
+	strength = ar_isp_cnf_strength_from_blob(isp->tuning->data,
+						 (u32)cnf_gain << 8);
+
+	ar_isp_rmw(isp, AR_ISP_CNF_STRENGTH_REG, AR_ISP_CNF_STRENGTH_MASK,
+		   ar_isp_cnf_pack(strength));
+	ar_isp_rmw(isp, AR_ISP_CNF_NORM_REG_A, AR_ISP_CNF_NORM_MASK,
+		   ar_isp_cnf_norm_pack(strength) | AR_ISP_CNF_NORM_A_BIT);
+	ar_isp_rmw(isp, AR_ISP_CNF_NORM_REG_B, AR_ISP_CNF_NORM_B_MASK,
+		   ar_isp_cnf_norm_pack(AR_ISP_CNF_NORM_CONST_B));
+
+	for (unsigned int i = 0; i < AR_ISP_CNF_STATIC_REGS; i++) {
+		u32 mask;
+		u32 val = ar_isp_cnf_static_pack(isp->tuning->data, i, &mask);
+
+		ar_isp_rmw(isp, AR_ISP_CNF_STATIC_REG + i * 4, mask, val);
+	}
+
+	if (verbose)
+		dev_info(isp->dev, "cnf: ladder at gain %d.%03u, strength %u, 0x%04x/0x%04x/0x%04x\n",
+			 cnf_gain >> 8, (cnf_gain & 0xff) * 1000 / 256, strength,
+			 AR_ISP_CNF_STRENGTH_REG, AR_ISP_CNF_NORM_REG_A,
+			 AR_ISP_CNF_NORM_REG_B);
 }
 
 /*

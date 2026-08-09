@@ -16,8 +16,15 @@ VMA_TO_FILE = 0x10000
 
 # ISP-init template array: the contiguous {u64 source, u64 length} descriptor
 # list the service copies its static payloads from. See docs/camera-stack.md.
-TEMPLATE_ARRAY_VMA = 0x472600
-TEMPLATE_ENTRIES = 56
+#
+# The library carries one array per SoC in the family, reached by name through
+# the registry in .__ar_app_list__list: ar9341_isp_init_hw_opt returns 0x472600,
+# ar9311_isp_init_hw_opt returns this one, ar9411_isp_init_hw_opt returns
+# 0x4a9c00. This device is an AR9311, so the ar9311 array is the one that
+# applies. Thirteen of the 76 entries differ between the three, and the array
+# ends where the ops object it belongs to begins, at +0x4c0.
+TEMPLATE_ARRAY_VMA = 0x48C770
+TEMPLATE_ENTRIES = 76
 TEMPLATE_ENTRY_BYTES = 16
 
 

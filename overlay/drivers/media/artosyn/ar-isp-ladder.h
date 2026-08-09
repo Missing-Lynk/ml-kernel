@@ -12,18 +12,17 @@
  * and truncates toward zero on the way to the registers.
  *
  * The abscissa is a linear gain multiplier with unity at 1.0: the band edges
- * are powers of two from 1 to 2048. It is delivered by the 3A object, and
- * which physical gain quantity feeds it is not settled; the vendor's live
- * registers demand a value 4.5x below the sensor's analog multiplier
- * (plans/au-blend-engine-and-notch.md section 2). Callers therefore pass the
- * abscissa explicitly.
+ * are powers of two from 1 to 2048. It is the 3A loop's commanded gain, the
+ * Q8 exposure-table value of the selected entry divided by 256. Callers pass
+ * it explicitly, in Q16.
  *
- * Three stages are carried, one header each: ar-isp-rnr.h, ar-isp-lnr.h and
- * ar-isp-de3d.h. Each holds its stage's blob offsets, its register bank map
- * and its packer, and instantiates one struct ar_isp_ladder for the selector
- * here. The user-strength stages of the vendor drivers are the identity at
- * their default of 50 and nothing in this stack sets a strength, so they are
- * not carried.
+ * Five stages are carried, one header each: ar-isp-rnr.h, ar-isp-lnr.h,
+ * ar-isp-de3d.h, ar-isp-cfa.h and ar-isp-cnf.h. Each holds its stage's blob
+ * offsets, its register bank map and its packer, and instantiates one struct
+ * ar_isp_ladder for the selector here, or calls the band walk directly where
+ * its ladder carries no header. The user-strength stages of the vendor drivers
+ * are the identity at their default of 50 and nothing in this stack sets a
+ * strength, so they are not carried.
  *
  * Pure data transforms: no register access and no kernel API beyond the
  * integer types, so the same source can be compiled host-side against the
@@ -135,21 +134,20 @@ static inline s32 ar_isp_ladder_blend_s32(s32 from, s32 to, u32 t_q24)
  * the exact blend lands within that distance of an integer; every measured
  * register state reproduces exactly.
  */
-static inline void ar_isp_ladder_select(const struct ar_isp_ladder *ladder,
-					const u8 *blob, u32 gain_q16,
-					unsigned int *band_out, u32 *t_q24_out)
+static inline void ar_isp_ladder_walk(const u8 *bands, u32 count, u32 interp,
+				      u32 gain_q16, unsigned int *band_out,
+				      u32 *t_q24_out)
 {
-	const u8 *hdr = blob + ladder->hdr;
-	const u8 *bands = blob + ladder->bands;
-	u32 count = ar_isp_get_le32(hdr + ladder->count_off);
-	u32 interp = ar_isp_get_le32(hdr + AR_ISP_LADDER_HDR_INTERP);
 	unsigned int band;
 	u32 t_q24 = 0;
 
-	if (count < 1 || count > ladder->max_bands)
-		count = ladder->max_bands;
-
-	for (band = 0; band < count - 1; band++)
+	/*
+	 * band + 1 < count rather than band < count - 1: count is unsigned, so
+	 * an empty ladder would underflow the bound and walk the whole u32
+	 * range off the end of the array. The two forms agree for every count
+	 * a caller passes.
+	 */
+	for (band = 0; band + 1 < count; band++)
 		if (gain_q16 <= ar_isp_ladder_hi(bands, band))
 			break;
 
@@ -165,6 +163,26 @@ static inline void ar_isp_ladder_select(const struct ar_isp_ladder *ladder,
 
 	*band_out = band;
 	*t_q24_out = t_q24;
+}
+
+/*
+ * The same walk for a stage whose ladder carries the standard four-word header,
+ * taking the band count and the interpolate flag from the file. A count outside
+ * the allocated band array is a corrupt file and falls back to the allocation.
+ */
+static inline void ar_isp_ladder_select(const struct ar_isp_ladder *ladder,
+					const u8 *blob, u32 gain_q16,
+					unsigned int *band_out, u32 *t_q24_out)
+{
+	const u8 *hdr = blob + ladder->hdr;
+	u32 count = ar_isp_get_le32(hdr + ladder->count_off);
+
+	if (count < 1 || count > ladder->max_bands)
+		count = ladder->max_bands;
+
+	ar_isp_ladder_walk(blob + ladder->bands, count,
+			   ar_isp_get_le32(hdr + AR_ISP_LADDER_HDR_INTERP),
+			   gain_q16, band_out, t_q24_out);
 }
 
 /* One payload word at the selected band, blended into the band above it. */

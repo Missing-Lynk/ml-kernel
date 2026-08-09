@@ -230,13 +230,32 @@ static const struct ar_isp_reg ar_isp_lnr_fix[] = {
 };
 
 /*
- * Apply the whole configuration. The recovered table goes first: those are
- * registers that have a static default in the vendor library but which the
- * vendor never writes, because it pushes its shadow image with a
- * write-only-if-changed primitive and they already held the right value. They
- * are absent from any trace by construction, so nothing else would set them.
+ * The two registers of ar_isp_recovered that the block keeps.
  *
- * The setup table then runs in write order. Order matters: it contains the
+ * ar_isp_recovered was built on the premise that each vendor submodule default
+ * block is a 64-register page. It is not: a block is the length its descriptor
+ * in the ISP-init template array gives, and every submodule image shorter than
+ * a page had the following bytes of the library data segment emitted after it
+ * as if they were registers. vendor-tables/ar-isp-library.h carries the images
+ * at their true length; scripts/isp/check-isp-library.py measures the overrun.
+ *
+ * All 328 entries of ar_isp_recovered fall in that overrun, and every register
+ * a submodule image does cover is already in the setup table, so the table
+ * contributes nothing a vendor image backs. 323 of the entries are the last
+ * write to their register, and 321 of those read back zero on both the vendor
+ * device and this one, which is the block discarding them. These two are the
+ * pair that reads back what was written, on both, so they are kept rather than
+ * assumed inert.
+ */
+static const struct ar_isp_reg ar_isp_kept[] = {
+	{ 0x6518, 0x00000001 },
+	{ 0x651c, 0x00000001 },
+};
+
+/*
+ * Apply the whole configuration.
+ *
+ * The setup table runs in write order. Order matters: it contains the
  * staged master enable and several arm-then-load registers whose result
  * depends on the sequence. It carries no timing, only order.
  *
@@ -248,7 +267,7 @@ static const struct ar_isp_reg ar_isp_lnr_fix[] = {
  */
 static void ar_isp_configure(struct ar_isp *isp)
 {
-	ar_isp_apply(isp, ar_isp_recovered, ARRAY_SIZE(ar_isp_recovered));
+	ar_isp_apply(isp, ar_isp_kept, ARRAY_SIZE(ar_isp_kept));
 	ar_isp_apply(isp, ar_isp_setup_1080p60,
 		     ARRAY_SIZE(ar_isp_setup_1080p60));
 
@@ -275,8 +294,8 @@ static void ar_isp_configure(struct ar_isp *isp)
 	isp->configured = true;
 
 	dev_info(isp->dev,
-		 "configured: %zu recovered + %zu ordered + %zu trim + %zu output fix, control 0x%08x\n",
-		 ARRAY_SIZE(ar_isp_recovered),
+		 "configured: %zu kept + %zu ordered + %zu trim + %zu output fix, control 0x%08x\n",
+		 ARRAY_SIZE(ar_isp_kept),
 		 ARRAY_SIZE(ar_isp_setup_1080p60),
 		 trim ? ARRAY_SIZE(ar_isp_vendor_trim) : 0,
 		 ARRAY_SIZE(ar_isp_output_fix),
@@ -400,6 +419,8 @@ static void ar_isp_arm_output(struct ar_isp *isp)
 	ar_isp_rnr_apply(isp, true);
 	ar_isp_lnr_apply(isp, true);
 	ar_isp_de3d_apply(isp, true);
+	ar_isp_cfa_apply(isp, true);
+	ar_isp_cnf_apply(isp, true);
 	ar_isp_dpc_apply(isp);
 
 	if (gib)
@@ -463,7 +484,7 @@ static void ar_isp_configure_prefix(struct ar_isp *isp, size_t n)
 	if (n > ARRAY_SIZE(ar_isp_setup_1080p60))
 		n = ARRAY_SIZE(ar_isp_setup_1080p60);
 
-	ar_isp_apply(isp, ar_isp_recovered, ARRAY_SIZE(ar_isp_recovered));
+	ar_isp_apply(isp, ar_isp_kept, ARRAY_SIZE(ar_isp_kept));
 	ar_isp_apply(isp, ar_isp_setup_1080p60, n);
 
 	/*
@@ -527,6 +548,8 @@ static int ar_isp_ladders_set(void *data, u64 val)
 		ar_isp_rnr_apply(isp, false);
 		ar_isp_lnr_apply(isp, false);
 		ar_isp_de3d_apply(isp, false);
+		ar_isp_cfa_apply(isp, false);
+		ar_isp_cnf_apply(isp, false);
 	}
 
 	return 0;
@@ -761,7 +784,7 @@ static int ar_isp_probe(struct platform_device *pdev)
 		isp->irq = platform_get_irq(pdev, 0);
 
 	dev_info(dev, "probed, %zu registers available to apply\n",
-		 ARRAY_SIZE(ar_isp_recovered) +
+		 ARRAY_SIZE(ar_isp_kept) +
 		 ARRAY_SIZE(ar_isp_setup_1080p60));
 
 	return 0;

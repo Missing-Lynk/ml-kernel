@@ -24,6 +24,7 @@ import hashlib
 import re
 import struct
 import sys
+import textwrap
 from collections.abc import Iterator, Sequence
 
 import arlib
@@ -159,6 +160,20 @@ def load_window(path: str) -> dict[int, int]:
     return regs
 
 
+# Registers the live-against-live diff surfaces but must not carry, with the
+# reason each was ruled out. The diff sees a difference; it cannot see why, so
+# anything a later recovery explains has to be named here or it ships twice,
+# once derived and once replayed over the top.
+TRIM_EXCLUDED: dict[int, str] = {
+    0x0834: 'hardware-written: a known value written here reads back as '
+            'something else on two independent boots, and the cfa packer '
+            'stores to no such offset',
+    0x08a8: 'hardware-written, same evidence as 0x0834',
+    0x3c64: 'derived from the cnf ladder in ar-isp-cnf.h',
+    0x3c84: 'derived from the cnf strength normalisation in ar-isp-cnf.h',
+}
+
+
 def load_trim(vendor_path: str | None,
               our_path: str | None) -> list[tuple[int, int]]:
     """
@@ -166,6 +181,9 @@ def load_trim(vendor_path: str | None,
 
     Live against live, which is the only valid comparison: our intended value is
     not a baseline, and a register can legitimately read back something else.
+
+    TRIM_EXCLUDED entries are dropped, so a register a stage now derives cannot
+    also be replayed on top of it.
     """
     if not vendor_path or not our_path:
         return []
@@ -173,7 +191,7 @@ def load_trim(vendor_path: str | None,
     vendor = load_window(vendor_path)
     ours = load_window(our_path)
     return [(off, vendor[off]) for off in sorted(set(vendor) & set(ours))
-            if vendor[off] != ours[off]]
+            if vendor[off] != ours[off] and off not in TRIM_EXCLUDED]
 
 
 def agree_span(lib: bytes, bases: Sequence[int], lo: int,
@@ -359,6 +377,15 @@ def main() -> None:
             emit(' * Some entries are certainly counters and status words that\n')
             emit(' * ignore writes. Writing them is harmless and they cannot be\n')
             emit(' * told apart from configuration with a single sample each.\n')
+            emit(' *\n')
+            emit(' * Registers the diff surfaced and this table deliberately\n')
+            emit(' * leaves out, each with the reason it was ruled out:\n')
+            for off, reason in sorted(TRIM_EXCLUDED.items()):
+                wrapped = textwrap.wrap(f'0x{off:04x}: {reason}', 58)
+                emit(f' *   {wrapped[0]}\n')
+                for line in wrapped[1:]:
+                    emit(f' *     {line}\n')
+
             emit(' */\n')
             emit('static const struct ar_isp_reg ar_isp_vendor_trim[] = {\n')
             for off, val in trim:
