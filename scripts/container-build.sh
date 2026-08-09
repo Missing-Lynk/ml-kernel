@@ -133,8 +133,9 @@ if [ -z "$MINIMAL" ] && [ -f /repo/configs/artosyn.config ]; then
   #   asked ON  -> fail if the symbol is absent entirely (dropped or gone upstream)
   #   asked OFF -> fail if it came back on (something select's it)
   # m-vs-y is not compared: a select can legitimately promote =m to =y.
-  # Advisory by default because the tree carries known-stale entries; STRICT_FRAGMENTS=1 makes
-  # it fatal, which is where this should land once those are cleaned up.
+  # Fatal by default: the tree is clean, so any finding here is a real regression - a fragment
+  # symbol that stopped taking, usually because a kernel bump renamed it or something started
+  # select'ing it back on. LAX_FRAGMENTS=1 downgrades it to a warning for bisecting a bump.
   for f in $frags; do
     grep -E '^(CONFIG_[A-Za-z0-9_]+=|# CONFIG_[A-Za-z0-9_]+ is not set)' "$f"
   done | awk '
@@ -155,11 +156,13 @@ if [ -z "$MINIMAL" ] && [ -f /repo/configs/artosyn.config ]; then
 
   if [ -s /tmp/fragcheck.out ]; then
     cat /tmp/fragcheck.out >&2
-    if [ -n "${STRICT_FRAGMENTS:-}" ]; then
-      echo "fragment check: FAILED ($(wc -l < /tmp/fragcheck.out) symbols); STRICT_FRAGMENTS is set" >&2
+    if [ -z "${LAX_FRAGMENTS:-}" ]; then
+      echo "fragment check: FAILED ($(wc -l < /tmp/fragcheck.out) symbols did not take)." >&2
+      echo "  A promptless or select'ed symbol cannot be turned off by a fragment line: find what" >&2
+      echo "  select's it and disable that instead. LAX_FRAGMENTS=1 downgrades this to a warning." >&2
       exit 1
     fi
-    echo "fragment check: $(wc -l < /tmp/fragcheck.out) symbols did not take (advisory)" >&2
+    echo "fragment check: $(wc -l < /tmp/fragcheck.out) symbols did not take (LAX_FRAGMENTS)" >&2
   else
     echo "[fragment check] OK"
   fi
