@@ -83,10 +83,15 @@ do_build(){  # tree-dir
   fetch "$TOOLCHAIN_URL" "$TOOLCHAIN_SHA256" "$BUILD_DIR/dl/toolchain.tar.xz"
   fetch "$KERNEL_URL"    "$KERNEL_SHA256"    "$BUILD_DIR/dl/linux.tar.xz"
 
+  # Extract into a temp dir and mv into place, so the guard below tests COMPLETION and not
+  # merely existence: an interrupted extract otherwise leaves a half-populated toolchain/
+  # that every later run then skips, and the build fails on a missing compiler forever.
   if [ ! -d "$BUILD_DIR/toolchain" ]; then
     log "extract toolchain"
-    mkdir -p "$BUILD_DIR/toolchain"
-    tar -C "$BUILD_DIR/toolchain" --strip-components=1 -xf "$BUILD_DIR/dl/toolchain.tar.xz"
+    rm -rf "$BUILD_DIR/toolchain.tmp"
+    mkdir -p "$BUILD_DIR/toolchain.tmp"
+    tar -C "$BUILD_DIR/toolchain.tmp" --strip-components=1 -xf "$BUILD_DIR/dl/toolchain.tar.xz"
+    mv "$BUILD_DIR/toolchain.tmp" "$BUILD_DIR/toolchain"
   fi
 
   local cc_bin tc_root
