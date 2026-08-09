@@ -2224,6 +2224,6 @@ static void __exit artosyn_sdio_exit(void)
 module_init(artosyn_sdio_init);
 module_exit(artosyn_sdio_exit);
 
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("missinglynk (open reimplementation of Artosyn artosyn_sdio)");
 MODULE_DESCRIPTION("Open AR8030 RF-link SDIO driver (FPV video downlink) for missinglynk");
+MODULE_AUTHOR("missinglynk");
+MODULE_LICENSE("GPL");

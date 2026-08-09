@@ -351,6 +351,6 @@ module_exit(ml_dmablit_exit);
 /* dma_buf_* live in the DMA_BUF symbol namespace; importing it is required to link. */
 MODULE_IMPORT_NS("DMA_BUF");
 
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("missinglynk");
 MODULE_DESCRIPTION("Batched dmabuf memcpy over dw-axi-dmac");
+MODULE_AUTHOR("missinglynk");
+MODULE_LICENSE("GPL");

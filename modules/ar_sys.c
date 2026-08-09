@@ -254,6 +254,6 @@ static void __exit ar_sys_exit(void)
 module_init(ar_sys_init);
 module_exit(ar_sys_exit);
 
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("missinglynk (open reimpl)");
 MODULE_DESCRIPTION("Artosyn /dev/ar_sys: PTS/timezone/GPS/cache (open)");
+MODULE_AUTHOR("missinglynk");
+MODULE_LICENSE("GPL");

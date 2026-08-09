@@ -196,4 +196,5 @@ static struct platform_driver ar_gpio_driver = {
 module_platform_driver(ar_gpio_driver);
 
 MODULE_DESCRIPTION("Artosyn Proxima GPIO controller");
+MODULE_AUTHOR("missinglynk");
 MODULE_LICENSE("GPL");

@@ -677,6 +677,6 @@ static struct platform_driver ar_mpp_driver = {
 };
 module_platform_driver(ar_mpp_driver);
 
-MODULE_LICENSE("GPL v2");
-MODULE_AUTHOR("missinglynk (open reimpl)");
 MODULE_DESCRIPTION("Artosyn /dev/ar_mpp_ctl GIC-IRQ forwarder (open)");
+MODULE_AUTHOR("missinglynk");
+MODULE_LICENSE("GPL");

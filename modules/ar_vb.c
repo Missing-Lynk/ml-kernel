@@ -601,6 +601,6 @@ static void __exit ar_vb_exit(void)
 module_init(ar_vb_init);
 module_exit(ar_vb_exit);
 
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("missinglynk (open reimpl)");
 MODULE_DESCRIPTION("Artosyn /dev/ar_vb video-buffer pool (open)");
+MODULE_AUTHOR("missinglynk");
+MODULE_LICENSE("GPL");

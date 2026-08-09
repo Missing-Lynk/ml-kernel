@@ -4,6 +4,22 @@ Out-of-tree modules for the open 6.18.36 kernel. The RF driver and the board-per
 
 The MPP-stack reimplementations (`ar_osal`, `ar_vb`, `ar_sys`, `ar_sysctl`, `ar_mpp_drv`, `ar_mpp_proc_ctrl`, `ar_scaler`, `ar_mpp_overlay`) are **reference only**: compile-checked, not shipped in the rootfs, not loaded at boot (full rationale: the pivot note in `VERIFICATION.md`; per-module detail: the "Reference" section below).
 
+## Naming
+
+A module is named after the vendor `.ko` it replaces. The `ar_` / `artosyn_` split is the vendor's; do not unify it.
+
+| Prefix | Applies to | Modules |
+|---|---|---|
+| `artosyn_` | registers with a standard Linux subsystem | `artosyn_adc`, `artosyn_protemp` (IIO), `artosyn_gpio` (gpiochip), `artosyn_pwm` (pwmchip), `artosyn_sdio` (SDIO func + netdev), `artosyn_mmc` (mmc host) |
+| `ar_` | custom `/dev` char node with its own ioctl ABI, or a DT-overlay helper | `ar_mpp_drv` (`/dev/ar_mpp_ctl`), `ar_osal` (`/dev/mmz_userdev`), `ar_scaler` (`/dev/arscaler`), `ar_vb`, `ar_sys`, `ar_sysctl`, `ar_mpp_proc_ctrl`, `ar_mpp_overlay` |
+| `ml_` | no vendor counterpart | `ml_dmablit`, `ml_mmzheap` |
+
+Two exceptions: there is no vendor `artosyn_mmc.ko`, and `dw_mci-artosyn.c` follows mainline's platform-glue convention (`dw_mci-exynos.c`).
+
+## Module metadata
+
+`MODULE_DESCRIPTION`, `MODULE_AUTHOR`, `MODULE_LICENSE`, in that order, in every module. `MODULE_AUTHOR("missinglynk")` and `MODULE_LICENSE("GPL")` verbatim; per-module provenance goes in the file header, not `MODULE_AUTHOR`. `"GPL"` and `"GPL v2"` are identical to the module loader (`include/linux/module.h`). A missing `MODULE_DESCRIPTION` is a `W=1` warning since 6.9.
+
 ## Build (out-of-tree, dev iteration)
 
 ```sh

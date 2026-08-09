@@ -52,6 +52,6 @@ static void __exit ar_mpp_overlay_exit(void)
 module_init(ar_mpp_overlay_init);
 module_exit(ar_mpp_overlay_exit);
 
-MODULE_LICENSE("GPL v2");
-MODULE_AUTHOR("missinglynk (open reimpl)");
 MODULE_DESCRIPTION("Runtime DT overlay: ar_mpp ahb_dma/axi_dma children for the nr6 query");
+MODULE_AUTHOR("missinglynk");
+MODULE_LICENSE("GPL");

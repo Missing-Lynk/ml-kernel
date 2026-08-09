@@ -253,4 +253,5 @@ static struct platform_driver ar_protemp_driver = {
 module_platform_driver(ar_protemp_driver);
 
 MODULE_DESCRIPTION("Artosyn Proxima SoC temperature sensor (protemp)");
+MODULE_AUTHOR("missinglynk");
 MODULE_LICENSE("GPL");

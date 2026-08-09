@@ -264,6 +264,6 @@ static void __exit ar_sysctl_exit(void)
 module_init(ar_sysctl_init);
 module_exit(ar_sysctl_exit);
 
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("missinglynk (open reimpl)");
 MODULE_DESCRIPTION("Artosyn /dev/ar_sysctl: 32-slot priority/suspend arbiter (open)");
+MODULE_AUTHOR("missinglynk");
+MODULE_LICENSE("GPL");

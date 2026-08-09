@@ -139,4 +139,5 @@ static struct platform_driver ar_pwm_driver = {
 module_platform_driver(ar_pwm_driver);
 
 MODULE_DESCRIPTION("Artosyn Proxima ar9301 PWM (backlight/buzzer)");
+MODULE_AUTHOR("missinglynk");
 MODULE_LICENSE("GPL");

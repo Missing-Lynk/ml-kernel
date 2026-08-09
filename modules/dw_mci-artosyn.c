@@ -204,4 +204,5 @@ static struct platform_driver ar_dwmmc_driver = {
 module_platform_driver(ar_dwmmc_driver);
 
 MODULE_DESCRIPTION("Artosyn Proxima-9311 DesignWare MMC glue");
+MODULE_AUTHOR("missinglynk");
 MODULE_LICENSE("GPL");

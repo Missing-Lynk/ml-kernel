@@ -1097,6 +1097,6 @@ static void __exit ar_osal_exit(void)
 module_init(ar_osal_init);
 module_exit(ar_osal_exit);
 
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("missinglynk (open reimpl)");
 MODULE_DESCRIPTION("Artosyn MMZ allocator + /dev/mmz_userdev (open)");
+MODULE_AUTHOR("missinglynk");
+MODULE_LICENSE("GPL");

@@ -216,4 +216,5 @@ module_init(mmz_heap_init);
 MODULE_IMPORT_NS("DMA_BUF");
 MODULE_IMPORT_NS("DMA_BUF_HEAP");
 MODULE_DESCRIPTION("dma-heap over the shared MMZ reserved-memory pool");
+MODULE_AUTHOR("missinglynk");
 MODULE_LICENSE("GPL");

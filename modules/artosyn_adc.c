@@ -242,4 +242,5 @@ static struct platform_driver ar_adc_driver = {
 module_platform_driver(ar_adc_driver);
 
 MODULE_DESCRIPTION("Artosyn Proxima SAR ADC (button voltage ladder)");
+MODULE_AUTHOR("missinglynk");
 MODULE_LICENSE("GPL");

@@ -417,4 +417,5 @@ static void __exit artosyn_mmc_exit(void)
 module_init(artosyn_mmc_init);
 module_exit(artosyn_mmc_exit);
 MODULE_DESCRIPTION("Artosyn Proxima standalone DesignWare MMC host (re-impl of vendor path)");
+MODULE_AUTHOR("missinglynk");
 MODULE_LICENSE("GPL");

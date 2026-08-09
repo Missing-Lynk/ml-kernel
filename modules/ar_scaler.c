@@ -1334,6 +1334,6 @@ module_platform_driver(ar_scaler_driver);
 /* dma_buf_* (the SCALER_IOC_*_DMABUF resolver) live in the DMA_BUF namespace. */
 MODULE_IMPORT_NS("DMA_BUF");
 
-MODULE_LICENSE("GPL v2");
-MODULE_AUTHOR("missinglynk (open reimpl)");
 MODULE_DESCRIPTION("Artosyn /dev/arscaler MPP scaler / crop-resize engine (open)");
+MODULE_AUTHOR("missinglynk");
+MODULE_LICENSE("GPL");

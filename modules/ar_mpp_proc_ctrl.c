@@ -420,6 +420,6 @@ static struct platform_driver ar_mpp_proc_driver = {
 };
 module_platform_driver(ar_mpp_proc_driver);
 
-MODULE_LICENSE("GPL v2");
-MODULE_AUTHOR("missinglynk (open reimpl)");
 MODULE_DESCRIPTION("Artosyn /dev/ar_mpp_proc_ctl umap shuttle (open)");
+MODULE_AUTHOR("missinglynk");
+MODULE_LICENSE("GPL");
