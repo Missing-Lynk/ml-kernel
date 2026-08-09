@@ -45,6 +45,7 @@
 #include <linux/wait.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
+#include <linux/cleanup.h>
 #include <linux/ktime.h>
 
 #define MPP_MAGIC	'M'
@@ -80,6 +81,12 @@ struct mpp_fd {
 /* one per registered engine IRQ (global; IRQ handler dev_id points here) */
 struct mpp_engine {
 	bool		active;
+	/* Set while free_irq() runs on this slot with reg_lock dropped. The slot stays
+	 * active so the REGISTER allocator skips it: were it reusable here, a concurrent
+	 * REGISTER could re-arm the same virq on this same dev_id and the in-flight
+	 * free_irq() would then tear down the new registration.
+	 */
+	bool		freeing;
 	u32		hwirq;
 	int		virq;
 	struct mpp_fd	*owner;
@@ -102,17 +109,16 @@ static struct {
 
 static int virq_for_hwirq(u32 hwirq)
 {
-	int i;
-
 	/* The vendor daemon's REGISTER passes the id as (gic_hwirq - 0x20), i.e. the raw
 	 * DTS SPI number (h26x sends 68, not the GIC hwirq 100), while our table is built
 	 * from irqd_to_hwirq() (the GIC hwirq, e.g. 100). Match either the id as-is or the
 	 * id + 0x20, so both the daemon's SPI-relative ids and direct GIC hwirqs resolve.
 	 */
-	for (i = 0; i < g.n_irq; i++) {
+	for (int i = 0; i < g.n_irq; i++) {
 		if (g.hwirq_tbl[i] == hwirq || g.hwirq_tbl[i] == hwirq + 0x20)
 			return g.virq_tbl[i];
 	}
+
 	return -ENOENT;
 }
 
@@ -136,8 +142,10 @@ static irqreturn_t mpp_irq_handler(int irq, void *dev_id)
 		fd->ring[fd->head].ktime_ns = ktime_get_raw_ns();
 		fd->head = next;
 	}
+
 	spin_unlock_irqrestore(&fd->lock, flags);
 	wake_up_interruptible(&fd->wq);
+
 	return IRQ_HANDLED;
 }
 
@@ -147,9 +155,11 @@ static int mpp_open(struct inode *ino, struct file *f)
 
 	if (!fd)
 		return -ENOMEM;
+
 	init_waitqueue_head(&fd->wq);
 	spin_lock_init(&fd->lock);
 	f->private_data = fd;
+
 	return 0;
 }
 
@@ -157,23 +167,31 @@ static int mpp_release(struct inode *ino, struct file *f)
 {
 	struct mpp_fd *fd = f->private_data;
 	unsigned long flags;
-	int i;
 
 	/* free any engines this fd registered */
 	spin_lock_irqsave(&g.reg_lock, flags);
-	for (i = 0; i < MAX_ENGINES; i++) {
-		if (g.engines[i].active && g.engines[i].owner == fd) {
+	for (int i = 0; i < MAX_ENGINES; i++) {
+		if (g.engines[i].active && !g.engines[i].freeing &&
+		    g.engines[i].owner == fd) {
 			int virq = g.engines[i].virq;
 
-			g.engines[i].active = false;
+			/* owner NULL first so the handler stops queueing to a
+			 * doomed fd; the slot itself is released only once
+			 * free_irq() has returned (see struct mpp_engine).
+			 */
+			g.engines[i].freeing = true;
 			g.engines[i].owner = NULL;
 			spin_unlock_irqrestore(&g.reg_lock, flags);
 			free_irq(virq, &g.engines[i]);
 			spin_lock_irqsave(&g.reg_lock, flags);
+			g.engines[i].active = false;
+			g.engines[i].freeing = false;
 		}
 	}
+
 	spin_unlock_irqrestore(&g.reg_lock, flags);
 	kfree(fd);
+
 	return 0;
 }
 
@@ -182,29 +200,33 @@ static long mpp_register(struct mpp_fd *fd, void __user *arg, unsigned int sz)
 	struct mpp_reg_arg ra;
 	struct mpp_engine *e = NULL;
 	unsigned long flags;
-	int virq, i, ret;
+	int virq, ret;
 
 	if (sz != sizeof(ra) || copy_from_user(&ra, arg, sizeof(ra)))
 		return -EFAULT;
+
 	virq = virq_for_hwirq(ra.hwirq);
 	if (virq < 0) {
 		pr_warn("REGISTER: id %u (or +0x20=%u) not in DT table\n", ra.hwirq, ra.hwirq + 0x20);
 		return -EINVAL;
 	}
+
 	pr_info("REGISTER: id %u -> virq %d (request_irq)\n", ra.hwirq, virq);	/* TODO(debug) */
 	spin_lock_irqsave(&g.reg_lock, flags);
-	for (i = 0; i < MAX_ENGINES; i++) {
+	for (int i = 0; i < MAX_ENGINES; i++) {
 		if (!g.engines[i].active) {
 			e = &g.engines[i];
 			break;
 		}
 	}
+
 	if (e) {
 		e->active = true;
 		e->hwirq = ra.hwirq;
 		e->virq = virq;
 		e->owner = fd;
 	}
+
 	spin_unlock_irqrestore(&g.reg_lock, flags);
 	if (!e)
 		return -ENOSPC;
@@ -215,21 +237,22 @@ static long mpp_register(struct mpp_fd *fd, void __user *arg, unsigned int sz)
 		e->active = false;
 		e->owner = NULL;
 		spin_unlock_irqrestore(&g.reg_lock, flags);
+
 		return ret;
 	}
+
 	return 0;
 }
 
 static struct mpp_engine *engine_by_hwirq(u32 hwirq, struct mpp_fd *fd)
 {
-	int i;
-
-	for (i = 0; i < MAX_ENGINES; i++) {
-		if (g.engines[i].active && g.engines[i].owner == fd &&
-		    g.engines[i].hwirq == hwirq) {
+	for (int i = 0; i < MAX_ENGINES; i++) {
+		if (g.engines[i].active && !g.engines[i].freeing &&
+		    g.engines[i].owner == fd && g.engines[i].hwirq == hwirq) {
 			return &g.engines[i];
 		}
 	}
+
 	return NULL;
 }
 
@@ -246,8 +269,9 @@ static long mpp_simple_hwirq(struct mpp_fd *fd, unsigned int nr,
 
 	/* Look up the engine and snapshot its virq under reg_lock; the engines[]
 	 * array is also mutated by REGISTER and by release on other CPUs. For FREE,
-	 * detach the slot while still holding the lock so it can't be observed
-	 * half-freed, then run the (sleeping) IRQ ops outside the spinlock.
+	 * mark the slot freeing while still holding the lock so it can't be observed
+	 * half-freed or handed to a concurrent REGISTER, then run the (sleeping) IRQ
+	 * ops outside the spinlock and release the slot once free_irq() has returned.
 	 */
 	spin_lock_irqsave(&g.reg_lock, flags);
 	e = engine_by_hwirq(hwirq, fd);
@@ -255,27 +279,36 @@ static long mpp_simple_hwirq(struct mpp_fd *fd, unsigned int nr,
 		spin_unlock_irqrestore(&g.reg_lock, flags);
 		return -EINVAL;
 	}
+
 	virq = e->virq;
 	if (nr == 1) {		/* FREE/UNREGISTER: detach before unlocking */
-		e->active = false;
+		e->freeing = true;
 		e->owner = NULL;
 	}
+
 	spin_unlock_irqrestore(&g.reg_lock, flags);
 
 	switch (nr) {
 	case 1: {	/* FREE/UNREGISTER */
 		free_irq(virq, e);
+		spin_lock_irqsave(&g.reg_lock, flags);
+		e->active = false;
+		e->freeing = false;
+		spin_unlock_irqrestore(&g.reg_lock, flags);
 		return 0;
 	}
+
 	case 2: {	/* DISABLE */
 		disable_irq(virq);
 		return 0;
 	}
+
 	case 3: {	/* ENABLE (re-arm after each one-shot event) */
 		enable_irq(virq);
 		return 0;
 	}
 	}
+
 	return -EINVAL;
 }
 
@@ -287,15 +320,19 @@ static long mpp_wait(struct mpp_fd *fd, void __user *arg, unsigned int sz)
 
 	if (sz < sizeof(ev))
 		return -EINVAL;
+
 	ret = wait_event_interruptible(fd->wq, fd->head != fd->tail);
 	if (ret)
 		return ret;
+
 	spin_lock_irqsave(&fd->lock, flags);
 	ev = fd->ring[fd->tail];
 	fd->tail = (fd->tail + 1) % MPP_RING_SZ;
 	spin_unlock_irqrestore(&fd->lock, flags);
+
 	if (copy_to_user(arg, &ev, sizeof(ev)))
 		return -EFAULT;
+
 	return 0;
 }
 
@@ -316,11 +353,14 @@ static long mpp_vsync_poll(void __user *arg, unsigned int sz)
 			cpu_relax();
 		}
 	}
+
 	*(u64 *)buf = ktime_get_raw_ns();
 	if (sz > sizeof(buf))
 		sz = sizeof(buf);
+
 	if (copy_to_user(arg, buf, sz))
 		return -EFAULT;
+
 	return 0;
 }
 
@@ -339,18 +379,23 @@ static long mpp_driver_info(void __user *arg, unsigned int sz)
 	struct device_node *child, *match = NULL;
 	char name[33];
 	int single_idx = -1;
-	u8 *buf;
-	long ret = 0;
 
 	if (sz < MPP_INFO_SZ)
 		return -EINVAL;
-	buf = kzalloc(MPP_INFO_SZ, GFP_KERNEL);
+
+	/* __free(kfree) releases buf on every return path, so the error exits are plain
+	 * returns and the function needs no unwind label. Declared here rather than at the
+	 * top because the cleanup attribute has to sit on the initialising declaration, and
+	 * the size check above must still run before the allocation.
+	 */
+	u8 *buf __free(kfree) = kzalloc(MPP_INFO_SZ, GFP_KERNEL);
+
 	if (!buf)
 		return -ENOMEM;
-	if (copy_from_user(buf, arg, MPP_INFO_SZ)) {
-		ret = -EFAULT;
-		goto out;
-	}
+
+	if (copy_from_user(buf, arg, MPP_INFO_SZ))
+		return -EFAULT;
+
 	memcpy(name, buf, 32);
 	name[32] = '\0';
 
@@ -369,6 +414,7 @@ static long mpp_driver_info(void __user *arg, unsigned int sz)
 			}
 		}
 	}
+
 	if (!match && g.np) {
 		const char *suffix = strrchr(name, ',');
 
@@ -389,20 +435,22 @@ static long mpp_driver_info(void __user *arg, unsigned int sz)
 	memset(buf + 32, 0, MPP_INFO_SZ - 32);
 	if (match) {
 		struct resource res;
-		u32 n, i, reg_count = 0;
+		u32 n, reg_count = 0;
 
 		n = (single_idx >= 0) ? 1 : of_irq_count(match);
 		if (n > (184 - 36) / 4) {	/* keep the array below the reg fields at +184 */
 			n = (184 - 36) / 4;
 		}
+
 		*(u32 *)(buf + 32) = n;
-		for (i = 0; i < n; i++) {
+		for (u32 i = 0; i < n; i++) {
 			int j = (single_idx >= 0) ? single_idx : (int)i;
 			int virq = of_irq_get(match, j);
 			struct irq_data *d = virq > 0 ? irq_get_irq_data(virq) : NULL;
 
 			*(u32 *)(buf + 36 + 4 * i) = d ? (u32)irqd_to_hwirq(d) : 0;
 		}
+
 		if (single_idx < 0) {	/* only child nodes carry reg windows */
 			if (of_address_to_resource(match, 0, &res) == 0) {
 				*(u64 *)(buf + 192) = res.start;
@@ -416,6 +464,7 @@ static long mpp_driver_info(void __user *arg, unsigned int sz)
 		}
 		pr_info("nr6 driver-info: '%s' -> %u irqs (first hwirq %u), %u regs\n",	/* TODO(debug) */
 			name, n, *(u32 *)(buf + 36), reg_count);
+
 		if (single_idx < 0)
 			of_node_put(match);
 	} else {
@@ -423,10 +472,9 @@ static long mpp_driver_info(void __user *arg, unsigned int sz)
 	}
 
 	if (copy_to_user(arg, buf, MPP_INFO_SZ))
-		ret = -EFAULT;
-out:
-	kfree(buf);
-	return ret;
+		return -EFAULT;
+
+	return 0;
 }
 
 static long mpp_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
@@ -446,23 +494,29 @@ static long mpp_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 			 */
 		return mpp_register(fd, uarg, sz);
 	}
+
 	case 1:
 	case 2:
 	case 3: {	/* FREE / DISABLE / ENABLE */
 		return mpp_simple_hwirq(fd, nr, uarg, sz);
 	}
+
 	case 4: {	/* WAIT_EVENT */
 		return mpp_wait(fd, uarg, sz);
 	}
+
 	case 5: {	/* unused by the vendor daemon (no _IOW('M',5,..) call site) */
 		return 0;
 	}
+
 	case 6: {	/* driver-info-by-name query */
 		return mpp_driver_info(uarg, sz);
 	}
+
 	case 7: {	/* WAIT_FIRST_VSYNC */
 		return mpp_vsync_poll(uarg, sz);
 	}
+
 	case 8:	/* QUERY_OOM (100) */
 	case 9: {	/* QUERY totals (40) */
 		/* not used by the codec/DMA path - zero-fill until a caller needs them. */
@@ -471,6 +525,7 @@ static long mpp_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 			sz = sizeof(zero);
 		return copy_to_user(uarg, zero, sz) ? -EFAULT : 0;
 	}
+
 	default: {
 		return -EINVAL;
 	}
@@ -485,11 +540,35 @@ static const struct file_operations mpp_fops = {
 	.compat_ioctl	= compat_ptr_ioctl,
 };
 
+/* devm teardown actions, registered by probe in acquisition order and run in reverse.
+ * The state they release lives in the single global g, so none of them needs the data
+ * pointer devm passes.
+ */
+static void mpp_release_chrdev_region(void *data)
+{
+	unregister_chrdev_region(g.devt, 1);
+}
+
+static void mpp_release_cdev(void *data)
+{
+	cdev_del(&g.cdev);
+}
+
+static void mpp_release_class(void *data)
+{
+	class_destroy(g.class);
+}
+
+static void mpp_release_device(void *data)
+{
+	device_destroy(g.class, g.devt);
+}
+
 static int ar_mpp_probe(struct platform_device *pdev)
 {
 	struct device_node *np = pdev->dev.of_node;
 	struct device_node *child;
-	int i, ret, n;
+	int ret, n;
 
 	spin_lock_init(&g.reg_lock);
 	g.np = np;
@@ -500,12 +579,13 @@ static int ar_mpp_probe(struct platform_device *pdev)
 	 * child compatible (nr6), so both levels must be in the table for REGISTER.
 	 */
 	n = of_irq_count(np);
-	for (i = 0; i < n && g.n_irq < MAX_ENGINES; i++) {
+	for (int i = 0; i < n && g.n_irq < MAX_ENGINES; i++) {
 		int virq = of_irq_get(np, i);
 		struct irq_data *d;
 
 		if (virq <= 0)
 			continue;
+
 		d = irq_get_irq_data(virq);
 		g.virq_tbl[g.n_irq] = virq;
 		g.hwirq_tbl[g.n_irq] = d ? (u32)irqd_to_hwirq(d) : 0;
@@ -513,15 +593,17 @@ static int ar_mpp_probe(struct platform_device *pdev)
 		dev_info(&pdev->dev, "engine irq[%d]: hwirq %u -> virq %d\n",
 			 i, g.hwirq_tbl[g.n_irq - 1], virq);
 	}
-	for_each_child_of_node(np, child) {
-		int cn = of_irq_count(child), j;
 
-		for (j = 0; j < cn && g.n_irq < MAX_ENGINES; j++) {
+	for_each_child_of_node(np, child) {
+		int cn = of_irq_count(child);
+
+		for (int j = 0; j < cn && g.n_irq < MAX_ENGINES; j++) {
 			int virq = of_irq_get(child, j);
 			struct irq_data *d;
 
 			if (virq <= 0)
 				continue;
+
 			d = irq_get_irq_data(virq);
 			g.virq_tbl[g.n_irq] = virq;
 			g.hwirq_tbl[g.n_irq] = d ? (u32)irqd_to_hwirq(d) : 0;
@@ -536,41 +618,47 @@ static int ar_mpp_probe(struct platform_device *pdev)
 	if (IS_ERR(g.vsync_base))
 		g.vsync_base = NULL;
 
+	/* Each resource registers its own teardown as soon as it is acquired. devm runs
+	 * the actions in reverse on both the probe error path and on remove, so there is
+	 * no unwind ladder and no separate remove() whose ordering has to be kept in step
+	 * with this function by hand. devm_add_action_or_reset() runs the action itself if
+	 * it cannot record it, so a failure there leaves nothing acquired either.
+	 */
 	ret = alloc_chrdev_region(&g.devt, 0, 1, "ar_mpp_ctl");
 	if (ret)
 		return ret;
+
+	ret = devm_add_action_or_reset(&pdev->dev, mpp_release_chrdev_region, NULL);
+	if (ret)
+		return ret;
+
 	cdev_init(&g.cdev, &mpp_fops);
 	ret = cdev_add(&g.cdev, g.devt, 1);
 	if (ret)
-		goto err_region;
+		return ret;
+
+	ret = devm_add_action_or_reset(&pdev->dev, mpp_release_cdev, NULL);
+	if (ret)
+		return ret;
+
 	g.class = class_create("adf_ctl");
-	if (IS_ERR(g.class)) {
-		ret = PTR_ERR(g.class);
-		goto err_cdev;
-	}
+	if (IS_ERR(g.class))
+		return PTR_ERR(g.class);
+
+	ret = devm_add_action_or_reset(&pdev->dev, mpp_release_class, NULL);
+	if (ret)
+		return ret;
+
 	g.dev = device_create(g.class, NULL, g.devt, NULL, "ar_mpp_ctl");
-	if (IS_ERR(g.dev)) {
-		ret = PTR_ERR(g.dev);
-		goto err_class;
-	}
+	if (IS_ERR(g.dev))
+		return PTR_ERR(g.dev);
+
+	ret = devm_add_action_or_reset(&pdev->dev, mpp_release_device, NULL);
+	if (ret)
+		return ret;
+
 	dev_info(&pdev->dev, "ready (%d engine irqs)\n", g.n_irq);
 	return 0;
-
-err_class:
-	class_destroy(g.class);
-err_cdev:
-	cdev_del(&g.cdev);
-err_region:
-	unregister_chrdev_region(g.devt, 1);
-	return ret;
-}
-
-static void ar_mpp_remove(struct platform_device *pdev)
-{
-	device_destroy(g.class, g.devt);
-	class_destroy(g.class);
-	cdev_del(&g.cdev);
-	unregister_chrdev_region(g.devt, 1);
 }
 
 static const struct of_device_id ar_mpp_of[] = {
@@ -579,9 +667,9 @@ static const struct of_device_id ar_mpp_of[] = {
 };
 MODULE_DEVICE_TABLE(of, ar_mpp_of);
 
+/* No .remove: every resource probe acquires is released by a devm action. */
 static struct platform_driver ar_mpp_driver = {
 	.probe	= ar_mpp_probe,
-	.remove	= ar_mpp_remove,
 	.driver	= {
 		.name		= "ar_mpp_drv",
 		.of_match_table	= ar_mpp_of,
