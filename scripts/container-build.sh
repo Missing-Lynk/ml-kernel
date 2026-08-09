@@ -5,7 +5,7 @@
 # build steps are readable instead of inlined in build.sh's `docker run`.
 #
 # All inputs arrive via the environment that build.sh sets on the `docker run`:
-#   ARCH CROSS_COMPILE JOBS MINIMAL NOTRIM DEBUGSDIO KBUILD_BUILD_USER KBUILD_BUILD_HOST
+#   ARCH CROSS_COMPILE JOBS MINIMAL NOTRIM LAX_FRAGMENTS KBUILD_BUILD_USER KBUILD_BUILD_HOST
 #   KBUILD_BUILD_TIMESTAMP SOURCE_DATE_EPOCH VERBOSE BOARD
 set -eu
 
@@ -92,7 +92,7 @@ fi
 # Image, then the per-board fragments re-enable the specific drivers that board needs - because
 # they merge after trim, they override its disables. The per-board list lives in
 # devices/$BOARD/fragments (kernel config stays in kernel land); the fragment FILES stay shared
-# in configs/. Universal base (artosyn + trim) is applied here; DEBUGSDIO is appended last.
+# in configs/. The universal base (artosyn + trim) is applied here.
 if [ -z "$MINIMAL" ] && [ -f /repo/configs/artosyn.config ]; then
   # Platform base: Artosyn Proxima SoC support (UART, USB gadget, SD, SPI-NAND, binder, ...).
   frags=/repo/configs/artosyn.config
@@ -117,8 +117,6 @@ if [ -z "$MINIMAL" ] && [ -f /repo/configs/artosyn.config ]; then
     exit 1
   fi
 
-  # Throwaway SDIO/MMC diagnostic fragment, opt-in via DEBUGSDIO=1, merged LAST.
-  [ -n "$DEBUGSDIO" ] && [ -f /repo/configs/debug-sdio.config ] && frags="$frags /repo/configs/debug-sdio.config"
   # -Q silences the (expected) "redefined by fragment" notices: defconfig enables many drivers
   # as =m and our fragments turn them off, so the override warning would fire on every build.
   # shellcheck disable=SC2086  # $frags is a space-separated list and must word-split

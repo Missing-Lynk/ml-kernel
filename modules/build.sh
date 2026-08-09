@@ -73,7 +73,10 @@ TC="${TC%"${CROSS_COMPILE_PREFIX}"gcc}${CROSS_COMPILE_PREFIX}"
 # not found". Drop any host tool that is not runnable on this host so `make` rebuilds it
 # with HOSTCC (the host's own gcc) before it is needed. Cheap and idempotent: a tool that
 # already runs is kept, so this only rebuilds after a container Image build.
-for t in scripts/basic/fixdep scripts/mod/modpost usr/gen_init_cpio \
+# usr/gen_init_cpio is deliberately NOT in this list: no module build invokes it, so deleting it
+# here would never be followed by a rebuild, and initramfs/build.sh would find no generator.
+# It heals itself there instead.
+for t in scripts/basic/fixdep scripts/mod/modpost \
 	 scripts/kallsyms scripts/sorttable scripts/recordmcount ; do
 	f="$KTREE/$t"
 	[ -x "$f" ] || continue

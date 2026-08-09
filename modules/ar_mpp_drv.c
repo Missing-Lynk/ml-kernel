@@ -48,6 +48,8 @@
 #include <linux/cleanup.h>
 #include <linux/ktime.h>
 
+#include "ar_chrdev.h"
+
 #define MPP_MAGIC	'M'
 #define MPP_RING_SZ	64
 /* Table sizes: parent (h26x/jpeg/ge2d ~4) + ahb_dma (8) + axi_dma (3) + headroom. */
@@ -93,10 +95,7 @@ struct mpp_engine {
 };
 
 static struct {
-	dev_t			devt;
-	struct cdev		cdev;
-	struct class		*class;
-	struct device		*dev;
+	struct ar_chrdev	chr;
 	struct device_node	*np;		/* ar_mpp node, for the nr6 child lookup */
 	void __iomem		*vsync_base;
 	struct mpp_engine	engines[MAX_ENGINES];
@@ -540,30 +539,6 @@ static const struct file_operations mpp_fops = {
 	.compat_ioctl	= compat_ptr_ioctl,
 };
 
-/* devm teardown actions, registered by probe in acquisition order and run in reverse.
- * The state they release lives in the single global g, so none of them needs the data
- * pointer devm passes.
- */
-static void mpp_release_chrdev_region(void *data)
-{
-	unregister_chrdev_region(g.devt, 1);
-}
-
-static void mpp_release_cdev(void *data)
-{
-	cdev_del(&g.cdev);
-}
-
-static void mpp_release_class(void *data)
-{
-	class_destroy(g.class);
-}
-
-static void mpp_release_device(void *data)
-{
-	device_destroy(g.class, g.devt);
-}
-
 static int ar_mpp_probe(struct platform_device *pdev)
 {
 	struct device_node *np = pdev->dev.of_node;
@@ -618,42 +593,7 @@ static int ar_mpp_probe(struct platform_device *pdev)
 	if (IS_ERR(g.vsync_base))
 		g.vsync_base = NULL;
 
-	/* Each resource registers its own teardown as soon as it is acquired. devm runs
-	 * the actions in reverse on both the probe error path and on remove, so there is
-	 * no unwind ladder and no separate remove() whose ordering has to be kept in step
-	 * with this function by hand. devm_add_action_or_reset() runs the action itself if
-	 * it cannot record it, so a failure there leaves nothing acquired either.
-	 */
-	ret = alloc_chrdev_region(&g.devt, 0, 1, "ar_mpp_ctl");
-	if (ret)
-		return ret;
-
-	ret = devm_add_action_or_reset(&pdev->dev, mpp_release_chrdev_region, NULL);
-	if (ret)
-		return ret;
-
-	cdev_init(&g.cdev, &mpp_fops);
-	ret = cdev_add(&g.cdev, g.devt, 1);
-	if (ret)
-		return ret;
-
-	ret = devm_add_action_or_reset(&pdev->dev, mpp_release_cdev, NULL);
-	if (ret)
-		return ret;
-
-	g.class = class_create("adf_ctl");
-	if (IS_ERR(g.class))
-		return PTR_ERR(g.class);
-
-	ret = devm_add_action_or_reset(&pdev->dev, mpp_release_class, NULL);
-	if (ret)
-		return ret;
-
-	g.dev = device_create(g.class, NULL, g.devt, NULL, "ar_mpp_ctl");
-	if (IS_ERR(g.dev))
-		return PTR_ERR(g.dev);
-
-	ret = devm_add_action_or_reset(&pdev->dev, mpp_release_device, NULL);
+	ret = ar_chrdev_register(&pdev->dev, &g.chr, &mpp_fops, "ar_mpp_ctl", "adf_ctl");
 	if (ret)
 		return ret;
 

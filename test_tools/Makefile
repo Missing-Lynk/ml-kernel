@@ -14,7 +14,11 @@
 
 CROSS_COMPILE ?= aarch64-linux-gnu-
 CC            := $(CROSS_COMPILE)gcc
-CFLAGS        := -static -O2 -Wall -Wextra
+# -MMD -MP emits a build/<tool>.d listing every header the tool actually included, which is
+# what makes a header edit rebuild the binary. Without it a changed uapi header (several tools
+# include ../modules/*.h) leaves a stale binary compiled against the old struct layout - the
+# exact ABI mismatch these tools exist to detect.
+CFLAGS        := -static -O2 -Wall -Wextra -MMD -MP
 BUILD         := build
 
 # Shared library (not a standalone tool) and the tools that link it.
@@ -24,12 +28,18 @@ DISPLAY := display_test overlay_test display_demo display_bounce display_orient 
 SRCS  := $(wildcard *.c)
 TOOLS := $(filter-out $(LIB:.c=),$(SRCS:.c=))
 BINS  := $(addprefix $(BUILD)/,$(TOOLS))
+DEPS  := $(BINS:=.d)
 
 all: $(BINS)
 
 # Display tools: link the shared helper. This static pattern rule takes precedence over the
 # generic one below for these targets.
-$(addprefix $(BUILD)/,$(DISPLAY)): $(BUILD)/%: %.c $(LIB) drm_util.h | $(BUILD)
+#
+# Both local headers are listed explicitly because the generated .d does not cover these
+# targets: two sources in one gcc call means the second translation unit's dep file overwrites
+# the first, so build/<tool>.d ends up describing drm_util.c alone. The cost of naming them is
+# that any display tool rebuilds when either header changes, which is the safe direction.
+$(addprefix $(BUILD)/,$(DISPLAY)): $(BUILD)/%: %.c $(LIB) drm_util.h drm_glyphs.h | $(BUILD)
 	$(CC) $(CFLAGS) $< $(LIB) -o $@
 
 # Everything else: a single self-contained source.
@@ -45,5 +55,8 @@ $(TOOLS): %: $(BUILD)/%
 
 clean:
 	rm -rf $(BUILD)
+
+# After the rules, so a missing .d on the first build is not an error (-include).
+-include $(DEPS)
 
 .PHONY: all clean $(TOOLS)

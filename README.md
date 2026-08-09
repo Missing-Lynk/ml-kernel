@@ -31,7 +31,7 @@ Environment knobs:
 - `JOBS` - parallelism (default `nproc`).
 - `MINIMAL=1` - pure `arm64 defconfig`, skips all config fragments.
 - `NOTRIM=1` - skip `trim.config` (no size trimming).
-- `DEBUGSDIO=1` - append `debug-sdio.config` (throwaway diagnostics).
+- `LAX_FRAGMENTS=1` - downgrade the post-`olddefconfig` fragment check from fatal to a warning, for bisecting a kernel bump that renames symbols.
 - `FAST=1` - reuse the existing tree for an incremental build (dev loop). NOT bit-reproducible; do a clean build before flashing.
 
 To bump the kernel or toolchain, edit `scripts/pin.env` (URL + sha256) only.
@@ -80,9 +80,6 @@ configs/trim.config
 devices/$BOARD/fragments     per-board re-enables, one basename per line, in order
       |
       v
-configs/debug-sdio.config    only when DEBUGSDIO=1
-      |
-      v
 make olddefconfig
 ```
 
@@ -97,8 +94,6 @@ Universal base (every board):
 | 3 | `configs/trim.config` | size trim: removes components we do not use (other vendors' SoC/board support, unused subsystems and drivers) so the LZ4-packed `Image` fits the kernel slot, see "Slot fit and size trim". Skip with `NOTRIM=1` |
 
 The per-board lists then diverge along the obvious line, what the hardware physically has. `betafpv-vr04-goggle` merges the display, input, and SPI fragments for its panel, button ladder, and status LED. `betafpv-vr04-air` drops all three, having none of that hardware, and adds the camera, IIO, and DMA-heap fragments for its sensor and encoder path. Both merge the shared codec, storage, MTP, DMA, cpufreq, and RTC fragments. Read `devices/<name>/fragments` for the exact list and the reason on each line.
-
-Opt-in, appended last: `configs/debug-sdio.config` (`DYNAMIC_DEBUG` + `MMC_DEBUG` for SDIO bring-up diagnostics; only when `DEBUGSDIO=1`; throwaway, enlarges the `Image`, may violate slot-fit).
 
 `MINIMAL=1` skips the fragment merge entirely and produces a pure `arm64 defconfig` kernel.
 
@@ -125,8 +120,6 @@ To pack the `Image` into the OTRA + legacy-uImage(lz4) container that SPL/U-Boot
 glue/flash/mkkernel.py pack <Image> <out.bin> --otra-template <kernelN partition bin or file>
 ```
 `--otra-template` supplies the OTRA header. `ram-boot.sh` pulls it read-only from the live `kernel1` automatically. The LZ4 frame must use independent blocks (`FLG=0x64 BD=0x70`); `mkkernel.py` matches the vendor frame exactly. Linked blocks cause a `-93` (`-EPROTONOSUPPORT`) error in U-Boot.
-
-`debug-sdio.config` adds debug tables that can push the packed size past 6 MiB; it is for throwaway diagnostic builds only.
 
 ## SMP
 

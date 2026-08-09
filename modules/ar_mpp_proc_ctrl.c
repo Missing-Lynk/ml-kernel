@@ -36,6 +36,8 @@
 #include <linux/mutex.h>
 #include <linux/list.h>
 
+#include "ar_chrdev.h"
+
 #define MPP_MAGIC	'M'
 #define PROC_DIR	"umap"
 #define NAME_LEN	128		/* CREATE name[] field width */
@@ -111,10 +113,7 @@ struct msg_arg {		/* 280 bytes (0x118) */
 static_assert(sizeof(struct msg_arg) == 280);
 
 static struct {
-	dev_t			devt;
-	struct cdev		cdev;
-	struct class		*class;
-	struct device		*dev;
+	struct ar_chrdev	chr;
 	struct proc_dir_entry	*dir;
 	struct list_head	devs;
 	struct mutex		lock;
@@ -341,6 +340,25 @@ static const struct file_operations pc_fops = {
 	.compat_ioctl	= compat_ptr_ioctl,
 };
 
+/* devm teardown for the /proc side. Registered before the char device, so devm runs it
+ * last: the node is gone before the entries it exposes are freed, matching the order the
+ * hand-written remove() used.
+ */
+static void ar_mpp_proc_release_dir(void *data)
+{
+	struct proc_dev *d, *t;
+
+	list_for_each_entry_safe(d, t, &g.devs, node) {
+		if (d->pde)
+			proc_remove(d->pde);
+		list_del(&d->node);
+		kfree(d);
+	}
+
+	if (g.dir)
+		proc_remove(g.dir);
+}
+
 static int ar_mpp_proc_probe(struct platform_device *pdev)
 {
 	int ret;
@@ -350,58 +368,21 @@ static int ar_mpp_proc_probe(struct platform_device *pdev)
 	init_waitqueue_head(&g.msg_wq);
 	g.dir = proc_mkdir(PROC_DIR, NULL);
 
-	ret = alloc_chrdev_region(&g.devt, 0, 1, "ar_mpp_proc_ctl");
+	ret = devm_add_action_or_reset(&pdev->dev, ar_mpp_proc_release_dir, NULL);
 	if (ret)
-		goto err_proc;
-	cdev_init(&g.cdev, &pc_fops);
-	ret = cdev_add(&g.cdev, g.devt, 1);
-	if (ret)
-		goto err_region;
-	/* NOT "adf_ctl": ar_mpp_drv already registers a class of that name, and a modern
-	 * kernel rejects a duplicate class name in the same directory with -EEXIST, which
-	 * failed this probe and tore down /proc/umap. Use a distinct class name.
+		return ret;
+
+	/* The class is "adf_proc_ctl", NOT "adf_ctl": ar_mpp_drv already registers a class
+	 * of that name, and a modern kernel rejects a duplicate class name in the same
+	 * directory with -EEXIST, which failed this probe and tore down /proc/umap.
 	 */
-	g.class = class_create("adf_proc_ctl");
-	if (IS_ERR(g.class)) {
-		ret = PTR_ERR(g.class);
-		goto err_cdev;
-	}
-	g.dev = device_create(g.class, NULL, g.devt, NULL, "ar_mpp_proc_ctl");
-	if (IS_ERR(g.dev)) {
-		ret = PTR_ERR(g.dev);
-		goto err_class;
-	}
+	ret = ar_chrdev_register(&pdev->dev, &g.chr, &pc_fops,
+				 "ar_mpp_proc_ctl", "adf_proc_ctl");
+	if (ret)
+		return ret;
+
 	dev_info(&pdev->dev, "ar_mpp_procdev_init done\n");
 	return 0;
-
-err_class:
-	class_destroy(g.class);
-err_cdev:
-	cdev_del(&g.cdev);
-err_region:
-	unregister_chrdev_region(g.devt, 1);
-err_proc:
-	if (g.dir)
-		proc_remove(g.dir);
-	return ret;
-}
-
-static void ar_mpp_proc_remove(struct platform_device *pdev)
-{
-	struct proc_dev *d, *t;
-
-	device_destroy(g.class, g.devt);
-	class_destroy(g.class);
-	cdev_del(&g.cdev);
-	unregister_chrdev_region(g.devt, 1);
-	list_for_each_entry_safe(d, t, &g.devs, node) {
-		if (d->pde)
-			proc_remove(d->pde);
-		list_del(&d->node);
-		kfree(d);
-	}
-	if (g.dir)
-		proc_remove(g.dir);
 }
 
 static const struct of_device_id ar_mpp_proc_of[] = {
@@ -412,7 +393,6 @@ MODULE_DEVICE_TABLE(of, ar_mpp_proc_of);
 
 static struct platform_driver ar_mpp_proc_driver = {
 	.probe	= ar_mpp_proc_probe,
-	.remove	= ar_mpp_proc_remove,
 	.driver	= {
 		.name		= "ar_mpp_proc_ctrl",
 		.of_match_table	= ar_mpp_proc_of,

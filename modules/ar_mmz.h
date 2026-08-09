@@ -113,4 +113,10 @@ phys_addr_t usr_virt_to_phys(unsigned long uvaddr);
 int  ar_mmz_user_map_add(unsigned long uvaddr, phys_addr_t phys, size_t size);
 void ar_mmz_user_map_del(unsigned long uvaddr);
 
+/* Shared mmap body behind both of those char devices: validates vm_pgoff as an MMZ
+ * physical page, maps it write-combine with the caller's vm_ops, and registers it.
+ */
+int  ar_mmz_mmap_wc(struct vm_area_struct *vma,
+		    const struct vm_operations_struct *vm_ops);
+
 #endif /* _AR_MMZ_H */

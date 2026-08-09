@@ -98,10 +98,13 @@ hardware-validated (Tier 0).
 
 ## 7. SDIO CMD tracing (diagnostic build)
 
-For SDIO diagnosis, build with `DEBUGSDIO=1 ./scripts/build.sh` (merges
-`configs/debug-sdio.config` last, gated on that env var; verify
-`CONFIG_DYNAMIC_DEBUG=y` via `/sys/kernel/debug/dynamic_debug/control`), then enable
-the traces on the device:
+SDIO/MMC command tracing needs four symbols that the trim pass drops:
+`CONFIG_DEBUG_FS`, `CONFIG_DYNAMIC_DEBUG_CORE`, `CONFIG_DYNAMIC_DEBUG` and
+`CONFIG_MMC_DEBUG`. Set them by hand in a scratch fragment for the build that needs
+them. The `__dyndbg` table and the format strings it retains grow the packed `Image`,
+which is already near the 6 MiB slot ceiling, so treat the result as RAM-boot-only and
+do not flash it. Verify `CONFIG_DYNAMIC_DEBUG=y` took by reading
+`/sys/kernel/debug/dynamic_debug/control`, then enable the traces on the device:
 ```
 mount -t debugfs none /sys/kernel/debug    # if needed
 echo 'module dw_mmc_core +p' > /sys/kernel/debug/dynamic_debug/control

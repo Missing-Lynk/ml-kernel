@@ -577,6 +577,42 @@ void ar_mmz_user_map_del(unsigned long uvaddr)
 }
 EXPORT_SYMBOL(ar_mmz_user_map_del);
 
+/* Shared MMZ mmap body for /dev/mmz_userdev and /dev/ar_sys. Both take vm_pgoff as the
+ * requested physical page, validate it lies in a registered MMZ zone, map it write-combine,
+ * and register it so usr_virt_to_phys() can resolve it; they differ only in which vm_ops
+ * close hook drops the mapping again.
+ */
+int ar_mmz_mmap_wc(struct vm_area_struct *vma,
+		   const struct vm_operations_struct *vm_ops)
+{
+	phys_addr_t phys = (phys_addr_t)vma->vm_pgoff << PAGE_SHIFT;
+	size_t size = vma->vm_end - vma->vm_start;
+
+	/* reject a pgoff so large the phys shift overflows (validation would then
+	 * check a wrapped phys while remap_pfn_range maps the real, huge pgoff).
+	 */
+	if ((phys >> PAGE_SHIFT) != vma->vm_pgoff)
+		return -EINVAL;
+
+	if (hil_map_mmz_check_phys(phys, size)) {
+		pr_warn("mmap: phys %pa size %#zx outside any MMZ zone\n", &phys, size);
+		return -EINVAL;
+	}
+
+	/* WC matches the kernel-side memremap(MEMREMAP_WC); avoids attribute mismatch. */
+	vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
+	vm_flags_set(vma, VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
+	vma->vm_ops = vm_ops;
+	if (remap_pfn_range(vma, vma->vm_start, vma->vm_pgoff, size,
+			    vma->vm_page_prot)) {
+		return -EAGAIN;
+	}
+
+	ar_mmz_user_map_add(vma->vm_start, phys, size);
+	return 0;
+}
+EXPORT_SYMBOL(ar_mmz_mmap_wc);
+
 phys_addr_t usr_virt_to_phys(unsigned long uvaddr)
 {
 	struct user_map *m;
@@ -661,26 +697,7 @@ static int mmz_userdev_mmap(struct file *f, struct vm_area_struct *vma)
 
 	pr_info("MMZ mmap phys=%pa size=%#zx pgoff=%#lx\n", &phys, size, vma->vm_pgoff);
 
-
-	/* reject a pgoff so large the phys shift overflows (validation would then
-	 * check a wrapped phys while remap_pfn_range maps the real, huge pgoff).
-	 */
-	if ((phys >> PAGE_SHIFT) != vma->vm_pgoff)
-		return -EINVAL;
-	if (hil_map_mmz_check_phys(phys, size)) {
-		pr_warn("mmap: phys %pa size %#zx outside any MMZ zone\n", &phys, size);
-		return -EINVAL;
-	}
-	/* WC matches the kernel-side memremap(MEMREMAP_WC); avoids attribute mismatch. */
-	vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
-	vm_flags_set(vma, VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
-	vma->vm_ops = &mmz_vm_ops;
-	if (remap_pfn_range(vma, vma->vm_start, vma->vm_pgoff, size,
-			    vma->vm_page_prot)) {
-		return -EAGAIN;
-	}
-	ar_mmz_user_map_add(vma->vm_start, phys, size);
-	return 0;
+	return ar_mmz_mmap_wc(vma, &mmz_vm_ops);
 }
 
 /* map an mmb into the calling process via vm_mmap onto our own fd (offset=phys),

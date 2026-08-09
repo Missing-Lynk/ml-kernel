@@ -210,22 +210,7 @@ static const struct vm_operations_struct ar_sys_vm_ops = {
 /* mmap: same MMZ-validated contract as mmz_userdev, always cached-equivalent (WC). */
 static int ar_sys_mmap(struct file *f, struct vm_area_struct *vma)
 {
-	phys_addr_t phys = (phys_addr_t)vma->vm_pgoff << PAGE_SHIFT;
-	size_t size = vma->vm_end - vma->vm_start;
-
-	if ((phys >> PAGE_SHIFT) != vma->vm_pgoff)
-		return -EINVAL;
-	if (hil_map_mmz_check_phys(phys, size))
-		return -EINVAL;
-	vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
-	vm_flags_set(vma, VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
-	vma->vm_ops = &ar_sys_vm_ops;
-	if (remap_pfn_range(vma, vma->vm_start, vma->vm_pgoff, size,
-			    vma->vm_page_prot)) {
-		return -EAGAIN;
-	}
-	ar_mmz_user_map_add(vma->vm_start, phys, size);
-	return 0;
+	return ar_mmz_mmap_wc(vma, &ar_sys_vm_ops);
 }
 
 static const struct file_operations ar_sys_fops = {

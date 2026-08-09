@@ -55,6 +55,27 @@ fetch(){  # url sha256 outfile
   mv "$out.tmp" "$out"
 }
 
+# inputs_sha: a digest of the repo inputs that reach a build tree ONE WAY, i.e. those a FAST
+# reuse cannot undo. When it changes, FAST is declined and the tree is re-extracted.
+#
+# Deliberately narrow. Most inputs are re-applied from scratch on every build and so cannot go
+# stale: container-build.sh re-runs `make defconfig` and re-merges configs/ each time, and it
+# re-copies overlay/ each time. Hashing those would force a full re-extract for every driver or
+# fragment edit and destroy the dev loop the FAST path exists for. What does go stale:
+#
+#   patches/     applied once and stamped .ml-patches-applied, so an edited patch never re-applies
+#   overlay/     file LIST only - a deleted or renamed source keeps building from the stale copy
+#                left in the tree. Contents are excluded on purpose, see above.
+#   container-build.sh   the Kconfig/Makefile hook appends are `grep -q || append`, so a changed
+#                hook line is not re-applied to a tree that already has the old one
+inputs_sha(){
+  {
+    find "$REPO/patches" -type f -print0 2>/dev/null | sort -z | xargs -0r sha256sum
+    find "$REPO/overlay" -type f -printf '%P\n' 2>/dev/null | sort
+    sha256sum "$HERE/container-build.sh"
+  } | sha256sum | awk '{print $1}'
+}
+
 prepare_image(){
   if docker image inspect "$BUILD_IMAGE" >/dev/null 2>&1; then
     return
@@ -97,17 +118,22 @@ do_build(){  # tree-dir
   local cc_bin tc_root
   cc_bin="$(dirname "$(find "$BUILD_DIR/toolchain" -name "${CROSS_COMPILE_PREFIX}gcc" | head -1)")"
   tc_root="$(dirname "$cc_bin")"   # the toolchain install root (has bin/ lib/ libexec/ sysroot)
-  if [ -n "${FAST:-}" ] && [ -e "$tree/Makefile" ]; then
+  local want_sha; want_sha="$(inputs_sha)"
+  if [ -n "${FAST:-}" ] && [ -e "$tree/Makefile" ] && [ "$(cat "$tree/.ml-inputs-sha" 2>/dev/null)" = "$want_sha" ]; then
     # FAST: reuse the existing tree so make is incremental (dev loop). NOT bit-reproducible
     # (that is what the clean re-extract guarantees), and a deleted/renamed source can leave a
     # stale object behind. Do a clean build (unset FAST) before flashing a slot.
     log "FAST: reusing $(basename "$tree") (incremental; NOT reproducible - clean-build before flashing)"
   else
+    if [ -n "${FAST:-}" ] && [ -e "$tree/Makefile" ]; then
+      log "FAST declined: one-way inputs changed since this tree was extracted, re-extracting"
+    fi
     rm -rf "$tree"
     mkdir -p "$tree"
     log "extract kernel -> $(basename "$tree")"
     tar -C "$tree" --strip-components=1 -xf "$BUILD_DIR/dl/linux.tar.xz"
   fi
+  printf '%s\n' "$want_sha" > "$tree/.ml-inputs-sha"
 
   prepare_image
 
@@ -133,7 +159,6 @@ do_build(){  # tree-dir
     -e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
     -e MINIMAL="${MINIMAL:-}" \
     -e NOTRIM="${NOTRIM:-}" \
-    -e DEBUGSDIO="${DEBUGSDIO:-}" \
     -e LAX_FRAGMENTS="${LAX_FRAGMENTS:-}" \
     -e BOARD="$BOARD" \
     -e JOBS="$JOBS" \

@@ -84,7 +84,13 @@ resolve_checkpatch(){
 
 # --- collect the files for a zone --------------------------------------------------------
 zone_files(){  # zone -> tracked .c/.h, minus excludes, one per line (paths relative to KDIR)
-  local zone="$1" f keep
+  local zone="$1" f keep tracked
+  # A failing `git ls-files` must not read as "the zone is empty": that reports every zone as
+  # skipped and exits 0, i.e. a broken setup passes the lint. Capture it separately from the
+  # grep, whose exit 1 on no-match is expected and harmless.
+  tracked="$(git -C "$KDIR" ls-files "$zone")" \
+    || die "git ls-files failed for zone '$zone' (is $KDIR a git checkout?)"
+
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     keep=1
@@ -93,11 +99,12 @@ zone_files(){  # zone -> tracked .c/.h, minus excludes, one per line (paths rela
       [[ "$(basename "$f")" == $g ]] && { keep=0; break; }
     done
     [ "$keep" = 1 ] && echo "$f"
-  done < <(git -C "$KDIR" ls-files "$zone" | grep -E '\.(c|h)$' || true)
+  done < <(printf '%s\n' "$tracked" | grep -E '\.(c|h)$' || true)
 }
 
 resolve_checkpatch
 command -v perl >/dev/null || die "perl not found (checkpatch.pl needs it)"
+command -v git >/dev/null || die "git not found (zone file lists come from git ls-files)"
 log "using $CHECKPATCH"
 
 # Build the work list: explicit path args, else the default/selected zones.

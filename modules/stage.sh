@@ -55,24 +55,40 @@ MODDIR="$STAGE/lib/modules/$KVER/kernel"
 rm -rf "$STAGE"
 mkdir -p "$MODDIR"
 
-find "$KTREE/drivers/gpu/drm" -name '*.ko' -exec cp -t "$MODDIR" {} +
-find "$KTREE/drivers/media/v4l2-core" "$KTREE/drivers/media/common/videobuf2" \
-     "$KTREE/drivers/media/platform/chips-media/wave5" \
-     "$KTREE/drivers/media/artosyn" \
-     -name '*.ko' -exec cp -t "$MODDIR" {} + 2>/dev/null || true
-cp "$BUILD_OUT"/*.ko "$MODDIR"/ 2>/dev/null || true
+# copy_kos <dir>...: copy every .ko under each dir that exists. A source dir legitimately
+# absent for this board's config is skipped; a cp that fails is not, because a partially
+# staged module set produces an image that boots and is missing a driver.
+copy_kos(){
+  local d
+  for d in "$@"; do
+    [ -d "$d" ] || continue
+    find "$d" -name '*.ko' -exec cp -t "$MODDIR" {} +
+  done
+}
+
+copy_kos "$KTREE/drivers/gpu/drm"
+copy_kos "$KTREE/drivers/media/v4l2-core" "$KTREE/drivers/media/common/videobuf2" \
+         "$KTREE/drivers/media/platform/chips-media/wave5" \
+         "$KTREE/drivers/media/artosyn"
+
+# The out-of-tree build above is unconditional, so an empty $BUILD_OUT means it produced
+# nothing and the whitelist below would silently ship without the Artosyn modules.
+compgen -G "$BUILD_OUT/*.ko" >/dev/null \
+  || { echo "FATAL: no out-of-tree .ko in $BUILD_OUT (the M= build produced nothing)"; exit 1; }
+cp "$BUILD_OUT"/*.ko "$MODDIR"/
 
 # Reference-only MPP-stack modules: compile-checked so they do not rot, but never shipped -
 # nothing on the open stack loads them.
 rm -f "$MODDIR"/ar_osal.ko "$MODDIR"/ar_vb.ko "$MODDIR"/ar_sys.ko "$MODDIR"/ar_sysctl.ko \
       "$MODDIR"/ar_mpp_drv.ko "$MODDIR"/ar_mpp_proc_ctrl.ko "$MODDIR"/ar_mpp_overlay.ko
-find "$KTREE/drivers/dma" -name 'dmatest.ko' -exec cp -t "$MODDIR" {} + 2>/dev/null || true
+# dmatest is a bring-up client, built only when CONFIG_DMATEST=m, so its absence is normal.
+find "$KTREE/drivers/dma" -name 'dmatest.ko' -exec cp -t "$MODDIR" {} +
 
 # Ship the built-in module manifests (modules.builtin + modules.builtin.modinfo) so depmod can
 # see which drivers are =y (without them it writes empty modules.builtin.bin) and an on-device
 # depmod works (busybox refuses to run without the text modules.builtin). modules.order is
 # intentionally NOT copied: it lists the whole =m set we do not ship, and depmod tolerates it.
-cp "$KTREE/modules.builtin" "$KTREE/modules.builtin.modinfo" "$STAGE/lib/modules/$KVER/" 2>/dev/null || true
+cp "$KTREE/modules.builtin" "$KTREE/modules.builtin.modinfo" "$STAGE/lib/modules/$KVER/"
 
 # Fail loudly if a module we must ship did not make it: an image staged without the codec or
 # the display stack boots to a black screen with no video and the cause is invisible. wave5 is
