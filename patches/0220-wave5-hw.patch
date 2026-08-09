@@ -108,7 +108,7 @@ swept across every plausible field layout on this firmware and produced no IDR.
  	u32 index, nal_unit_type, reg_val, sub_layer_info;
  	struct dec_info *p_dec_info = &inst->codec_info->dec_info;
  	struct vpu_device *vpu_dev = inst->dev;
-@@ -1015,10 +1046,28 @@
+@@ -1015,10 +1046,35 @@
  	vpu_write_reg(inst->dev, W5_CMD_DEC_REPORT_SIZE, p_dec_info->user_data_buf_size);
  	vpu_write_reg(inst->dev, W5_CMD_DEC_REPORT_PARAM, REPORT_PARAM_ENDIANNESS_BIG_ENDIAN);
  
@@ -128,12 +128,19 @@ swept across every plausible field layout on this firmware and produced no IDR.
 +	 * report instead; mirror that with a bounded retry, the same shape as the
 +	 * STILL_RUNNING loops in wave5-vpuapi.c. A genuine error, or exhausted retries,
 +	 * still returns exactly as before.
++	 *
++	 * The -EIO test is what makes W5_RET_FAIL_REASON meaningful: only the
++	 * command-queue error check returns -EIO, and only after reading that register.
++	 * A busy-wait timeout returns -ETIMEDOUT without touching it, so the register
++	 * can still hold 0x800 from an earlier query and would otherwise buy a timed-out
++	 * command the full retry budget.
 +	 */
 +	for (retry = 0; ; retry++) {
 +		ret = wave5_send_query(vpu_dev, inst, GET_RESULT);
 +		if (!ret)
 +			break;
-+		if (vpu_read_reg(vpu_dev, W5_RET_FAIL_REASON) != WAVE5_SYSERR_RESULT_NOT_READY ||
++		if (ret != -EIO ||
++		    vpu_read_reg(vpu_dev, W5_RET_FAIL_REASON) != WAVE5_SYSERR_RESULT_NOT_READY ||
 +		    retry >= MAX_FIRMWARE_CALL_RETRY)
 +			return ret;
 +		usleep_range(50, 100);
