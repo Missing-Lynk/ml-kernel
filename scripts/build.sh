@@ -134,6 +134,7 @@ do_build(){  # tree-dir
     -e MINIMAL="${MINIMAL:-}" \
     -e NOTRIM="${NOTRIM:-}" \
     -e DEBUGSDIO="${DEBUGSDIO:-}" \
+    -e LAX_FRAGMENTS="${LAX_FRAGMENTS:-}" \
     -e BOARD="$BOARD" \
     -e JOBS="$JOBS" \
     -e VERBOSE="$VERBOSE" \

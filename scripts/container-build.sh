@@ -30,6 +30,7 @@ build_step() {
     echo "[$label] FAILED, last 60 lines:" >&2
     tail -n 60 "$log" >&2
     rm -f "$log"
+
     exit 1
   fi
 }
@@ -125,17 +126,16 @@ if [ -z "$MINIMAL" ] && [ -f /repo/configs/artosyn.config ]; then
 
   build_step olddefconfig make olddefconfig
 
-  # Verify the fragments actually took. merge_config writes what we asked for, but olddefconfig
-  # then resolves dependencies, and a symbol whose deps are unmet - or that upstream renamed or
-  # removed on a kernel bump - is silently dropped. The build still succeeds and the failure
-  # surfaces on-device. Compare the merged intent (last assignment wins, matching merge order)
-  # against the resolved .config:
-  #   asked ON  -> fail if the symbol is absent entirely (dropped or gone upstream)
-  #   asked OFF -> fail if it came back on (something select's it)
-  # m-vs-y is not compared: a select can legitimately promote =m to =y.
-  # Fatal by default: the tree is clean, so any finding here is a real regression - a fragment
-  # symbol that stopped taking, usually because a kernel bump renamed it or something started
-  # select'ing it back on. LAX_FRAGMENTS=1 downgrades it to a warning for bisecting a bump.
+  # Verify the fragments took: merge_config writes the ask, olddefconfig resolves it. The two
+  # disagreements differ in severity.
+  #
+  #   asked ON, absent from .config  -> FATAL: the symbol does not exist under that name.
+  #   asked off, resolved to y or m  -> informational. kconfig honours `select` over a fragment,
+  #       so a promptless or select'ed symbol cannot be forced off here. The line still carries
+  #       weight: asking a defconfig =y off demotes it to the =m its selectors require, keeping
+  #       it and its dependents out of the Image. Do not delete such lines on this report alone.
+  #
+  # LAX_FRAGMENTS=1 downgrades the fatal class, for bisecting a kernel bump.
   for f in $frags; do
     grep -E '^(CONFIG_[A-Za-z0-9_]+=|# CONFIG_[A-Za-z0-9_]+ is not set)' "$f"
   done | awk '
@@ -145,26 +145,27 @@ if [ -z "$MINIMAL" ] && [ -f /repo/configs/artosyn.config ]; then
   ' | while read -r sym val; do
     cur="$(sed -n "s/^$sym=\(.*\)\$/\1/p" .config)"
     if [ "$val" = n ]; then
-      [ -n "$cur" ] && echo "fragment check: $sym asked off, .config has $sym=$cur"
+      [ -n "$cur" ] && echo "info: $sym asked off, kconfig resolved it to =$cur (a select wins over the fragment)"
     else
-      [ -z "$cur" ] && echo "fragment check: $sym asked =$val, absent from .config"
+      [ -z "$cur" ] && echo "FATAL: $sym asked =$val but is absent from .config (renamed or removed upstream?)"
     fi
-    # A symbol that is fine leaves the test above false, which would otherwise be
-    # the loop's exit status on the last iteration and abort the build under set -e.
+    # `:` keeps the body's exit status zero; a false test as the last command aborts under set -e.
     :
   done > /tmp/fragcheck.out
 
-  if [ -s /tmp/fragcheck.out ]; then
-    cat /tmp/fragcheck.out >&2
+  grep '^info:' /tmp/fragcheck.out >&2 || true
+  if grep -q '^FATAL:' /tmp/fragcheck.out; then
     if [ -z "${LAX_FRAGMENTS:-}" ]; then
-      echo "fragment check: FAILED ($(wc -l < /tmp/fragcheck.out) symbols did not take)." >&2
-      echo "  A promptless or select'ed symbol cannot be turned off by a fragment line: find what" >&2
-      echo "  select's it and disable that instead. LAX_FRAGMENTS=1 downgrades this to a warning." >&2
+      echo "fragment check: FAILED - $(grep -c '^FATAL:' /tmp/fragcheck.out) fragment symbol(s) no longer exist." >&2
+      echo "  Find the new name or drop the line. LAX_FRAGMENTS=1 downgrades this to a warning." >&2
       exit 1
     fi
-    echo "fragment check: $(wc -l < /tmp/fragcheck.out) symbols did not take (LAX_FRAGMENTS)" >&2
-  else
+
+    echo "fragment check: $(grep -c '^FATAL:' /tmp/fragcheck.out) missing symbol(s) (LAX_FRAGMENTS)" >&2
+  elif [ ! -s /tmp/fragcheck.out ]; then
     echo "[fragment check] OK"
+  else
+    echo "[fragment check] OK ($(grep -c '^info:' /tmp/fragcheck.out) select-overridden, informational)"
   fi
 fi
 
