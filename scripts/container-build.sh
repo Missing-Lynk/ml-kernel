@@ -148,11 +148,14 @@ if [ -z "$MINIMAL" ] && [ -f /repo/configs/artosyn.config ]; then
     else
       [ -z "$cur" ] && echo "fragment check: $sym asked =$val, absent from .config"
     fi
+    # A symbol that is fine leaves the test above false, which would otherwise be
+    # the loop's exit status on the last iteration and abort the build under set -e.
+    :
   done > /tmp/fragcheck.out
 
   if [ -s /tmp/fragcheck.out ]; then
     cat /tmp/fragcheck.out >&2
-    if [ -n "$STRICT_FRAGMENTS" ]; then
+    if [ -n "${STRICT_FRAGMENTS:-}" ]; then
       echo "fragment check: FAILED ($(wc -l < /tmp/fragcheck.out) symbols); STRICT_FRAGMENTS is set" >&2
       exit 1
     fi
