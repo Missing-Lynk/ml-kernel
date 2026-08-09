@@ -167,12 +167,17 @@ alignment under this patch.
  	void *ret;
  
  	spin_lock_irqsave(&mem->spinlock, flags);
-@@ -152,9 +244,11 @@
+@@ -152,9 +244,16 @@
  	if (unlikely(size > ((dma_addr_t)mem->size << PAGE_SHIFT)))
  		goto err;
  
 -	pageno = bitmap_find_free_region(mem->bitmap, mem->size, order);
 -	if (unlikely(pageno < 0))
++	/* A zero-page request would otherwise "succeed": find_next_zero_area returns 0,
++	 * bitmap_set marks nothing and nr_map[0] stays 0, so the caller gets page 0's
++	 * address and its release hits the !nr fallback below on someone else's pages. */
++	if (unlikely(!nr))
++		goto err;
 +	pageno = bitmap_find_next_zero_area(mem->bitmap, mem->size, 0, nr, 0);
 +	if (unlikely(pageno >= (unsigned long)mem->size))
  		goto err;
@@ -181,7 +186,7 @@ alignment under this patch.
  
  	/*
  	 * Memory was found in the coherent area.
-@@ -203,9 +297,17 @@
+@@ -203,9 +297,22 @@
  		   (mem->virt_base + ((dma_addr_t)mem->size << PAGE_SHIFT))) {
  		int page = (vaddr - mem->virt_base) >> PAGE_SHIFT;
  		unsigned long flags;
@@ -191,10 +196,15 @@ alignment under this patch.
 -		bitmap_release_region(mem->bitmap, page, order);
 +		/* ML (Artosyn): free the recorded page count, not 2^order (see alloc).
 +		 * A zero count means vaddr is not a live allocation start (double free
-+		 * or interior pointer); the fallback would clear someone else's pages. */
++		 * or interior pointer). There is nothing to release in that case and no
++		 * count to release it by: falling back to 2^order would clear whichever
++		 * tenant owns those pages, turning a reported double-free into silent
++		 * corruption. Warn and leave the bitmap alone. */
 +		nr = mem->nr_map[page];
-+		if (WARN_ON(!nr))
-+			nr = 1U << order;
++		if (WARN_ON(!nr)) {
++			spin_unlock_irqrestore(&mem->spinlock, flags);
++			return 1;
++		}
 +		mem->nr_map[page] = 0;
 +		bitmap_clear(mem->bitmap, page, nr);
  		spin_unlock_irqrestore(&mem->spinlock, flags);
