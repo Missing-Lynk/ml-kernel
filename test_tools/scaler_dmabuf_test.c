@@ -111,9 +111,8 @@ static int heap_alloc(size_t len)
 
 			snprintf(path, sizeof(path), "/dev/dma_heap/%s", de->d_name);
 			hfd = open(path, O_RDWR | O_CLOEXEC);
-			if (hfd >= 0) {
+			if (hfd >= 0)
 				break;
-			}
 		}
 	}
 	closedir(d);
@@ -154,9 +153,8 @@ static int img_alloc(struct img *im, unsigned int w, unsigned int h)
 	im->size = im->off[2] + (size_t)im->cstride * (h / 2);
 
 	im->fd = heap_alloc(im->size);
-	if (im->fd < 0) {
+	if (im->fd < 0)
 		return -1;
-	}
 
 	im->va = mmap(NULL, im->size, PROT_READ | PROT_WRITE, MAP_SHARED, im->fd, 0);
 	if (im->va == MAP_FAILED) {
@@ -171,13 +169,11 @@ static int img_alloc(struct img *im, unsigned int w, unsigned int h)
 
 static void img_free(struct img *im)
 {
-	if (im->va) {
+	if (im->va)
 		munmap(im->va, im->size);
-	}
 
-	if (im->fd >= 0) {
+	if (im->fd >= 0)
 		close(im->fd);
-	}
 }
 
 /* plane p dims: Y = w x h, U/V = w/2 x h/2 */
@@ -198,9 +194,8 @@ static void fill_src(struct img *im)
 	sync_buf(im->fd, DMA_BUF_SYNC_WRITE, 1);
 	for (int p = 0; p < 3; p++) {
 		for (unsigned int y = 0; y < ph(im, p); y++) {
-			for (unsigned int x = 0; x < pw(im, p); x++) {
+			for (unsigned int x = 0; x < pw(im, p); x++)
 				im->va[im->off[p] + y * pstride(im, p) + x] = pat(x, y, p);
-			}
 		}
 	}
 	sync_buf(im->fd, DMA_BUF_SYNC_WRITE, 0);
@@ -240,14 +235,12 @@ static void dump_state(void)
 	char line[256];
 	FILE *f = fopen("/proc/arscaler/state", "r");
 
-	if (!f) {
+	if (!f)
 		return;
-	}
 
 	fprintf(stderr, "  --- /proc/arscaler/state ---\n");
-	while (fgets(line, sizeof(line), f)) {
+	while (fgets(line, sizeof(line), f))
 		fprintf(stderr, "  %s", line);
-	}
 
 	fclose(f);
 }
@@ -257,9 +250,8 @@ static int run_ioctl(unsigned long cmd, void *arg, const char *what)
 	errno = 0;
 	if (ioctl(g_sc, cmd, arg)) {
 		fprintf(stderr, "  %s failed errno=%d (%s)\n", what, errno, strerror(errno));
-		if (errno == ETIMEDOUT) {
+		if (errno == ETIMEDOUT)
 			fprintf(stderr, "  (-ETIMEDOUT: completion IRQ never fired)\n");
-		}
 
 		dump_state();
 		return -1;
@@ -315,17 +307,14 @@ static double verify_plane_box2x(const struct img *s, const struct img *d, int p
 			unsigned int e = got > ref ? got - ref : ref - got;
 
 			acc += e;
-			if (e > *maxerr) {
+			if (e > *maxerr)
 				*maxerr = e;
-			}
 
-			if (got < mn) {
+			if (got < mn)
 				mn = got;
-			}
 
-			if (got > mx) {
+			if (got > mx)
 				mx = got;
-			}
 		}
 	}
 

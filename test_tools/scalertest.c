@@ -144,8 +144,7 @@ static int run_op(const struct scaler_op *op)
 		fprintf(stderr, "  SCALER_IOC_SINGLE failed errno=%d (%s)\n",
 			errno, strerror(errno));
 		if (errno == ETIMEDOUT)
-			fprintf(stderr, "  (-ETIMEDOUT: completion IRQ never fired - "
-					"clock seq or register packing wrong)\n");
+			fprintf(stderr, "  (completion IRQ never fired: clock seq or register packing wrong)\n");
 		return -1;
 	}
 	__sync_synchronize();		/* order the engine's writes before our reads */
@@ -206,8 +205,10 @@ static double verify_box_2x(const struct buf *s, unsigned int sstride,
 			acc += e;
 			if (e > *maxerr)
 				*maxerr = e;
-			if (got < mn) mn = got;
-			if (got > mx) mx = got;
+			if (got < mn)
+				mn = got;
+			if (got > mx)
+				mx = got;
 		}
 	}
 	*has_structure = (mx - mn) > 16;	/* not a flat/blank frame */
@@ -251,9 +252,16 @@ int main(int argc, char **argv)
 	sstride = ALIGN16(W);
 
 	g_mmz = open("/dev/mmz_userdev", O_RDWR);
-	if (g_mmz < 0) { perror("open /dev/mmz_userdev"); return 1; }
+	if (g_mmz < 0) {
+		perror("open /dev/mmz_userdev");
+		return 1;
+	}
 	g_sc = open("/dev/arscaler", O_RDWR);
-	if (g_sc < 0) { perror("open /dev/arscaler"); close(g_mmz); return 1; }
+	if (g_sc < 0) {
+		perror("open /dev/arscaler");
+		close(g_mmz);
+		return 1;
+	}
 
 	/* One source (WxH) + one dst big enough for the largest test (identity WxH). */
 	if (buf_alloc(&src, (size_t)sstride * H))
@@ -275,17 +283,28 @@ int main(int argc, char **argv)
 	op.channels = 1;
 	memset(dst.va, 0xAA, dst.size);		/* sentinel: catch "engine wrote nothing" */
 	printf("T1 identity full-frame %ux%u ... ", W, H); fflush(stdout);
-	if (run_op(&op)) { fail = 1; dump_state(); goto done; }
+	if (run_op(&op)) {
+		fail = 1;
+		dump_state();
+		goto done;
+	}
 	bad = verify_identity(&src, sstride, 0, 0, &dst, sstride, W, H);
-	if (bad) { printf("FAIL (%ld px differ)\n", bad); fail = 2; dump_state(); }
-	else printf("PASS (bit-exact)\n");
+	if (bad) {
+		printf("FAIL (%ld px differ)\n", bad);
+		fail = 2;
+		dump_state();
+	} else {
+		printf("PASS (bit-exact)\n");
+	}
 
 	/* ---- T2: identity cropped sub-rect at 1:1 (bit-exact) --------------- */
 	{
 		unsigned int cx = 16, cy = 8, cw = W / 2, ch = H / 2;
 
-		if (cx + cw > W) cw = W - cx;
-		if (cy + ch > H) ch = H - cy;
+		if (cx + cw > W)
+			cw = W - cx;
+		if (cy + ch > H)
+			ch = H - cy;
 		dstride = ALIGN16(cw);
 		memset(&op, 0, sizeof(op));
 		op.srcphy = src.phys; op.srcw = W; op.srch = H; op.srcstride = sstride;
@@ -294,10 +313,19 @@ int main(int argc, char **argv)
 		op.channels = 1;
 		memset(dst.va, 0xAA, dst.size);
 		printf("T2 identity crop @%u,%u %ux%u ... ", cx, cy, cw, ch); fflush(stdout);
-		if (run_op(&op)) { fail = 1; dump_state(); goto done; }
+		if (run_op(&op)) {
+			fail = 1;
+			dump_state();
+			goto done;
+		}
 		bad = verify_identity(&src, sstride, cx, cy, &dst, dstride, cw, ch);
-		if (bad) { printf("FAIL (%ld px differ)\n", bad); fail = 2; dump_state(); }
-		else printf("PASS (bit-exact)\n");
+		if (bad) {
+			printf("FAIL (%ld px differ)\n", bad);
+			fail = 2;
+			dump_state();
+		} else {
+			printf("PASS (bit-exact)\n");
+		}
 	}
 
 	/* ---- T3: 2:1 downscale vs software box reference (tolerance) -------- */
@@ -312,7 +340,11 @@ int main(int argc, char **argv)
 		op.channels = 1;
 		memset(dst.va, 0xAA, dst.size);
 		printf("T3 downscale %ux%u -> %ux%u ... ", W, H, dw, dh); fflush(stdout);
-		if (run_op(&op)) { fail = 1; dump_state(); goto done; }
+		if (run_op(&op)) {
+			fail = 1;
+			dump_state();
+			goto done;
+		}
 		mean = verify_box_2x(&src, sstride, &dst, dstride, dw, dh, &maxerr, &has_struct);
 		printf("mean|err|=%.2f max=%u %s\n", mean, maxerr,
 		       has_struct ? "" : "(FLAT!)");

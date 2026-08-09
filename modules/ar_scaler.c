@@ -699,6 +699,7 @@ static void ar_scaler_set_freq_div(struct scaler_dev *sc, u32 freq)
 static long ar_scaler_set_frequency(struct scaler_dev *sc, void __user *arg)
 {
 	int freq;
+
 	if (copy_from_user(&freq, arg, sizeof(freq)))
 		return -EFAULT;
 

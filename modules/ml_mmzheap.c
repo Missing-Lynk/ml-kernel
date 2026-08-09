@@ -70,7 +70,8 @@ static struct sg_table *mmz_map_dma_buf(struct dma_buf_attachment *at,
 	}
 
 	/* Page-less segment: WC coherent memory needs no cache maintenance,
-	 * and both importers consume only the DMA address/length. */
+	 * and both importers consume only the DMA address/length.
+	 */
 	sg_dma_address(sgt->sgl) = b->daddr;
 	sg_dma_len(sgt->sgl) = b->len;
 	sgt->sgl->length = b->len;

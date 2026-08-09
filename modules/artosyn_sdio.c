@@ -1080,7 +1080,8 @@ static void artosyn_sdio_send_data(struct artosyn_sdio_device *dev)
 					    skb->data[0]);
 			/* start_xmit inc'd inflight for this skb; every other consume path decs it.
 			 * Missing the dec here leaks inflight upward on any IPv4-with-options /
-			 * malformed packet until it pins at the cap and the TX queue stops forever. */
+			 * malformed packet until it pins at the cap and the TX queue stops forever.
+			 */
 			atomic_dec_if_positive(&dev->inflight);
 			kfree_skb(skb);
 			continue;
@@ -1091,7 +1092,8 @@ static void artosyn_sdio_send_data(struct artosyn_sdio_device *dev)
 		 * the one per-batch trailer - i.e. skb->len - 4, NOT skb->len + 4. The vendor aligns
 		 * exactly this (@0x2b90: `+ 0x1fb` = ALIGN(len + used - 4, 512)); checking skb->len + 4
 		 * overstated a full-MTU (4096) packet as needing 4608 > 4096-byte grant and DROPPED every
-		 * data packet while only tiny TCP ACKs got through (SSH copies stalled at ~0 bytes). */
+		 * data packet while only tiny TCP ACKs got through (SSH copies stalled at ~0 bytes).
+		 */
 		if (ALIGN(used + skb->len - IP_HEAD_SHRINK + LINK_TRAILER_LEN, ARSDIO_BLOCK)
 		    > dev->tx_write_acc) {
 			if (used) {
@@ -1416,10 +1418,10 @@ static int artosyn_sdio_net_close(struct net_device *ndev)
 		kfree_skb(skb);
 	}
 
-  skb_queue_purge(&eth->cmd_txq);
+	skb_queue_purge(&eth->cmd_txq);
 	netif_carrier_off(ndev);
 
-  return 0;
+	return 0;
 }
 
 static netdev_tx_t artosyn_sdio_net_start_xmit(struct sk_buff *skb,
