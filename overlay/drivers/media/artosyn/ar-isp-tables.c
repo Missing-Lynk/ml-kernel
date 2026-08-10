@@ -39,6 +39,7 @@
 #include "ar-isp-colour.h"
 #include "vendor-tables/ar-isp-ccm-init.h"
 #include "ar-isp-rnr.h"
+#include "vendor-tables/ar-isp-rgb2yuv.h"
 #include "ar-isp-lnr.h"
 #include "ar-isp-de3d.h"
 #include "ar-isp-cfa.h"
@@ -113,6 +114,22 @@ static bool ltm = true;
 module_param(ltm, bool, 0644);
 MODULE_PARM_DESC(ltm,
 		 "own the LTM page and statistics buffer, publishing an identity curve (default on)");
+
+/*
+ * Which of the four colour-space matrices the library carries to install. The
+ * default is the one measured on the streaming vendor, so it changes no
+ * register value, only where the value comes from.
+ *
+ * The other three are the levers this makes reachable: full range puts black at
+ * 0 and white at 255, limited range at 16 and 235, and BT.709 is the usual
+ * choice at HD where the vendor picked BT.601. Anything but the default is a
+ * departure from the vendor and has to be judged end to end, because the
+ * receiving side has to agree.
+ */
+static int csc = AR_ISP_CSC_DEFAULT;
+module_param(csc, int, 0644);
+MODULE_PARM_DESC(csc,
+		 "colour-space matrix index: 0 bt601_full (the vendor's), 1 bt709_full, 2 bt601_limited, 3 bt709_limited; -1 leaves the replayed bank alone");
 
 /*
  * The ladder abscissa is 3A state the vendor computes per frame: the commanded
@@ -637,6 +654,39 @@ void ar_isp_cnf_apply(struct ar_isp *isp, bool verbose)
 			 cnf_gain >> 8, (cnf_gain & 0xff) * 1000 / 256, strength,
 			 AR_ISP_CNF_STRENGTH_REG, AR_ISP_CNF_NORM_REG_A,
 			 AR_ISP_CNF_NORM_REG_B);
+}
+
+/*
+ * The colour-space matrix, from the four the vendor library carries.
+ *
+ * Not gain-keyed and not 3A-driven: the vendor picks one matrix at set_csc time
+ * and never moves it, so this runs once per configure alongside the rest of the
+ * static state. Owning it replaces six replayed words with the coefficients they
+ * were packed from, and makes the choice of matrix a parameter instead of an
+ * accident of which capture the replay came from.
+ *
+ * The levels consequence is the reason the alternatives are carried rather than
+ * dropped: the full-range matrices put black at 0 and white at 255, the limited
+ * ones at 16 and 235, and that decision reaches everything downstream of the
+ * ISP including the encoder and the DVR file.
+ */
+void ar_isp_rgb2yuv_apply(struct ar_isp *isp)
+{
+	const struct ar_isp_csc *m;
+
+	if (csc < 0)
+		return;
+
+	if (csc >= (int)ARRAY_SIZE(ar_isp_csc_matrices)) {
+		dev_warn(isp->dev, "csc=%d out of range, leaving the bank replayed\n",
+			 csc);
+		return;
+	}
+
+	m = &ar_isp_csc_matrices[csc];
+
+	for (unsigned int i = 0; i < AR_ISP_RGB2YUV_REGS; i++)
+		writel(m->regs[i], isp->base + AR_ISP_RGB2YUV_BANK + i * 4);
 }
 
 /*

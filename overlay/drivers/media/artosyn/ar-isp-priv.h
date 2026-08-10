@@ -138,6 +138,7 @@ void ar_isp_lnr_apply(struct ar_isp *isp, bool verbose);
 void ar_isp_de3d_apply(struct ar_isp *isp, bool verbose);
 void ar_isp_cfa_apply(struct ar_isp *isp, bool verbose);
 void ar_isp_cnf_apply(struct ar_isp *isp, bool verbose);
+void ar_isp_rgb2yuv_apply(struct ar_isp *isp);
 void ar_isp_ladders_apply(struct ar_isp *isp, bool verbose);
 void ar_isp_tables_apply(struct ar_isp *isp);
 void ar_isp_tables_prepare(struct ar_isp *isp);

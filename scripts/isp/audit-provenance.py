@@ -59,7 +59,7 @@ REGDIFF = HERE / 'isp-regdiff.py'
 
 # The count of unexplained registers this tree is known to have. Lower it as
 # stages are recovered; never raise it without saying why in the commit.
-BASELINE = 139
+BASELINE = 136
 
 # ar_isp_recovered is generated but no longer applied: every one of its entries
 # is past the end of a submodule image, so none has a vendor value behind it.
@@ -212,6 +212,12 @@ def derived_registers() -> dict[int, str]:
     add((int(m, 16) for m in re.findall(
         r'\{\s*(0x[0-9a-f]+),\s*0x[0-9a-f]+\s*\}',
         (DRIVERS / 'ar-isp-dpc.h').read_text())), 'dpc')
+
+    # rgb2yuv packs one of the library's four CSC matrices rather than reading
+    # the tuning file, the same provenance as the CCM init blocks above.
+    csc = defines(DRIVERS / 'vendor-tables' / 'ar-isp-rgb2yuv.h')
+    add((csc['AR_ISP_RGB2YUV_BANK'] + 4 * i
+         for i in range(csc['AR_ISP_RGB2YUV_REGS'])), 'rgb2yuv')
 
     return out
 

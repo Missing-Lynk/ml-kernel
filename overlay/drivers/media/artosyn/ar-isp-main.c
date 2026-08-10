@@ -296,6 +296,7 @@ static void ar_isp_configure(struct ar_isp *isp)
 	 * Last, because the correction pass above replays 60 registers these
 	 * stages derive. See ar_isp_ladders_apply.
 	 */
+	ar_isp_rgb2yuv_apply(isp);
 	ar_isp_ladders_apply(isp, false);
 
 	isp->configured = true;
@@ -502,6 +503,7 @@ static void ar_isp_configure_prefix(struct ar_isp *isp, size_t n)
 	ar_isp_apply(isp, ar_isp_output_fix, ARRAY_SIZE(ar_isp_output_fix));
 	ar_isp_apply(isp, ar_isp_lnr_fix, ARRAY_SIZE(ar_isp_lnr_fix));
 	ar_isp_tables_apply(isp);
+	ar_isp_rgb2yuv_apply(isp);
 	ar_isp_ladders_apply(isp, false);
 
 	isp->configured = true;
