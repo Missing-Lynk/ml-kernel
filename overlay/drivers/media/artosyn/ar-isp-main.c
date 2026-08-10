@@ -292,6 +292,12 @@ static void ar_isp_configure(struct ar_isp *isp)
 	 */
 	ar_isp_tables_apply(isp);
 
+	/*
+	 * Last, because the correction pass above replays 60 registers these
+	 * stages derive. See ar_isp_ladders_apply.
+	 */
+	ar_isp_ladders_apply(isp, false);
+
 	isp->configured = true;
 
 	dev_info(isp->dev,
@@ -417,11 +423,7 @@ static void ar_isp_arm_output(struct ar_isp *isp)
 	ar_isp_stats_publish(isp);
 	ar_isp_de3d_publish(isp);
 	ar_isp_ccm_apply(isp);
-	ar_isp_rnr_apply(isp, true);
-	ar_isp_lnr_apply(isp, true);
-	ar_isp_de3d_apply(isp, true);
-	ar_isp_cfa_apply(isp, true);
-	ar_isp_cnf_apply(isp, true);
+	ar_isp_ladders_apply(isp, true);
 	ar_isp_dpc_apply(isp);
 
 	if (gib)
@@ -500,6 +502,7 @@ static void ar_isp_configure_prefix(struct ar_isp *isp, size_t n)
 	ar_isp_apply(isp, ar_isp_output_fix, ARRAY_SIZE(ar_isp_output_fix));
 	ar_isp_apply(isp, ar_isp_lnr_fix, ARRAY_SIZE(ar_isp_lnr_fix));
 	ar_isp_tables_apply(isp);
+	ar_isp_ladders_apply(isp, false);
 
 	isp->configured = true;
 
@@ -545,13 +548,8 @@ static int ar_isp_ladders_set(void *data, u64 val)
 {
 	struct ar_isp *isp = data;
 
-	if (val) {
-		ar_isp_rnr_apply(isp, false);
-		ar_isp_lnr_apply(isp, false);
-		ar_isp_de3d_apply(isp, false);
-		ar_isp_cfa_apply(isp, false);
-		ar_isp_cnf_apply(isp, false);
-	}
+	if (val)
+		ar_isp_ladders_apply(isp, false);
 
 	return 0;
 }
@@ -639,6 +637,14 @@ DEFINE_SHOW_ATTRIBUTE(ar_isp_regs);
  * reports its state with no expectation. Word gates carry no expectation
  * because the vendor's "on" value is computed rather than constant, so a
  * non-zero word means running and nothing further can be asserted from a table.
+ * Nor does a stage flagged AR_ISP_STAGE_HW_RB, whose gate register the hardware
+ * drives: comparing a readback against a written value there measures the
+ * block, not the configuration.
+ *
+ * A mismatch is not automatically a defect. A stage the tuning file wants on
+ * and this driver never configures reads its bank as zero and reports one
+ * correctly, and two stages sharing a bit under opposite polarities make one of
+ * them mismatch whichever way the bit goes.
  */
 static int ar_isp_gates_show(struct seq_file *s, void *unused)
 {
@@ -691,6 +697,7 @@ static int ar_isp_gates_show(struct seq_file *s, void *unused)
 			 * against a state that was never recovered.
 			 */
 			if (want >= 0 && on >= 0 &&
+			    !(st->flags & AR_ISP_STAGE_HW_RB) &&
 			    gate->kind != AR_ISP_GATE_WORD &&
 			    gate->kind != AR_ISP_GATE_UNKNOWN) {
 				verdict = on == want ? "ok" : "MISMATCH";

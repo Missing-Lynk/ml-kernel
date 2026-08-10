@@ -42,6 +42,11 @@
 #define AR_ISP_STAGE_FETCH		0x01
 /* Reads no tuning flag, so the file cannot say what it should be. */
 #define AR_ISP_STAGE_NO_BLOB		0x02
+/*
+ * The gate register does not read back what was written to it, so comparing a
+ * readback against the tuning file measures the block and not the setup.
+ */
+#define AR_ISP_STAGE_HW_RB		0x04
 
 struct ar_isp_gate {
 	u16 reg;
@@ -284,7 +289,7 @@ static const struct ar_isp_stage ar_isp_stages[] = {
 	{ "decompander", 0x0000, 0x00906c, ar_isp_gates_decompander, 1, 0 },
 	{ "derolling_stats", 0x3900, 0x0b64f8, ar_isp_gates_derolling_stats, 2, 0 },
 	{ "digigain1", 0x4600, 0x0b4000, ar_isp_gates_digigain1, 1, 0 },
-	{ "dpc", 0x0c00, 0x006ce8, ar_isp_gates_dpc, 3, 0 },
+	{ "dpc", 0x0c00, 0x006ce8, ar_isp_gates_dpc, 3, AR_ISP_STAGE_HW_RB },
 	{ "drc", 0x3000, 0x017a88, ar_isp_gates_drc, 2, AR_ISP_STAGE_FETCH },
 	{ "drc_stats", 0x300c, 0x000000, ar_isp_gates_drc_stats, 1, AR_ISP_STAGE_NO_BLOB },
 	{ "face_rro_stats", 0x64c8, 0x0b64f8, ar_isp_gates_face_rro_stats, 1, 0 },

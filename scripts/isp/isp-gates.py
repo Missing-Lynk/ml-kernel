@@ -1010,6 +1010,21 @@ EXCLUDE = ('ltm_v1', 'drc_v1', 'gamma_v1', 'hdr')
 # the table and the decision is the driver's.
 FETCH = ('lsc', 'ltm', 'gtm2', 'gamma', 'drc')
 
+# Stages whose gate register does not read back what was written to it, so the
+# readback cannot judge the gate.
+#
+# dpc 0x0c10: the vendor writes 0x01 four times during setup, 0x03 once, then
+# 0x02 on every frame for the rest of the trace, 413 times, and never anything
+# else. Five independent captures of that one unchanging write pattern read
+# 0x00, 0x01 and 0x02, on the streaming vendor and on our own unit alike. A
+# register that holds three values under one write is hardware-driven, like the
+# cfa pair already recorded in audit-provenance.py's EXPLAINED.
+#
+# The same evidence undercuts reading its three bits as three gates at all: the
+# written sequence 0x01, 0x03, 0x02 is what a small mode field looks like, and
+# the set-and-cleared test cannot tell a mode field from independent gates.
+HW_READBACK = ('dpc',)
+
 KINDS = {
     None: 'AR_ISP_GATE_UNKNOWN',
     'enable': 'AR_ISP_GATE_BIT_ENABLE',
@@ -1060,6 +1075,11 @@ HEADER_DOC = '''/* SPDX-License-Identifier: GPL-2.0 */
 #define AR_ISP_STAGE_FETCH\\t\\t0x01
 /* Reads no tuning flag, so the file cannot say what it should be. */
 #define AR_ISP_STAGE_NO_BLOB\\t\\t0x02
+/*
+ * The gate register does not read back what was written to it, so comparing a
+ * readback against the tuning file measures the block and not the setup.
+ */
+#define AR_ISP_STAGE_HW_RB\\t\\t0x04
 
 struct ar_isp_gate {
 \\tu16 reg;
@@ -1108,6 +1128,8 @@ def emit_header(stages, out):
 
         if st['blob_off'] is None:
             flags.append('AR_ISP_STAGE_NO_BLOB')
+        if st['stage'] in HW_READBACK:
+            flags.append('AR_ISP_STAGE_HW_RB')
 
         off = st['blob_off'] or 0
         bank = st['bank'] if st['bank'] is not None else st['gates'][0]['reg']

@@ -640,6 +640,29 @@ void ar_isp_cnf_apply(struct ar_isp *isp, bool verbose)
 }
 
 /*
+ * Recompute the five gain-keyed banks from the tuning file.
+ *
+ * Must run after every register replay, not only at output arm. The measured
+ * correction pass carries 60 of its 101 entries on registers these five stages
+ * derive: rnr's whole ladder, 22 of lnr's bank, 24 of de3d's and 2 of cnf's,
+ * each frozen at the abscissa its capture was taken at. A configure that stops
+ * after the replay leaves those banks holding the recording, which is the state
+ * the derivation exists to replace, and the divergence is invisible until the
+ * gain moves off the captured point.
+ *
+ * Replay first, derive last, which is the order output arm already used and the
+ * order the vendor's own apply follows.
+ */
+void ar_isp_ladders_apply(struct ar_isp *isp, bool verbose)
+{
+	ar_isp_rnr_apply(isp, verbose);
+	ar_isp_lnr_apply(isp, verbose);
+	ar_isp_de3d_apply(isp, verbose);
+	ar_isp_cfa_apply(isp, verbose);
+	ar_isp_cnf_apply(isp, verbose);
+}
+
+/*
  * Fill the owned buffers and hand them to the block.
  *
  * Runs after the register replay, which arms the vendor's addresses and commits
