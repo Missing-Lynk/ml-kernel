@@ -21,6 +21,9 @@ Classes, in the order they are tested:
                           image carries for that register, per ar-isp-library.h
   explained               hand-recovered by reading the vendor packer, with the
                           finding recorded in EXPLAINED below
+  stage gate              every bit the driver writes is a stage enable or
+                          bypass recovered from the library, per
+                          vendor-tables/ar-isp-gates.h
   zero write              the register is cleared; there is no vendor datum to
                           source
   frame geometry / grid   the value decomposes into the configured frame or
@@ -50,12 +53,13 @@ HERE = pathlib.Path(__file__).resolve().parent
 DRIVERS = HERE.parent.parent / 'overlay' / 'drivers' / 'media' / 'artosyn'
 DEFAULTS = DRIVERS / 'vendor-tables' / 'ar-isp-defaults.h'
 LIBRARY = DRIVERS / 'vendor-tables' / 'ar-isp-library.h'
+GATES = DRIVERS / 'vendor-tables' / 'ar-isp-gates.h'
 MAIN = DRIVERS / 'ar-isp-main.c'
 REGDIFF = HERE / 'isp-regdiff.py'
 
 # The count of unexplained registers this tree is known to have. Lower it as
 # stages are recovered; never raise it without saying why in the commit.
-BASELINE = 142
+BASELINE = 139
 
 # ar_isp_recovered is generated but no longer applied: every one of its entries
 # is past the end of a submodule image, so none has a vendor value behind it.
@@ -212,6 +216,28 @@ def derived_registers() -> dict[int, str]:
     return out
 
 
+def gate_masks() -> dict[int, int]:
+    """
+    Register to the mask of bits the recovered stage gates account for.
+
+    From vendor-tables/ar-isp-gates.h, which isp-gates.py generates out of the
+    library's own read-modify-writes. A register is only reclassified when the
+    gates cover every bit the driver writes to it: the top-level word holds one
+    or two bits for each of ten stages plus bit 1, which no module was seen to
+    write, so it stays unexplained and the covered bits are reported instead of
+    being claimed as the whole word.
+    """
+    out: defaultdict[int, int] = defaultdict(int)
+    body = GATES.read_text()
+
+    for reg, setm, clrm in re.findall(
+            r'\{\s*(0x[0-9a-f]{4}),\s*(0x[0-9a-f]{8}),\s*(0x[0-9a-f]{8}),',
+            body):
+        out[int(reg, 16)] |= int(setm, 16) | int(clrm, 16)
+
+    return dict(out)
+
+
 def bank_lookup() -> list[tuple[int, str]]:
     banks = [(int(base, 16), name) for base, name in re.findall(
         r'\(0x([0-9A-Fa-f]+),\s*"(\w+)"\)', REGDIFF.read_text())]
@@ -232,6 +258,7 @@ def is_geometry(value: int) -> bool:
 def main() -> int:
     library, final, origin = load_tables()
     derived = derived_registers()
+    gates = gate_masks()
     banks = bank_lookup()
 
     def bank_of(off: int) -> str:
@@ -251,6 +278,13 @@ def main() -> int:
 
         if off in EXPLAINED:
             return 'explained'
+
+        # After the zero test below would be wrong for a gate that happens to
+        # read zero, but claiming one is weaker than calling it a zero write:
+        # a cleared register has no vendor datum behind it either way, so the
+        # conservative class keeps it.
+        if value and off in gates and value & ~gates[off] == 0:
+            return 'stage gate'
 
         if not value:
             return 'zero write'
@@ -275,8 +309,8 @@ def main() -> int:
                 overridden.append(off)
 
     order = ['derived from the blob', 'library image', 'explained',
-             'zero write', 'frame geometry / grid', 'vendor DMA address',
-             'UNEXPLAINED']
+             'stage gate', 'zero write', 'frame geometry / grid',
+             'vendor DMA address', 'UNEXPLAINED']
     print(f'ISP registers the driver writes: {len(final)}\n')
     for kind in order:
         print(f'  {tally[kind]:5}  {kind}')

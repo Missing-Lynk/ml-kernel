@@ -49,6 +49,7 @@
 #include <linux/platform_device.h>
 
 #include "vendor-tables/ar-isp-defaults.h"
+#include "vendor-tables/ar-isp-gates.h"
 #include "ar-isp-priv.h"
 #include "ar-camera-hook.h"
 #include "ar-isp-stats.h"
@@ -625,6 +626,95 @@ static int ar_isp_regs_show(struct seq_file *s, void *unused)
 DEFINE_SHOW_ATTRIBUTE(ar_isp_regs);
 
 /*
+ * Every stage's gate, read back and compared against the tuning file.
+ *
+ * The recovery in vendor-tables/ar-isp-gates.h says which register and bit
+ * gates each submodule and which way round it reads; the tuning file says
+ * what the vendor asks for. This reads the register and reports the two side
+ * by side, and nothing else: no gate is written here, so the node is a parity
+ * oracle rather than a control, and it is what confirms a polarity on hardware
+ * instead of encoding an unverified one.
+ *
+ * A stage with no tuning flag, an unresolved polarity or a whole-word gate
+ * reports its state with no expectation. Word gates carry no expectation
+ * because the vendor's "on" value is computed rather than constant, so a
+ * non-zero word means running and nothing further can be asserted from a table.
+ */
+static int ar_isp_gates_show(struct seq_file *s, void *unused)
+{
+	struct ar_isp *isp = s->private;
+	const u8 *blob = isp->tuning ? isp->tuning->data : NULL;
+	unsigned int mismatches = 0;
+
+	seq_printf(s, "%-16s %-8s %-6s %-11s %-5s %-5s %s\n",
+		   "stage", "gate", "bit", "live", "state", "blob", "verdict");
+
+	for (unsigned int i = 0; i < ARRAY_SIZE(ar_isp_stages); i++) {
+		const struct ar_isp_stage *st = &ar_isp_stages[i];
+		int want = -1;
+
+		if (blob && st->blob_gate &&
+		    st->blob_gate + 4 <= isp->tuning->size)
+			want = ar_isp_get_le32(blob + st->blob_gate) ? 1 : 0;
+
+		for (unsigned int g = 0; g < st->n_gates; g++) {
+			const struct ar_isp_gate *gate = &st->gates[g];
+			u32 word = readl(isp->base + gate->reg);
+			const char *verdict = "";
+			int on = -1;
+			char bit[8];
+
+			switch (gate->kind) {
+			case AR_ISP_GATE_BIT_ENABLE:
+				on = word & gate->set_mask ? 1 : 0;
+				break;
+
+			case AR_ISP_GATE_BIT_BYPASS:
+				on = word & gate->set_mask ? 0 : 1;
+				break;
+
+			case AR_ISP_GATE_WORD:
+				on = word ? 1 : 0;
+				break;
+			}
+
+			if (gate->set_mask)
+				scnprintf(bit, sizeof(bit), "%u",
+					  __ffs(gate->set_mask));
+			else
+				strscpy(bit, "word", sizeof(bit));
+
+			/*
+			 * Only a bit gate with a recovered polarity and a
+			 * tuning flag can disagree. Everything else is
+			 * reported without a verdict rather than judged
+			 * against a state that was never recovered.
+			 */
+			if (want >= 0 && on >= 0 &&
+			    gate->kind != AR_ISP_GATE_WORD &&
+			    gate->kind != AR_ISP_GATE_UNKNOWN) {
+				verdict = on == want ? "ok" : "MISMATCH";
+				if (on != want)
+					mismatches++;
+			}
+
+			seq_printf(s, "%-16s 0x%04x   %-6s 0x%08x  %-5d %-5d %s\n",
+				   g ? "" : st->name, gate->reg, bit, word, on,
+				   want, verdict);
+		}
+	}
+
+	if (!blob)
+		seq_puts(s, "\nno tuning file: blob column is -1 throughout\n");
+
+	seq_printf(s, "\n%u gate%s disagree with the tuning file\n",
+		   mismatches, mismatches == 1 ? "" : "s");
+
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(ar_isp_gates);
+
+/*
  * The AE zone grid, decoded.
  *
  * Prints the per-zone luma mean as a 36-column by 16-row map, plus the frame
@@ -752,6 +842,8 @@ static int ar_isp_probe(struct platform_device *pdev)
 	debugfs_create_file_unsafe("configure", 0600, isp->debugfs, isp,
 				   &ar_isp_configure_fops);
 	debugfs_create_file("regs", 0400, isp->debugfs, isp, &ar_isp_regs_fops);
+	debugfs_create_file("gates", 0400, isp->debugfs, isp,
+			    &ar_isp_gates_fops);
 	debugfs_create_file("stats", 0400, isp->debugfs, isp, &ar_isp_stats_fops);
 	debugfs_create_file("stats_raw", 0400, isp->debugfs, isp,
 			    &ar_isp_stats_raw_fops);
