@@ -62,10 +62,10 @@
  * entry of a commit with 0x0104 = 1 then 0x0104 = 0, so a frame never sees a
  * half-updated exposure and gain pair.
  *
- * Not to be confused with 0x8250-0x826c and 0x8550-0x855c, which drift at
- * runtime on a streaming vendor and look like the obvious candidates. They are
- * sensor-MCU lens shading tables driven by the AWB path, and reloaded with
- * 0x8201. They have nothing to do with brightness.
+ * Not to be confused with 0x8250-0x826d and 0x8550-0x855c, which look like the
+ * obvious candidates. They are the sensor-MCU lens shading tables, committed
+ * with 0x8201, and they have nothing to do with brightness. Nothing moves them
+ * at runtime either: see nt99235_shading_regs.
  */
 #define NT99235_REG_GROUP_HOLD		0x0104
 #define NT99235_REG_EXPOSURE_HI		0x0202
@@ -426,6 +426,38 @@ static const struct nt99235_reg nt99235_regs_1280x720p90[] = {
 	{ 0x8557, 0x28 }, { 0x8558, 0x15 }, { 0x8559, 0x3c }, { 0x855a, 0x27 },
 	{ 0x855b, 0x2b }, { 0x855c, 0x17 }, { 0x826c, 0x80 }, { 0x826d, 0x04 },
 	{ 0x826c, 0x20 }, { 0x9040, 0x09 }, { 0x9023, 0x60 }, { 0x8201, 0x0f },
+};
+
+/* The lens shading tables, installed after the mode table.
+ *
+ * The sensor object libsns_nt99235.so exports carries a shading entry point
+ * (the function at 0x6e80, reached through the pointer at data 0x1b128) which
+ * the MPP layer calls with a selector: 0 installs this table, 1 installs a flat
+ * 0xff/0x00 one. It is not reached from AWB. The AWB sensor callback is a
+ * single function that memsets an eight-byte struct and fills it from two
+ * static u16 arrays, so it reports capability and writes no sensor register at
+ * all.
+ *
+ * It is mode-independent, and that is the point of it. Three of the four mode
+ * tables already carry these values, but 1920x1080p60 at two lanes carries its
+ * own set and the install overwrites them. Programming the mode table and
+ * stopping is what left 26 sensor registers differing from the vendor on the
+ * mode this driver actually runs.
+ *
+ * Validated on hardware: with this installed, all 184 sensor registers read
+ * back over i2c mid-stream are bit-identical to the streaming vendor's, 0x826c
+ * at 0x80 included, where every mode table ends at 0x20.
+ */
+static const struct nt99235_reg nt99235_shading_regs[] = {
+	{ 0x8250, 0x29 }, { 0x8251, 0x15 }, { 0x8252, 0x00 }, { 0x8253, 0x38 },
+	{ 0x8254, 0x23 }, { 0x8255, 0x30 }, { 0x8256, 0x1d }, { 0x8257, 0x26 },
+	{ 0x8258, 0x13 }, { 0x8259, 0x3b }, { 0x825a, 0x26 }, { 0x825b, 0x2a },
+	{ 0x825c, 0x15 }, { 0x825d, 0x80 }, { 0x825e, 0x04 }, { 0x8550, 0x2b },
+	{ 0x8551, 0x17 }, { 0x8552, 0x00 }, { 0x8553, 0x3a }, { 0x8554, 0x25 },
+	{ 0x8555, 0x32 }, { 0x8556, 0x1f }, { 0x8557, 0x28 }, { 0x8558, 0x15 },
+	{ 0x8559, 0x3c }, { 0x855a, 0x27 }, { 0x855b, 0x2b }, { 0x855c, 0x17 },
+	/* Control and commit, in the vendor's order. */
+	{ 0x826c, 0x80 }, { 0x826d, 0x04 }, { 0x8201, 0x0f },
 };
 
 /* The four modes the sensor library supports. cmos_set_image_mode rejects any
@@ -965,6 +997,15 @@ static int nt99235_start_stream(struct nt99235 *nt99235)
 
 	ret = nt99235_write_regs(nt99235, nt99235->mode->regs,
 				 nt99235->mode->num_regs);
+	if (ret)
+		return ret;
+
+	/* After the mode table, which carries shading values of its own that
+	 * this overwrites, and unconditionally, because the vendor's MPP layer
+	 * calls it for every mode.
+	 */
+	ret = nt99235_write_regs(nt99235, nt99235_shading_regs,
+				 ARRAY_SIZE(nt99235_shading_regs));
 	if (ret)
 		return ret;
 

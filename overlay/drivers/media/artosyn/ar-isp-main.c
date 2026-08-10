@@ -55,6 +55,61 @@
 #include "ar-isp-stats.h"
 #include "ar-isp-regs.h"
 
+/*
+ * Registers the hardware writes, which the correction pass must not.
+ *
+ * That pass is a state diff against the streaming vendor, not a write diff, and
+ * where the block owns a register its state is not configuration. All three
+ * registers known to be hardware-written reached the table this way, and the
+ * vendor is never seen writing any of them: 0x0834 and 0x08a8 read back values
+ * other than the ones written to them on two independent boots, and 0x2e98 is
+ * de3d's line-time latch, which the whole write trace never touches once.
+ *
+ * Writing a latch back is meaningless at best. The offsets stay in the
+ * generated table, because that table records what was measured; this is where
+ * the driver declines to replay it.
+ *
+ * Confirmed on hardware once the writes stopped: 0x0834 and 0x08a8 read back
+ * live values that track the vendor's without matching them, which is what a
+ * measurement does and what a configuration register cannot do. 0x0834 reads
+ * 0x00fc against the vendor's 0x0215, 0x08a8 reads 0x0319 against 0x0164.
+ *
+ * The other six come from reading every entry twice with the configuration
+ * held still: these change between two identical reads, so the hardware is
+ * writing them. 0x2e98 was already known and the test found it unprompted,
+ * which is the control on the method.
+ *
+ * That same A/B, toggling the trim parameter, measured what the pass is worth.
+ * Of the 92 entries the capture covered, 75 are inert: the register reads the
+ * same whether the pass runs or not, because a later applier writes it
+ * afterwards. Six are these hardware-owned ones. Only eleven change anything,
+ * and ten of those land exactly on the value written. 0x7054 lands in its high
+ * half only, so it is left in place rather than skipped on half a result.
+ *
+ * Nine entries were on pages the capture did not dump and are unmeasured:
+ * 0x1c1c, 0x1c38, 0x3060, 0x4c3c, 0x6514, 0x6db4, 0x757c and the two above.
+ */
+static const u16 ar_isp_hw_owned[] = {
+	0x00cc, 0x00f0, 0x0834, 0x08a8, 0x2838, 0x2e98, 0x3ca8, 0x3cac,
+};
+
+static bool ar_isp_is_hw_owned(u16 off)
+{
+	for (unsigned int i = 0; i < ARRAY_SIZE(ar_isp_hw_owned); i++)
+		if (ar_isp_hw_owned[i] == off)
+			return true;
+
+	return false;
+}
+
+static void ar_isp_apply_trim(struct ar_isp *isp)
+{
+	for (unsigned int i = 0; i < ARRAY_SIZE(ar_isp_vendor_trim); i++)
+		if (!ar_isp_is_hw_owned(ar_isp_vendor_trim[i].off))
+			writel(ar_isp_vendor_trim[i].val,
+			       isp->base + ar_isp_vendor_trim[i].off);
+}
+
 /* The measured correction pass. Off disables it, for an A/B of its effect. */
 static bool trim = true;
 module_param(trim, bool, 0644);
@@ -280,8 +335,7 @@ static void ar_isp_configure(struct ar_isp *isp)
 	 * includes registers the trace never showed us writing at all.
 	 */
 	if (trim)
-		ar_isp_apply(isp, ar_isp_vendor_trim,
-			     ARRAY_SIZE(ar_isp_vendor_trim));
+		ar_isp_apply_trim(isp);
 
 	ar_isp_apply(isp, ar_isp_output_fix, ARRAY_SIZE(ar_isp_output_fix));
 	ar_isp_apply(isp, ar_isp_lnr_fix, ARRAY_SIZE(ar_isp_lnr_fix));

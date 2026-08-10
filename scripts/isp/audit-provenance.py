@@ -59,7 +59,7 @@ REGDIFF = HERE / 'isp-regdiff.py'
 
 # The count of unexplained registers this tree is known to have. Lower it as
 # stages are recovered; never raise it without saying why in the commit.
-BASELINE = 136
+BASELINE = 128
 
 # ar_isp_recovered is generated but no longer applied: every one of its entries
 # is past the end of a submodule image, so none has a vendor value behind it.
@@ -69,7 +69,10 @@ DEAD_TABLE = 'ar_isp_recovered'
 # The frame and statistics-grid dimensions the driver configures. A register
 # whose value is one of these, or a pair of them packed into halfwords, is
 # carrying geometry rather than tuning data.
-GEOMETRY = {1920, 1080, 960, 540, 36, 16, 1088, 1092}
+# 1928 is the frame width padded by 8, which de3d's spatial filter needs for
+# its border, and 241 and 135 are that padded frame divided by 8, its block
+# grid: 1928/8 = 241 exactly and 1080/8 = 135 exactly.
+GEOMETRY = {1920, 1080, 960, 540, 36, 16, 1088, 1092, 1928, 241, 135}
 
 # The vendor's MMZ physical range. Addresses here are vendor allocations that
 # the driver replaces with its own at arm time.
@@ -145,6 +148,19 @@ def load_tables() -> tuple[dict[int, int], dict[int, int], dict[int, str]]:
         for off, val in arrays[name]:
             final[off] = val
             origin[off] = name
+
+    # Registers the driver declines to replay because the hardware owns them.
+    # They stay in the generated table, which records what was measured, so the
+    # skip list in ar-isp-main.c is the authority on what is actually written.
+    body = re.search(r'ar_isp_hw_owned\[\]\s*=\s*\{([^}]*)\}', MAIN.read_text())
+    if not body:
+        sys.exit(f'{MAIN.name}: no ar_isp_hw_owned array. Without it this audit '
+                 'counts registers the driver does not write, which reads as '
+                 'coverage it does not have.')
+
+    for off in re.findall(r'0x[0-9a-f]+', body.group(1)):
+        final.pop(int(off, 16), None)
+        origin.pop(int(off, 16), None)
 
     return library, final, origin
 
