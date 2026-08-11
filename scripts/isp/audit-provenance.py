@@ -30,6 +30,11 @@ Classes, in the order they are tested:
                           statistics-grid dimensions, which the driver owns
   vendor DMA address      a vendor buffer address the driver overwrites with
                           its own allocation at runtime
+  stage switched off      the register belongs to a stage the gate and the
+                          tuning file independently agree is disabled, so it
+                          has no operating point to be wrong at; see
+                          DISABLED_STAGES, and note this reverts to a recording
+                          the day the stage is enabled
   UNEXPLAINED             everything else: the value exists only in the MMIO
                           write trace or in a live capture diff
 
@@ -59,7 +64,7 @@ REGDIFF = HERE / 'isp-regdiff.py'
 
 # The count of unexplained registers this tree is known to have. Lower it as
 # stages are recovered; never raise it without saying why in the commit.
-BASELINE = 78
+BASELINE = 60
 
 # ar_isp_recovered is generated but no longer applied: every one of its entries
 # is past the end of a submodule image, so none has a vendor value behind it.
@@ -180,6 +185,41 @@ for _off, _what in LTM_RECIPROCALS.items():
         LTM_BANK + _off,
         f'ltm: 2^26 divided by {_what}, precomputed so the block normalises a '
         f'tile histogram by multiplying')
+
+
+# Stages both the register gate and the vendor's own tuning file agree are
+# switched off. A register on a stage that does not run cannot be
+# operating-point dependent, which is the whole risk the UNEXPLAINED class
+# exists to flag: there is no operating point. Reproducing the vendor's value
+# is parity, because the vendor had the stage off with that value too.
+#
+# This is weaker than a derivation and is deliberately its own class rather
+# than folded into EXPLAINED. **The moment a stage here is enabled its
+# registers become recordings again**, and for awbs_stats that is a live
+# prospect: it feeds AWB, which is still to be implemented.
+#
+# Two independent sources are required. The register gate comes from the
+# library's own read-modify-writes via ar-isp-gates.h, evaluated against the
+# value the driver installs. The tuning-file flag comes from the blob offset
+# that same table records, read with scripts/isp/isp-pipeline.py --tuning. They
+# are recovered from different places, so one cannot prop up the other.
+DISABLED_STAGES = {
+    'awbs_stats': (0x6C00, 0x7200,
+                   'gate 0x6c00 bit 0 clear in the installed 0x02, and the '
+                   'tuning flag at blob+0x0bbe98 reads 0'),
+    'hdr_awbs_stats': (0x1E44, 0x1F40,
+                       'gate 0x1e4c is a word gate reading 0, and it shares '
+                       'the tuning flag at blob+0x0bbe98, which reads 0'),
+}
+
+
+def disabled_span(off: int) -> str | None:
+    """The stage covering this register, when that stage is switched off."""
+    for name, (lo, hi, _why) in DISABLED_STAGES.items():
+        if lo <= off < hi:
+            return name
+
+    return None
 
 
 def reg_arrays(path: pathlib.Path) -> dict[str, list[tuple[int, int]]]:
@@ -389,6 +429,9 @@ def main() -> int:
         if is_geometry(value):
             return 'frame geometry / grid'
 
+        if disabled_span(off):
+            return 'stage switched off'
+
         return 'UNEXPLAINED'
 
     tally: Counter[str] = Counter()
@@ -404,7 +447,7 @@ def main() -> int:
 
     order = ['derived from the blob', 'library image', 'explained',
              'stage gate', 'zero write', 'frame geometry / grid',
-             'vendor DMA address', 'UNEXPLAINED']
+             'vendor DMA address', 'stage switched off', 'UNEXPLAINED']
     print(f'ISP registers the driver writes: {len(final)}\n')
     for kind in order:
         print(f'  {tally[kind]:5}  {kind}')

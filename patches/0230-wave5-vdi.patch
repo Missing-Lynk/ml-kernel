@@ -6,10 +6,10 @@ ENOMEM).
 
 --- a/drivers/media/platform/chips-media/wave5/wave5-vdi.c
 +++ b/drivers/media/platform/chips-media/wave5/wave5-vdi.c
-@@ -115,6 +115,20 @@
+@@ -115,6 +115,31 @@
  	return len;
  }
- 
+
 +/*
 + * Artosyn: running tally of codec-pool demand. The per-device coherent pool is
 + * page-granular first-fit (kernel/dma/coherent.c, downstream), so each allocation
@@ -22,6 +22,17 @@ ENOMEM).
 +static size_t ml_pool_rounded(size_t size)
 +{
 +	return PAGE_ALIGN(size);
++}
++
++/*
++ * The tally at a point the caller chooses. Every allocation traces itself at
++ * dev_dbg, which is off in a normal boot: a dozen and a half increments say
++ * nothing that the total does not, and the total is only meaningful once an
++ * instance has finished claiming its buffers. Encoder open reports it there.
++ */
++long long wave5_vdi_pool_used(void)
++{
++	return (long long)atomic64_read(&ml_pool_used);
 +}
 +
  int wave5_vdi_allocate_dma_memory(struct vpu_device *vpu_dev, struct vpu_buf *vb)
