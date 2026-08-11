@@ -19,7 +19,10 @@
  *   6  the module's static register image, which the vendor service carries
  *      in its own data: 0x3c68 to 0x3c80, the second copy of the strength
  *      group and its two companions
- *   1  0x3c74, the second copy's own enable bit in bit 0
+ *   1  0x3c74, whose bit 0 the vendor clears in the same basic block that
+ *      sets bit 0 of 0x3c64, at 0x1a25c8 against 0x1a25bc. No instruction in
+ *      the library ever sets it, and the packer never writes this offset, so
+ *      it is neither an enable nor a copy of the strength.
  */
 
 #ifndef AR_ISP_CNF_H

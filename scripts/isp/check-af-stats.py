@@ -62,7 +62,7 @@ BLOCK_W_DIV, BLOCK_H_DIV = 17, 10
 
 # Field widths, from the masks each store applies.
 OFFSET_BITS = 13
-SKIP_BITS, BLOCK_BITS = 9, 10
+LOW_BITS, HIGH_BITS = 9, 10
 
 # The mode-word ladder in the tuning blob: an enable flag, then rows indexed by
 # the AEC trigger. Word 0 of a row is unused by these fields.
@@ -151,11 +151,10 @@ def main() -> int:
         0x0C: ((g['y_offset'], g['x_offset']), OFFSET_BITS,
                'the metering offset'),
         0x10: ((g['roi_height'] // Y_SKIP_DIV, g['roi_width'] // X_SKIP_DIV),
-               SKIP_BITS, f'the skip, region over {Y_SKIP_DIV} and '
-                          f'{X_SKIP_DIV}'),
+               None, f'the skip, region over {Y_SKIP_DIV} and {X_SKIP_DIV}'),
         0x14: ((g['roi_height'] // BLOCK_H_DIV, g['roi_width'] // BLOCK_W_DIV),
-               BLOCK_BITS, f'the block size, region over {BLOCK_H_DIV} and '
-                           f'{BLOCK_W_DIV}'),
+               None, f'the block size, region over {BLOCK_H_DIV} and '
+                     f'{BLOCK_W_DIV}'),
     }
 
     for off, ((high, low), bits, what) in packed.items():
@@ -163,11 +162,15 @@ def main() -> int:
         got = final[BANK + off]
         print(f'  {BANK + off:#06x}  ({high} << 16) | {low} = {expected:#010x}  '
               f'driver {got:#010x}  {what}')
-        for value, edge in ((high, 'high'), (low, 'low')):
-            if value >> bits:
+        # The offsets share one width; the other two are 9 bits low and 10
+        # high, which the masks 0xfffffe00 and 0xfc00ffff at each store fix.
+        widths = ((high, HIGH_BITS, 'high'), (low, LOW_BITS, 'low')) \
+            if bits is None else ((high, bits, 'high'), (low, bits, 'low'))
+        for value, width, edge in widths:
+            if value >> width:
                 failures.append(
                     f'{BANK + off:#06x}: the {edge} field is {value}, which '
-                    f'does not fit the {bits} bits its store masks for')
+                    f'does not fit the {width} bits its store masks for')
 
         if got != expected:
             failures.append(f'{BANK + off:#06x}: the packer gives '

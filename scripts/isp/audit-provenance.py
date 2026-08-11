@@ -70,7 +70,7 @@ REGDIFF = HERE / 'isp-regdiff.py'
 
 # The count of unexplained registers this tree is known to have. Lower it as
 # stages are recovered; never raise it without saying why in the commit.
-BASELINE = 1
+BASELINE = 0
 
 # The frame and statistics-grid dimensions the driver configures. A register
 # whose value is one of these, or a pair of them packed into halfwords, is
@@ -80,8 +80,23 @@ BASELINE = 1
 # grid: 1928/8 = 241 exactly and 1080/8 = 135 exactly.
 GEOMETRY = {1920, 1080, 960, 540, 36, 16, 1088, 1092, 1928, 241, 135}
 
-# The vendor's MMZ physical range. Addresses here are vendor allocations that
-# the driver replaces with its own at arm time.
+# The vendor's MMZ physical range.
+#
+# The class name says the driver replaces these with its own allocation at arm
+# time. **That is true of 20 of the 34 and false of the other 14**, which have
+# no reference anywhere in the driver outside the generated table: 0x1d68,
+# 0x1dc0, 0x1e5c, 0x1f88, 0x5810, 0x5828, 0x5840, 0x5858, 0x6c90, 0x6d38,
+# 0x7574, 0x758c, 0x75a0, 0x75bc. The driver publishes the vendor's carveout
+# address and leaves it. For the four lut3d ones it also sets the descriptor
+# valid bit over them, so the block is pointed at vendor memory and armed.
+# Inert today because lut3d is disabled, and worth fixing before it is not.
+#
+# Two further gaps this rule does not see. ar_isp_output_arm in ar-isp-main.c
+# is not one of the tables load_tables() reads, so the eight vendor addresses
+# it writes are invisible here, as are the different values it installs at
+# 0x2e00 and 0x2e90. And there is no alignment test: any value in the 32 MB
+# window passes, which happens to be safe today since all 34 are 256-byte
+# aligned.
 DMA_LO, DMA_HI = 0x2A000000, 0x2C000000
 
 # What a bank does to the shipped image, from the enable states in
@@ -103,7 +118,7 @@ def bank_class(name: str) -> str:
     if name in STATISTICS:
         return 'statistics accumulator'
 
-    if name == 'base':
+    if name in ('base', 'isp_input'):
         return 'top-level control'
 
     return 'quiescent or disabled stage'
@@ -119,18 +134,22 @@ EXPLAINED = {
             'something else on two independent boots, and the packer stores '
             'to no such offset',
     0x08A8: 'cfa hardware-written, same evidence as 0x0834',
-    0x3C74: 'cnf second strength copy, bit 0 is that copy\'s own enable',
 
     # Descriptor lengths, in units of 32 bytes, sitting one word above the
     # pointer they describe. Each reproduces the fetch the driver itself sets
     # up, so the value follows from the allocation rather than from the trace.
-    0x0034: 'gamma descriptor 0 length: 0x80 units of 32 bytes is the 0x1000 '
-            'the block fetches, which is what ar-isp-tables.c builds',
-    0x0044: 'gamma descriptor 1 length, the same 0x1000 fetch; the three gamma '
+    0x0034: 'gamma descriptor 0 length, in 16-byte records: 0x80 records is '
+            'the 0x800 gamma page. The granule is 16 and not 32: no shift '
+            'exists in the library, and the three descriptors whose flush size '
+            'is a constant in the same function all give 16, compander 0x780 '
+            'against a 0x7800 flush, lut3d 0x280 against 0x2800, HDR 0x80 '
+            'against 0x800. ar-isp-colour.h already states it for lut3d',
+    0x0044: 'gamma descriptor 1 length, the same 0x800 page; the three gamma '
             'slots are channel aliases on one buffer',
-    0x0054: 'gamma descriptor 2 length, the same 0x1000 fetch',
-    0x0064: 'DRC descriptor length: 0x100 units of 32 bytes is the 0x2000 DRC '
-            'page, the size of the vendor template ar-isp-tables.c rebuilds',
+    0x0054: 'gamma descriptor 2 length, the same 0x800 page',
+    0x0064: 'DRC descriptor length: 0x100 records of 16 bytes is 0x1000. The '
+            'DRC flush covers the whole 0x2000 allocation rather than the '
+            'content, which is what made 32 look right',
 
     # Module-local descriptor valid bits. Each sits at a fixed offset from the
     # pointer its own module publishes, and the publish site is recovered.
@@ -161,12 +180,34 @@ RRO_FIELDS = {
     0x38: 'rro engine: the zone height written a second time, tracking '
           'engine+0x28',
     0x3c: 'rro engine: the saturation threshold, 0xff on every instance',
-    0x48: 'rro engine: the accumulator enable',
+}
+
+# The accumulator enable, on the four instances that have one. rro_stats does
+# not: its configure routine stores nothing at engine+0x48, its enable is bit 1
+# of engine+0x00 which EXPLAINED[0x6400] covers, and engine+0x48 there holds
+# the library image rather than a boolean.
+RRO_ACCUMULATOR_ENABLE = 0x48
+RRO_NO_ACCUMULATOR_FIELD = {'rro_stats'}
+
+# The zone the engine meters, which check-rro-engine.py derives from the grid
+# and the metered window. Recovering these retired an earlier note saying they
+# were read out of the configuration rather than derived; the vendor's own log
+# format string calls them x_skip and y_skip.
+RRO_ZONE = {
+    0x24: 'the zone width, the metered window over the 16-column grid',
+    0x28: 'the zone height, the metered window over the 36-row grid',
 }
 
 for _name, _bank, _shift in RRO_INSTANCES:
     for _off, _why in RRO_FIELDS.items():
         EXPLAINED.setdefault(_bank + _shift + _off, _why)
+
+    if _name not in RRO_NO_ACCUMULATOR_FIELD:
+        EXPLAINED.setdefault(_bank + _shift + RRO_ACCUMULATOR_ENABLE,
+                             'rro engine: the accumulator enable')
+
+    for _off, _why in RRO_ZONE.items():
+        EXPLAINED.setdefault(_bank + _shift + _off, f'rro engine: {_why}')
 
 # ltm's reciprocal tile areas. The packer at 0x18c418 divides 2^26 by each tile
 # area with sdiv, so the block can normalise a tile histogram by multiplying.
@@ -224,13 +265,12 @@ EXPLAINED.update({
             'layout the packing site at 0x1d1fdc builds field by field. '
             'Decodes to the frame padded by four in each dimension, which is '
             'the input the VIF measures',
-    0x0008: 'ISP top level: the active frame under the layout proven on '
-            '0x0004, which it reproduces exactly at the configured size and '
-            'with which it shares an untouched top nibble. No pointer to '
-            'base+0x8 is formed anywhere in the library; it is committed from '
-            'the register shadow at 0x1d4670 and its producer is not found, '
-            'so the layout is carried from its neighbour rather than proven '
-            'here',
+    0x0008: 'ISP top level: the template entry 49 image word verbatim. The '
+            'image carries 0x54870780 at both +0 and +4, so 0x0004 and this '
+            'start identical and only 0x0004 is then patched. There is no '
+            'producer to find: its decode to the active frame is the image\'s '
+            'own operating point, not a derivation, and it would read the '
+            'same at any other frame size',
     0x000C: 'ISP top level: a 3-bit selector cleared and bit 5 set, by the '
             'read-modify-write pair at 0x1c9614. Bit 5 moves in lockstep with '
             '0x4404 bit 0 and 0x4834 bit 2',
@@ -305,13 +345,14 @@ EXPLAINED.update({
             'write at 0x201b10, gated on get_start_opt()->[12268]; the other '
             'branch clears the same bit',
     0x6000: 'raw_hist_stats: the same bit and the same gate, at 0x1fef64',
-    0x1D84: 'hdr_rro_1_stats: a constant stored at 0x1fba48. The two non-HDR '
-            'instances write 1 in the same engine field, so this is the HDR '
-            'instance\'s mode value',
+    0x1D84: 'hdr_rro_1_stats: a constant built at 0x1fba38 and stored at '
+            '0x1fba48. The field is per-instance, not per-HDR: the other two '
+            'HDR instances store zero at the same site, 0x1fa9c8 and '
+            '0x1fcac0, and the trace shows 0x1d2c holding zero throughout',
 })
 
 # drc's three coefficient groups and its strength. The selector at 0x1a45e0 is
-# the cm2 pattern again: a ladder in the tuning blob at 0xd17b1c, stride 0xc8c,
+# the cm2 pattern again: a ladder in the tuning blob at 0x17b1c, stride 0xc8c,
 # six rows with AEC abscissas at 0x17a9c, and four paths through it. The packer
 # at 0x1a4200 writes the shadow, which is pushed to the bank with isp_memcpy.
 #
@@ -321,15 +362,19 @@ EXPLAINED.update({
 # 0xff000000 rather than anything saturating.
 EXPLAINED.update({
     0x3004: 'drc: byte 3 of the first coefficient group, the 255 of a delta '
-            'kernel at tuning record+0x80c, packed at 0x1a42b0',
+            'kernel at tuning record+0x80c whose 255 sits at record+0x828, '
+            'packed at 0x1a42b0',
     0x3014: 'drc: byte 3 of the second group, the same delta kernel at '
-            'record+0x848, packed at 0x1a4368',
+            'record+0x848 whose 255 sits at record+0x864, packed at 0x1a4368',
     0x3024: 'drc: byte 3 of the third group, the same delta kernel at '
-            'record+0x884, packed at 0x1a4424',
+            'record+0x884 whose 255 sits at record+0x8a0, packed at 0x1a4424',
     0x3060: 'drc: bits 8:0 are the strength from tuning record+0x808, which '
-            'reads 255, 255, 255, 200, 150, 100 down the six ladder rows; the '
-            'installed 150 is row 4, and the upper half is the image value '
-            'the mask at 0x1a4484 preserves',
+            'reads 255, 255, 255, 200, 150, 100 down the six ladder rows. The '
+            'same selector blends it, at 0x1a488c, so this is an operating '
+            'point and not a row: the traces hold 16 distinct values here and '
+            'settle on 160, with the installed 150 appearing once in the whole '
+            'corpus. The upper half is the image value the mask at 0x1a4484 '
+            'preserves',
 })
 
 # ltm's control word, which the configure and enable paths build from the
@@ -369,6 +414,37 @@ EXPLAINED.update({
             'zero back',
 })
 
+# The isp_input page's vsync monitor, written by isp_hw_module_set_ctl at
+# 0x1d3448. Two NEON quadword loads at 0x1d3a9c and 0x1d3aa0 copy one 32-byte
+# .rodata constant at 0x367370, {0, 3, 8, 14, 15, 23, 22, 31}, into the ISP
+# object at +2432, and each register then takes one slot into a 5-bit mux_sel
+# field by read-modify-write.
+#
+# The vendor's own debug command names the block and the field: the help text
+# at 0x367f10 is "ISP hardware info debug command", the printf at 0x368360 is
+# "mux_sel=%d module : %s : hcnt %d vcnt %d ro_blank_h=%d", and the %s indexes
+# a 32-pointer name table at 0x412510. So the eight values are a tap routing
+# map along the pipeline, and 0x7050 reports the counters for the selected tap.
+ISP_INPUT_MUX = {
+    0x7058: (0, 'vsync_in'),
+    0x7088: (3, 'debug_hdr_vysnc'),
+    0x708C: (8, 'rnr_vsync'),
+    0x7090: (14, 'dpp2ccml_vysnc'),
+    0x7094: (15, 'nr3d_vsync_o'),
+    0x7098: (23, 'defog_vsync'),
+    0x709C: (22, 'cnf_vsync'),
+    0x70A0: (31, 'debug_scaler_y_vsync'),
+}
+
+for _reg, (_index, _tap) in ISP_INPUT_MUX.items():
+    EXPLAINED[_reg] = (
+        f'isp_input vsync monitor: mux_sel = {_index} in bits 4:0, selecting '
+        f'the {_tap} tap, from the 0x367370 table copied at 0x1d3a9c')
+
+EXPLAINED[0x7058] += ('. Bits 14 and 19 are hardware state the vendor preserves '
+                      'by reading before writing; this driver installs them as '
+                      'a flat captured constant instead')
+
 # The colour and noise stages. wb, cm and cm2 all pack a gain into a field of
 # their first words, each from its own ladder in the tuning file, and the three
 # agree on one AE operating point: cm2's interpolation fraction is pinned by
@@ -391,13 +467,37 @@ EXPLAINED.update({
             '1 and 2 of the ladder at blob+0xa1378, and the blend fraction is '
             'pinned by the lo2 bound at 0x4824: the whole interval that bound '
             'allows gives floor(32 * gain) = 30, which is the installed field',
-    0x1800: 'rnr: bit 3 is (payload word 0 > 1), from the blob ladder at '
-            '0x7a6c, cleared at the driver\'s band where the image was built '
-            'at a higher one. Bits 0 to 2 come from the command handlers and '
-            'bits 5 to 7 from the image',
+    0x1800: 'rnr: bit 3 is packed at 0x19b250 by birnr, not by rnr, from word '
+            '1 of the birnr ladder at blob+0xb35e4. That ladder is all zeros '
+            'in this blob, so the bit is clear at every abscissa, which is the '
+            'whole difference from the image. Bits 0 to 2 come from the '
+            'command handlers and bits 5 to 7 from the image',
     0x1890: 'rnr: (line length - width + 500) with bit 16 set, built at '
             '0x19aab4 and stored in two parts at 0x19ab18 and 0x19ab28. At '
             '1080p60 the line length is 2200, so 2200 - 1920 + 500 = 0x30c',
+    0x4C40: 'lsc: the shading enable in bit 16 and the strength in Q7 in '
+            'the low byte, both from the lens-shading record the tuning '
+            'manager copies from blob+0x9090 at 0x174b10. The enabled branch '
+            'at 0x1b4e58 sets the bit and quantises the strength, the '
+            'disabled one at 0x1b4c20 clears it and forces 0x80, and both '
+            'fall into the same store. The shadow write uses a split base, '
+            'str at immediate 196 off x19+0x3400, which is why a search at '
+            '13508 found nothing',
+    0x0024: 'compander descriptor length, in 16-byte records, copied '
+            'verbatim by the vendor at 0x1b03ac. Structurally the same '
+            'descriptor as gamma 0x0030/0x0034 and DRC 0x0060/0x0064, and '
+            'ar-isp-regs.h already names it a length; it had been passing as '
+            'frame geometry only because 0x780 equals 1920',
+    0x3C74: 'cnf: the library image 0x000a0d25 with bit 0 cleared by the '
+            'read-modify-write at 0x1a25c8, in the same basic block that sets '
+            'bit 0 of 0x3c64 at 0x1a25bc. No instruction anywhere sets this '
+            'bit, and the cnf packer never writes this offset, so it is '
+            'neither an enable nor a copy of the strength',
+    0x4C24: 'lsc: the same 52 the enable path writes to bank+0x30, masked '
+            'into the low byte here at 0x1b6504 to 0x1b6514. It is not three '
+            'gate bits: 0x34 passes the gate test only because it equals '
+            '0x04|0x10|0x20 against clear masks of 0xff, which any low byte '
+            'would pass',
     0x4C30: 'lsc: a constant stored at 0x1b6518, the same 52 that also reaches '
             'bank+0x24 and bank+0x28. The alternate branch at 0x1b6608 writes '
             'zero here instead, selected by the toggle at priv+1560, so the '
@@ -408,14 +508,25 @@ EXPLAINED.update({
 # follow from it at the operating point this driver configures. The provenance
 # question is answered; the value is still a replay, and a stale one.
 MISMATCHED = {
+    0x2834: 'ltm: the vendor writes zero here, from its own template image, '
+            'which ar-isp-library.h carries and the trace shows installed in '
+            'the contiguous 0x2800 to 0x2844 block. The hardware then puts 4 '
+            'back, which is what the state capture read and what the trim '
+            'table replays. **Parity is writing zero, not writing 4.**',
     0x3D14: 'lnr: two 9-bit fields packed at 0x1bbc38 from payload words 0x88 '
             'and 0x8c, each scaled by the strength level at priv+752 through '
-            'the formula at 0x1bef08. Strength 55 reproduces both measured '
-            'vendor captures bit-exactly and is the only integer that fits '
-            'both. **At the abscissa this driver configures, 3938/256, that '
-            'gives 0x00490049 and not the 0x004a004a shipped**, which needs a '
-            'band-3 blend around gain 6.4 to 7.2. The shipped constant is a '
-            'replay from a different capture and should be computed instead',
+            'the formula at 0x1bef08, which is trunc(v * s / 50) clamped at '
+            's = 100. The strength is NOT recovered: no integer s reproduces '
+            'the two measured captures under that formula, since they hold 76 '
+            'and 73 where the blended ladder words are 28 and 25, and 76 is '
+            'not even reachable from any integer word at the s = 55 once '
+            'claimed. Under an additive bias instead, 17 integer strengths '
+            'fit, so the ladder does not determine it either.\n'
+            '**What stands is a measurement, not a computation**: the dark '
+            'capture is at this driver\'s own abscissa, 3938/256, and reads '
+            '0x00490049, where the driver ships 0x004a004a. The shipped value '
+            'needs a band-3 blend around gain 6.4 to 7.2, so it is a replay '
+            'from a different operating point either way',
 }
 EXPLAINED.update(MISMATCHED)
 
@@ -431,13 +542,19 @@ EXPLAINED.update(MISMATCHED)
 # registers become recordings again**, and for awbs_stats that is a live
 # prospect: it feeds AWB, which is still to be implemented.
 #
-# Two independent sources are required. The register gate comes from the
-# library's own read-modify-writes via ar-isp-gates.h, evaluated against the
-# value the driver installs. The tuning-file flag comes from the blob offset
-# that same table records, read with scripts/isp/isp-pipeline.py --tuning. They
-# are recovered from different places, so one cannot prop up the other.
+# **The two readings are not independent, and the earlier wording here claiming
+# they were was wrong.** The library derives the register bit from the blob
+# flag: isp_sub_awbs_stats command 0xb10 at 0x1f7780 reaches blob+0xbbe98
+# through the tuning manager and branches on it, setting bit 0 of 0x6c00 at
+# 0x1f77e8 or clearing it at 0x1f7924. The installed 0x02 having bit 0 clear is
+# caused by that flag reading zero. One blob byte underwrites this class, and
+# also underwrites EXPLAINED[0x5004] and [0x500c].
+#
+# The span must be the stage's real image extent. It was 0x6c00 to 0x7200,
+# which swallowed the whole isp_input page at 0x7000 and excused ten registers
+# on a stage that does run.
 DISABLED_STAGES = {
-    'awbs_stats': (0x6C00, 0x7200,
+    'awbs_stats': (0x6C00, 0x6DA4,
                    'gate 0x6c00 bit 0 clear in the installed 0x02, and the '
                    'tuning flag at blob+0x0bbe98 reads 0'),
     'hdr_awbs_stats': (0x1E44, 0x1F40,
@@ -456,7 +573,9 @@ DISABLED_STAGES = {
 # **This class is not parity, and it is the one place where reproducing the
 # vendor is probably the wrong thing to do.** Writing a recorded value into a
 # register the block owns is a defect waiting to happen; the right fix is
-# usually to stop writing it. Each entry says what the evidence is, because
+# usually to stop writing it. **Nothing in the driver acts on this yet: none of
+# these offsets is in ar_isp_hw_owned in ar-isp-main.c, so the driver still
+# writes every one.** Each entry says what the evidence is, because
 # "read but never written" is much stronger than "never referenced at all",
 # and neither has been confirmed against the device yet.
 HARDWARE_OWNED = {
@@ -473,10 +592,16 @@ HARDWARE_OWNED = {
             'is absence only',
     0x651C: 'neither read nor written anywhere in the library, so the evidence '
             'is absence only',
-    0x2834: 'no store at this offset in ltm, ltm_stats or the reciprocal '
-            'packer, and the ISP-init image carries zero. Four device sweeps '
-            'read 4, 4, 0 and 4, none of them the value the trim table '
-            'replays, and the neighbour 0x2838 is already in ar_isp_hw_owned',
+    0x7054: 'isp_input vsync monitor: a live counter. No 0x7054 immediate '
+            'exists in the library, split-base and indexed forms were '
+            'searched, and the offset appears zero times across all nine MMIO '
+            'traces, which do record reads. Five device captures read five '
+            'different values: 0x000b1f22, 0x000b0187, 0x00000202, 0x000c0211 '
+            'and 0x000b00ff',
+    0x705C: 'isp_input vsync monitor: hardware status. Zero trace accesses, '
+            'and identical across all five captures. Bits 31:16 are named '
+            'ro_blank_h by the vendor\'s own printf at 0x368360; the low half '
+            'is not established',
     0x00EC: 'no writer and no reader on the ISP base anywhere in the library, '
             'and the vendor never touches it in any capture: no access to '
             '0x00e8, 0x00ec or 0x00f0 in 115554 traced writes, nor in the '
@@ -559,8 +684,20 @@ def table_body(path: pathlib.Path, name: str) -> str:
     return hit.group(1)
 
 
+# Stages that reach derived_registers() without reading the tuning file. Their
+# provenance is real but it is not the blob, and calling it blob-derived
+# overstated the strongest class in this file.
+#
+#   ccm, rgb2yuv   a static block lifted from the vendor's ISP-init template,
+#                  per ar-isp-ccm-init.h and ar-isp-rgb2yuv.h
+#   dpc            a device capture of the image the vendor installs, per
+#                  ar-isp-dpc.h, which records the unit and the date
+VENDOR_STATIC = {'ccm', 'rgb2yuv'}
+DEVICE_CAPTURE = {'dpc'}
+
+
 def derived_registers() -> dict[int, str]:
-    """Every register a driver stage recomputes from the tuning file."""
+    """Every register a driver stage computes or carries, by stage."""
     out: dict[int, str] = {}
 
     def add(regs, stage):
@@ -679,6 +816,13 @@ def main() -> int:
     def classify(off: int) -> str:
         value = final[off]
         if off in derived:
+            stage = derived[off]
+            if stage in DEVICE_CAPTURE:
+                return 'device capture of a vendor static block'
+
+            if stage in VENDOR_STATIC:
+                return 'vendor static block'
+
             return 'derived from the blob'
 
         if library.get(off) == value:
@@ -725,6 +869,7 @@ def main() -> int:
     order = ['derived from the blob', 'library image', 'explained',
              'stage gate', 'zero write', 'frame geometry / grid',
              'vendor DMA address', 'stage switched off', 'hardware-owned',
+             'vendor static block', 'device capture of a vendor static block',
              'UNEXPLAINED']
     print(f'ISP registers the driver writes: {len(final)}\n')
     for kind in order:
