@@ -499,9 +499,8 @@ void ar_isp_rnr_apply(struct ar_isp *isp, bool verbose)
 
 /*
  * Local noise reduction. The vendor recomputes this bank from the lnr ladder
- * on the same gain moves as rnr. Registers 0x3d10 and 0x3d14 stay with the
- * replay: the first is never written by the vendor packer, and the second has
- * a fixed pre-pack bias that is not part of the plain ladder.
+ * on the same gain moves as rnr. Register 0x3d10 stays with the replay because
+ * the vendor packer never writes it.
  */
 void ar_isp_lnr_apply(struct ar_isp *isp, bool verbose)
 {
@@ -535,8 +534,7 @@ void ar_isp_lnr_apply(struct ar_isp *isp, bool verbose)
 	ar_isp_lnr_from_blob(regs, blob, (u32)lnr_gain << 8);
 
 	for (i = 0; i < AR_ISP_LNR_REGS; i++) {
-		if (i == AR_ISP_LNR_SKIP_NEVER_WRITTEN ||
-		    i == AR_ISP_LNR_SKIP_BIASED)
+		if (i == AR_ISP_LNR_SKIP_NEVER_WRITTEN)
 			continue;
 
 		writel(regs[i], isp->base + AR_ISP_LNR_BANK + i * 4);

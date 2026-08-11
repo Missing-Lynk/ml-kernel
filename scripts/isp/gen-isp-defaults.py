@@ -169,6 +169,9 @@ TRIM_EXCLUDED: dict[int, str] = {
             'something else on two independent boots, and the cfa packer '
             'stores to no such offset',
     0x08a8: 'hardware-written, same evidence as 0x0834',
+    0x2834: 'ltm template word: the vendor writes zero from its own image; '
+            'the later live value is hardware state',
+    0x3d14: 'derived from the lnr ladder in ar-isp-lnr.h',
     0x3c64: 'derived from the cnf ladder in ar-isp-cnf.h',
     0x3c84: 'derived from the cnf strength normalisation in ar-isp-cnf.h',
 }

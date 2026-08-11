@@ -19,14 +19,12 @@
 #include "ar-isp-ladder.h"
 
 /*
- * Register bank. The ladder owns 85 of the 86 words in 0x3cc8..0x3e1c: 0x3d10
- * is never written by the vendor packer, and 0x3d14 stays on the replay path
- * because the vendor applies an unresolved fixed bias before pack.
+ * Register bank. The ladder owns 85 of the 86 words in 0x3cc8..0x3e1c:
+ * 0x3d10 is never written by the vendor packer.
  */
 #define AR_ISP_LNR_BANK			0x3cc8
 #define AR_ISP_LNR_REGS			86
 #define AR_ISP_LNR_SKIP_NEVER_WRITTEN	((0x3d10 - AR_ISP_LNR_BANK) / 4)
-#define AR_ISP_LNR_SKIP_BIASED		((0x3d14 - AR_ISP_LNR_BANK) / 4)
 
 /*
  * Ladder in the tuning file. The header words are enable, interpolate, band

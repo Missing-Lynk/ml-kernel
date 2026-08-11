@@ -5,8 +5,7 @@ Check the lnr ladder transform against the two measured vendor register images.
 This mirrors ar_isp_lnr_from_blob in ar-isp-lnr.h: Q16 band edges, a Q24
 blend fraction, signed payload words, truncation toward zero, and register
 packing with preserved bits seeded from the captured register image. Register
-0x3d10 is never written by the vendor packer, and 0x3d14 is intentionally left
-on the replay path because it has an unresolved fixed bias before pack.
+0x3d10 is never written by the vendor packer.
 
 The tuning file and captures are proprietary and are not in the repository.
 
@@ -29,7 +28,7 @@ STRIDE = 0x428
 COUNT = 11
 BANK = 0x3CC8
 REGS = 86
-SKIP = {0x3D10, 0x3D14}
+SKIP = {0x3D10}
 
 POINTS = (
     ("bright", 5.59375),
