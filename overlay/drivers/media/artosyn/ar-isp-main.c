@@ -34,7 +34,7 @@
  * Configuration provenance is in vendor-tables/ar-isp-defaults.h. Two thirds of
  * it comes from static per-submodule default blocks in the vendor library and
  * one third from the write trace; applying both reproduces the vendor's final
- * register state exactly. See ../../../../docs/camera-stack.md.
+ * register state exactly. See ../../../../docs/camera-isp-recovery.md.
  */
 
 #include <linux/clk.h>

@@ -59,7 +59,7 @@ REGDIFF = HERE / 'isp-regdiff.py'
 
 # The count of unexplained registers this tree is known to have. Lower it as
 # stages are recovered; never raise it without saying why in the commit.
-BASELINE = 114
+BASELINE = 86
 
 # ar_isp_recovered is generated but no longer applied: every one of its entries
 # is past the end of a submodule image, so none has a vendor value behind it.
@@ -114,7 +114,53 @@ EXPLAINED = {
             'to no such offset',
     0x08A8: 'cfa hardware-written, same evidence as 0x0834',
     0x3C74: 'cnf second strength copy, bit 0 is that copy\'s own enable',
+
+    # Descriptor lengths, in units of 32 bytes, sitting one word above the
+    # pointer they describe. Each reproduces the fetch the driver itself sets
+    # up, so the value follows from the allocation rather than from the trace.
+    0x0034: 'gamma descriptor 0 length: 0x80 units of 32 bytes is the 0x1000 '
+            'the block fetches, which is what ar-isp-tables.c builds',
+    0x0044: 'gamma descriptor 1 length, the same 0x1000 fetch; the three gamma '
+            'slots are channel aliases on one buffer',
+    0x0054: 'gamma descriptor 2 length, the same 0x1000 fetch',
+    0x0064: 'DRC descriptor length: 0x100 units of 32 bytes is the 0x2000 DRC '
+            'page, the size of the vendor template ar-isp-tables.c rebuilds',
+
+    # Module-local descriptor valid bits. Each sits at a fixed offset from the
+    # pointer its own module publishes, and the publish site is recovered.
+    0x1C60: 'HDR page descriptor valid bit, set when 0x1c6c is published',
+    0x1E40: 'hdr_lsc descriptor valid bit, set when 0x1e38 is published',
+    0x5818: 'lut3d bank 0 descriptor valid bit, set when 0x5810 is published',
+    0x5830: 'lut3d bank 1 descriptor valid bit, set when 0x5828 is published',
+    0x5848: 'lut3d bank 2 descriptor valid bit, set when 0x5840 is published',
+    0x5860: 'lut3d bank 3 descriptor valid bit, set when 0x5858 is published',
 }
+
+# The rro zone-metering engine, instantiated five times. Its layout holds
+# across all five, the three HDR instances carrying it eight bytes further into
+# their bank, and check-rro-engine.py proves both the layout and the relations
+# below. rro_face_stats meters a different window, so it satisfies them with a
+# different zone and they are a measurement rather than a restatement.
+RRO_INSTANCES = (('rro_stats', 0x6400, 0), ('rro_face_stats', 0x64C8, 0),
+                 ('hdr_rro_0_stats', 0x1D20, 8),
+                 ('hdr_rro_1_stats', 0x1D78, 8),
+                 ('hdr_rro_face_stats', 0x1F40, 8))
+
+# Engine-relative offset to what recovers it. The zone dimensions at 0x24 and
+# 0x28 are deliberately absent: where they come from is not recovered, and only
+# the fields that follow from them are claimed here.
+RRO_FIELDS = {
+    0x30: 'rro engine: the zone width written a second time, tracking '
+          'engine+0x24',
+    0x38: 'rro engine: the zone height written a second time, tracking '
+          'engine+0x28',
+    0x3c: 'rro engine: the saturation threshold, 0xff on every instance',
+    0x48: 'rro engine: the accumulator enable',
+}
+
+for _name, _bank, _shift in RRO_INSTANCES:
+    for _off, _why in RRO_FIELDS.items():
+        EXPLAINED.setdefault(_bank + _shift + _off, _why)
 
 
 def reg_arrays(path: pathlib.Path) -> dict[str, list[tuple[int, int]]]:

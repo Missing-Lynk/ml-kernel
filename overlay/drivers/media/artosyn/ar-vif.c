@@ -22,7 +22,7 @@
  * streaming vendor shows it configures the views, sets the per-view reset at
  * 0x2bc, and re-arms an ISP buffer pair from its own frame handler; the view
  * DMA this driver arms has written no byte to DDR on that path. See
- * ../../../../docs/camera-stack.md for the vendor sequence.
+ * ../../../../docs/camera-isp-recovery.md for the vendor sequence.
  */
 
 #include <linux/clk.h>

@@ -33,7 +33,7 @@
  *    has been identified, so none is declared.
  *
  * Configuration provenance is in vendor-tables/ar-cvisp-defaults.h. See
- * ../../../../docs/camera-stack.md.
+ * ../../../../docs/camera-isp-recovery.md.
  */
 
 #include <linux/clk.h>

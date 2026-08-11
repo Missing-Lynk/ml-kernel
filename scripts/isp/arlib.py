@@ -15,7 +15,8 @@ from collections.abc import Sequence
 VMA_TO_FILE = 0x10000
 
 # ISP-init template array: the contiguous {u64 source, u64 length} descriptor
-# list the service copies its static payloads from. See docs/camera-stack.md.
+# list the service copies its static payloads from. See
+# docs/camera-isp-recovery.md.
 #
 # The library carries one array per SoC in the family, reached by name through
 # the registry in .__ar_app_list__list: ar9341_isp_init_hw_opt returns 0x472600,
