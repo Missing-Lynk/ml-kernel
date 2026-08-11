@@ -495,8 +495,8 @@ at intra_period 1 and restores the configured value on the next.
 +				 __func__, ret);
  			goto return_buffers;
  		}
-+		dev_info(inst->dev->dev, "%s: enc instance open (id %d)\n",
-+			 __func__, inst->id);
++		dev_info(inst->dev->dev, "%s: enc instance open (id %d), vdi pool tally %lld B\n",
++			 __func__, inst->id, wave5_vdi_pool_used());
  
  		if (inst->mirror_direction) {
  			wave5_vpu_enc_give_command(inst, ENABLE_MIRRORING, NULL);

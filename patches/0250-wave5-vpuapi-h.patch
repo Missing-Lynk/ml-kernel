@@ -31,7 +31,7 @@ intra_period is zero, so enc_param is not the truth.
  	struct vpu_buf bitstream_vbuf;
  	dma_addr_t last_rd_ptr;
  	size_t remaining_consumed_bytes;
-@@ -878,6 +884,22 @@
+@@ -878,6 +884,26 @@
  					enum tiled_map_type map_type);
  int wave5_vpu_enc_start_one_frame(struct vpu_instance *inst, struct enc_param *param,
  				  u32 *fail_res);
@@ -51,6 +51,10 @@ intra_period is zero, so enc_param is not the truth.
 +
 +int wave5_vpu_enc_update_rate(struct vpu_instance *inst, u32 enable);
 +int wave5_vpu_enc_apply_pending_rate(struct vpu_instance *inst);
++
++/* Codec-pool demand in bytes, tallied in wave5-vdi.c. Reported once per encoder open rather
++ * than per allocation; a pool that fills surfaces only as a downstream V4L2 error. */
++long long wave5_vdi_pool_used(void);
  int wave5_vpu_enc_get_output_info(struct vpu_instance *inst, struct enc_output_info *info);
  int wave5_vpu_enc_give_command(struct vpu_instance *inst, enum codec_command cmd, void *parameter);
  

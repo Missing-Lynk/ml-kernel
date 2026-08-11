@@ -1,15 +1,26 @@
 Why: the codec allocates from a fixed dedicated pool, and upstream gives no
 visibility into its consumption - exhaustion surfaces only as a downstream
 V4L2 error with no indication of what filled the pool. Adds a running
-per-allocation tally (dev_info on alloc/free, dev_warn with the tally on
-ENOMEM).
+per-allocation tally (dev_dbg per allocation, dev_warn with the tally on
+ENOMEM) plus wave5_vdi_pool_used(), so a caller can report the total at a
+point where it is meaningful rather than tracing every increment: the
+per-allocation lines are seventeen of a boot's twenty-eight codec messages
+and say nothing the total does not.
+
+Note the per-allocation trace is compiled OUT, not merely filtered: this
+kernel builds with CONFIG_DYNAMIC_DEBUG off, so dev_dbg is a no-op and the
+format string is absent from the built wave5.ko. Recovering the increments
+means a rebuild (#define DEBUG in this file, or DYNAMIC_DEBUG on), not a
+dyndbg control write at runtime. The tally at encoder open and the ENOMEM
+warning are the paths that survive in a shipping build, which is why the
+accessor exists rather than the increments simply being deleted.
 
 --- a/drivers/media/platform/chips-media/wave5/wave5-vdi.c
 +++ b/drivers/media/platform/chips-media/wave5/wave5-vdi.c
 @@ -115,6 +115,31 @@
  	return len;
  }
-
+ 
 +/*
 + * Artosyn: running tally of codec-pool demand. The per-device coherent pool is
 + * page-granular first-fit (kernel/dma/coherent.c, downstream), so each allocation
@@ -38,7 +49,7 @@ ENOMEM).
  int wave5_vdi_allocate_dma_memory(struct vpu_device *vpu_dev, struct vpu_buf *vb)
  {
  	void *vaddr;
-@@ -126,8 +140,17 @@
+@@ -126,8 +151,17 @@
  	}
  
  	vaddr = dma_alloc_coherent(vpu_dev->dev, vb->size, &daddr, GFP_KERNEL);
@@ -51,13 +62,13 @@ ENOMEM).
  		return -ENOMEM;
 +	}
 +	atomic64_add(ml_pool_rounded(vb->size), &ml_pool_used);
-+	dev_info(vpu_dev->dev, "%s: +%zu B (rounded %zu), vdi pool tally %lld B\n",
-+		 __func__, vb->size, ml_pool_rounded(vb->size),
-+		 (long long)atomic64_read(&ml_pool_used));
++	dev_dbg(vpu_dev->dev, "%s: +%zu B (rounded %zu), vdi pool tally %lld B\n",
++		__func__, vb->size, ml_pool_rounded(vb->size),
++		(long long)atomic64_read(&ml_pool_used));
  	vb->vaddr = vaddr;
  	vb->daddr = daddr;
  
-@@ -139,10 +162,12 @@
+@@ -139,10 +173,12 @@
  	if (vb->size == 0)
  		return -EINVAL;
  
