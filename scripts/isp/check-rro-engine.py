@@ -30,9 +30,19 @@ stored inline in the statistics buffer. Both measured counts follow:
     rro_stats        118 x 28 / 4 = 826
     rro_face_stats     36 x 10 / 4 =  90
 
-Where the zone dimensions themselves come from is not recovered. They are not
-the frame divided by the grid, and the two instances do not follow one rule, so
-this reads them out of the configuration rather than deriving them.
+The zone dimensions themselves come from the grid and the metered window. The
+grid is fixed at 16 by 36 in every instance, and each zone is the window
+divided by it, rounded up to even. The two instances differ only in the window
+and in one term:
+
+    rro_stats       the whole frame, floor division, then two pixels of guard
+    rro_face_stats  30 per cent of the frame, ceiling division, no guard
+
+so 1920 / 16 rounded even less two is 118, 1080 / 36 rounded even less two is
+28, and on the 576 by 324 window 576 / 16 is 36 and 324 / 36 rounded up even
+is 10. The 30 per cent is a hard-coded float quadruple in the library at
+0x36e3c0, not a tuning value. Both grids clear the frame: 16 x 118 = 1888 and
+36 x 28 = 1008.
 
     kernel/scripts/isp/check-rro-engine.py
 """
@@ -54,8 +64,11 @@ INSTANCES = (
 )
 
 # Engine-relative field offsets, from the bank map in libmpp_service.so's
-# attach handlers and confirmed by every instance agreeing on them.
-COLUMNS, ROWS = 0x1C, 0x20
+# attach handlers and confirmed by every instance agreeing on them. The grid
+# pair reads 36 at 0x1c and 16 at 0x20, and the vendor's own arithmetic pairs
+# the 36 with the vertical extent and the 16 with the horizontal, so 0x1c is
+# the row count.
+ROWS, COLUMNS = 0x1C, 0x20
 ZONE_W, ZONE_H = 0x24, 0x28
 FRAME_W, FRAME_H = 0x2C, 0x34
 COPY_W, COPY_H = 0x30, 0x38
@@ -73,6 +86,31 @@ MEASURED_COUNTS = {'rro_stats': 826, 'rro_face_stats': 90}
 
 # One sample per 2x2 Bayer quad reaches each channel's accumulator.
 BAYER_QUAD = 4
+
+# The frame the driver configures, and how each instance derives its zone from
+# it. The face instance meters a fraction of the frame, a hard-coded float
+# quadruple in the library at 0x36e3c0, and rounds up where the others round
+# down; the others take two pixels of guard. Instances absent here are the HDR
+# ones, which reuse the rro_stats arithmetic.
+CONFIGURED_W, CONFIGURED_H = 1920, 1080
+ZONE_RULES = {
+    'rro_stats': (1.0, False, 2),
+    'rro_face_stats': (0.3, True, 0),
+}
+
+
+def zone(frame_w, frame_h, columns, rows, fraction, round_up, guard):
+    """The zone the vendor's configure routine computes, in pixels."""
+    width, height = int(frame_w * fraction), int(frame_h * fraction)
+
+    def divide(extent, count):
+        # fcvtps ceilings; the integer path truncates. Both then round up to
+        # even, and the whole-frame path subtracts a guard.
+        exact = -(-extent // count) if round_up else extent // count
+
+        return ((exact + 1) & ~1) - guard
+
+    return divide(width, columns), divide(height, rows)
 
 
 def load_audit():
@@ -142,6 +180,36 @@ def main() -> int:
                     f'{library.get(bank + shift + off)}, not the {before:#x} '
                     f'the vendor moves away from; the shift or the bank is '
                     f'wrong')
+
+    # The zone against the grid and the metered window, which is what makes it
+    # derived rather than read out of the configuration.
+    print()
+    for name, bank, shift in INSTANCES:
+        if name not in ZONE_RULES:
+            continue
+
+        fraction, round_up, guard = ZONE_RULES[name]
+        columns = final[bank + shift + COLUMNS]
+        rows = final[bank + shift + ROWS]
+        want_w, want_h = zone(CONFIGURED_W, CONFIGURED_H, columns, rows,
+                              fraction, round_up, guard)
+        got_w = final[bank + shift + ZONE_W]
+        got_h = final[bank + shift + ZONE_H]
+        window = f'{int(CONFIGURED_W * fraction)} x {int(CONFIGURED_H * fraction)}'
+        print(f'{name}: window {window} over {columns} x {rows}, '
+              f'{"ceiling" if round_up else "floor"}, guard {guard} gives '
+              f'{want_w} x {want_h}, bank holds {got_w} x {got_h}')
+        if (want_w, want_h) != (got_w, got_h):
+            failures.append(
+                f'{name}: the configure routine gives {want_w} x {want_h} and '
+                f'the bank holds {got_w} x {got_h}, so the zone does not '
+                f'follow from the grid and the window')
+
+        if columns * got_w > CONFIGURED_W or rows * got_h > CONFIGURED_H:
+            failures.append(
+                f'{name}: {columns} x {got_w} by {rows} x {got_h} does not fit '
+                f'inside {CONFIGURED_W} x {CONFIGURED_H}, which the vendor '
+                f'clamps for')
 
     print()
     for name, bank, shift in INSTANCES:

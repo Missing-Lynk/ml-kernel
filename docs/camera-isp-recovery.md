@@ -563,6 +563,139 @@ That makes LTM a 3A-class stage. Reproducing it is a computation over `ltm_stats
 
 `ar-isp-ltm.h` holds the geometry, the extents and an identity-page filler; `scripts/isp/check-ltm-page.py` proves the geometry against the capture and reports the template divergence.
 
+### af_stats meters a region of interest, not the frame (recovered)
+
+Static analysis against the library and the tuning blob; no hardware run. Bank `0x7400` holds a mode word at `+0x08` and three geometry registers at `+0x0c`, `+0x10` and `+0x14`.
+
+**The region is a fixed constant in the library.** Four floats at `0x36ddd0`, `{0.25, 0.25, 0.5, 0.5}`: the first pair places the window and the second sizes it, both as fractions of half the frame. Only the `0x2405` command changes it. `isp_af_stats_set_format` at `0x1f4f38` builds the geometry from it at `0x1f5024`, halving each frame dimension with `lsr #1`, converting with `scvtf`, scaling with `fmul` and truncating with `fcvtzs`. At 1920 x 1080 that is an offset of (240, 135) and a region of 480 x 270.
+
+**The three registers are that region expressed four ways.** Each divisor is a multiply-and-shift rather than a division: the skip is the region over 16 and 9, the block size the region over 17 and 10. The masks each store applies are what fix the field widths, 13 bits for the offsets and 9 and 10 for the rest.
+
+	0x740c  (135 << 16) | 240  the metering offset
+	0x7410  ( 30 << 16) |  30  the skip
+	0x7414  ( 27 << 16) |  28  the block size
+
+**The mode word comes from a ladder in the tuning file.** `isp_sub_process_reg_compute` at `0x1f6178` is the af analogue of the cm2 packer, reaching the blob the same way and indexing by the AEC trigger. The ladder is at blob `+0xd5bd0`, stride 1348, and only its first row carries data. Six of that row's words become bitfields of `0x7408`, reproducing `0x221` exactly. The word alignment is not assumed: the same row's words 1 to 4 rebuild `0x7404` as `0x08080808`, which the vendor image independently carries.
+
+`0x7570` is a constant the per-frame re-arm stores at `0x1f55bc`, one phase of an A/B toggle on `priv+824` whose other phase stores zero there. The image's zero and the driver's `0x40` are the two phases of one field, not a mismatch.
+
+`scripts/isp/check-af-stats.py` rebuilds the window from the frame and the region constant, and the mode word from the ladder, failing if the alignment cross-check stops holding.
+
+### hdr writes its bank directly, with no shadow (recovered)
+
+Static analysis; no hardware run. `isp_sub_hdr` is the one bank here with no RAM shadow: its map handler at `0x196900` stores the mapped bank VA at `priv+568`, and the handlers write it with a direct `str`.
+
+**Two things nearby look like the bank and are not.** `[priv+544] + 0x3194` is a DRAM stand-in used only when the work mode is 3, at the same offsets. The tuning record at `tuning_mgr[544] + idx*0x3b1e8 + 0x20` is 1688 bytes reached with bank-sized offsets, which is what an offset search finds first.
+
+**The exposure ratios are Q8.8.** Command `0xb16` subcommand `0x2403` takes two floats from its payload and converts each with `fcvtzu ..., #8` into `0x1c1c` and `0x1c38`. The module's own CLI names them: `--exp_ration` sets `man_ration_l_s` and `man_ration_m_s`, and `--get_exp_ration` prints both scaled by 1e4 with a "10000 as 1" note. Both read 1.0, which is what a sensor delivering one exposure gives.
+
+**The line buffer is an address pair and a stride pair.** The address is written twice from one pointer, which is why `0x1c7c` and `0x1c8c` are identical:
+
+	bl   get_camera_server
+	ldr  x0, [x0, #1584]
+	str  w0, [x19, #124]      bank+0x7c
+	bl   get_camera_server
+	ldr  x0, [x0, #1584]
+	str  w0, [x19, #140]      bank+0x8c
+
+The stride at `0x1c88` and `0x1c98` is `align(width * bit_depth / 8, 256)`, built at `0x197e48` with the bit depth from `convert_stream_format_to_isp_format`. At 1920 and 12 bits that is `0xc00`.
+
+**The address is the vendor's carveout, not ours.** `get_camera_server()+1584` holds a physical address the vendor hard-codes at `0x145ef4` when `get_start_opt()->[40]` is set, alongside a 32 MiB region size. The stage does not run on this camera module, which has one exposure, so nothing reads the register. Enabling HDR means allocating a line buffer and writing that address instead; carrying the vendor's forward would point the block at memory this system has not reserved. `scripts/isp/check-hdr-bank.py` says so in its own output rather than only here.
+
+`0x1d14` is a constant stored immediately after the template install at `0x197b30`, so it overrides the image rather than being part of it.
+
+### The ISP top-level bank is written by the open path, not by a module (recovered)
+
+Static analysis; no hardware run. The top-level bank has no submodule and so no static image behind it, which is why none of it fell out of the library-image work. It is written directly by the ISP open path, `isp_input_creat` at `0x1d2398` and the routine at `0x1d3560` that follows it.
+
+**Read the base pointer before reading anything else.** The writers reach the bank as `g_hw_info+4`, the ISP physical base, through `ar_dev_pa2va`. `g_hw_info` itself is at GOT slot `0x41ce78`, and its `+0` is the ISP IRQ number, `+4` the ISP base and `+12` the VIF base. The same offsets exist on VIF, and most writers of `+0xc4` and `+0xec` in the library are VIF ones at `g_hw_info+12`. Attributing those to the ISP is the obvious mistake here.
+
+**There is a register shadow between the code and the bank.** `isp_input_creat` allocates a `0x13cf8`-byte DMA-coherent buffer, and `isp_cfg_current_input_context` at `0x1d4620` commits it word for word, shadow offset N to register N:
+
+	ldr x0, [x19, #648]      x0 = ISP base + 4
+	ldp w3, w5, [x20, #4]    x20 = the shadow
+	str w3, [x0]             ISP 0x0004
+	str w5, [x0, #4]         ISP 0x0008
+	str w3, [x0, #8]         ISP 0x000c
+	str w5, [x0, #12]        ISP 0x0010
+
+So a register here can have no pointer formed to it anywhere and still be written, which is what makes several of these hard to attribute.
+
+**`0x0004` packs `{mode[27:26], height[25:13], width[12:0]}`.** The layout is not assumed: four read-modify-write sites build it field by field, and their masks are the layout, at `0x1d2000`:
+
+	and w1, w1, #0xffffe000     clear bits[12:0]
+	orr w1, w1, w3              width
+	and w1, w1, #0xfc001fff     clear bits[25:13]
+	orr w1, w1, w2, lsl #13     height
+
+It decodes to 1924 x 1084, the frame padded by four in each dimension, which is the input the VIF measures. `0x0008` under the same layout decodes to 1920 x 1080 exactly, the active frame, with mode 1 and the same untouched top nibble. Only `0x0004`'s layout is proven by a decoding instruction; no pointer to `base+0x8` is formed anywhere in the library and its shadow producer is not found, so `0x0008` is carried from its neighbour rather than proven on its own.
+
+**`0x000c` is a bit, not geometry.** `0x1c9614` clears a 3-bit selector and sets bit 5, giving `0x20` exactly; `0x1d1f88` and three others clear it again. Bit 5 moves in lockstep with `0x4404` bit 0 and `0x4834` bit 2.
+
+**`0x00c8` and `0x00d0` are the two interrupt-enable masks.** Both are constants on the branch `get_start_opt()->[12308]` selects at `0x1d3e0c`; the other branch enables everything and is a debug path. `0x00cc` and `0x00d4` are the matching status registers, cleared by writing ones at `0x1d35d8`, which settles what they are: status, not an indirect access port.
+
+**`0x0090` and `0x00c4` are bare constants** stored at `0x1d3a54` and `0x1d397c` with no derivation behind them. **`0x00b8` is a read-modify-write**: the open path writes all ones at `0x1d3924`, reads back, and clears bit 14.
+
+**The bank does have a static image, in the template array.** Entry 49 of the ar9311 ISP-init template array is a 104-byte image covering `0x0004` to `0x0068` exactly, byte K to register `0x0004 + K`. It is installed by an `isp_memcpy` at `0x25aa4c` on the CVISP side, not by any submodule, which is why `ar-isp-library.h` does not carry it: that file holds submodule images only. `0x0010` and `0x0014` are its words verbatim, and `0x0018` is its word with bit 16 or-ed in by raw_crop at `0x1a5560` and cleared again at `0x1a5930`, so it alternates with that stage. `0x0068` is a constant the raw_crop enable path stores at `0x1a5548` over an image that holds zero.
+
+This also settles a standing question about entry 49: its call sites appeared to be in gamma and drc, modules with nothing to do with the top-level bank. They are not installers. Each restores its own four-word DMA descriptor out of the same image before overriding it, and the real installer is the CVISP-side one above.
+
+`0x0014`'s bits 6:0 are per-stage commit bits the hardware clears after consuming, which is why the register sits in the trim table rather than the ordered one.
+
+**`0x0000` is a base word plus one bit per stage.** The base `0x90000000` is stored whole at `0x25aa58`, straight after the image install, and is planted into the template structure at runtime by the SoC accessor at `0x1f4de0`, so it exists only as an instruction constant. Each module that comes up then or-s its own bit through `[priv+552]`:
+
+	0x90000000  the base word
+	0x00000002  dpc_v1        0x00080000  raw_crop
+	0x00000010  decompander   0x00200000  ccm1
+	0x00000040  wb            0x20000000  ltm_v1 and gamma
+
+which is `0xb0280052` exactly. Bits that could be set and are not name the stages that are off here: birnr, ccm2 and compander, lms, lnr.
+
+`scripts/isp/check-isp-base.py` decodes both frame words against the configured frame, checks the three field masks are the ones the packing site clears, reads the template image out of the library by descriptor, rebuilds every constant from the `mov`/`movk` pair that builds it, and sums the enable word bit by bit.
+
+Not attributed: `0x00ec`. It has no writer and no reader on the ISP base anywhere in the library, and the vendor never touches it in any capture: no access to `0x00e8`, `0x00ec` or `0x00f0` in 115554 traced writes or in the read traces. The offsets the vendor does touch below `0x100` are `0x00` to `0x68` contiguous plus `0x90`, `0xb8` and `0xc4` to `0xdc`. It is outside template entry 49, and the value exists nowhere in the library as a dword.
+
+### The colour and noise stages, and one operating point three of them share (recovered)
+
+Static analysis against the library and the tuning blob; no hardware run.
+
+**wb is 1.0 because AWB is gated off.** The gain setter at `0x1adf08` clamps three floats below 16.0, converts each with `fcvtzu ..., #8` and masks to 12 bits, then stores them at `0x1adf74`, `0x1adf78` and `0x1adf7c`. The `0xb0c` path reads blob `+0xbbe98` and branches on it; that flag reads 0, which is the same flag `awbs_stats` is disabled by, so the branch at `0x1ae584` loads 1.0 into all three channels. `fcvtzu(1.0, 8)` is `0x100`, which is what `0x5004` and `0x500c` hold. The other two producers exist and are not taken: a `1.0 / statistic` path gated on blob `+0xd026c`, and gains straight out of the command payload.
+
+**cm and cm2 pack a gain into a 7-bit field.** Both take `floor(32 * gain)` and or it over their image's upper bits, cm at `0x19f23c` and cm2 at `0x1a0658`. Each reads its own two-dimensional ladder, cm at blob `+0x89d70` (5 AEC rows by 7 colour-temperature columns) and cm2 at blob `+0xa1378`. cm2's saturation multiplier at `priv+808` is exactly 1.0, so nothing scales its field.
+
+**The three agree on one AE operating point, and that is what makes them checkable.** cm2's installed field is 30, which needs a gain in `[0.9375, 0.96875)`; no ladder row holds one, so it is an interpolation between rows 1 and 2. The blend fraction is independently pinned by the `lo2` bound at `0x4824`, which `check-cm2-ladder.py` already proves interpolates 1022 to 1000 giving 1006, forcing the fraction into `[16/22, 17/22)`. Every fraction in that interval gives `floor(32 * gain)` = 30. The abscissa it implies is about 292, which falls in cm's second band, selecting cm's row 1 whose gain is 1.05, and `floor(32 * 1.05)` is 33, which is what `0x483c` holds.
+
+**rnr's two registers are a bit and a line-length difference.** `0x1800` bit 3 is `payload word 0 > 1` at `0x198f78`, and the ladder word is 1 at the driver's band where the image was built at a higher one, which is the whole difference between `0xe0` and the image's `0xe8`. `0x1890` is `(line length - width + 500)` with bit 16 set, built at `0x19aab4` and stored in two parts; at 1080p60 the line length is 2200, so `2200 - 1920 + 500` is `0x30c`.
+
+**lsc `0x4c30` is a constant.** 52, stored at `0x1b6518`, the same value that reaches bank `+0x24` and bank `+0x28`. The alternate branch at `0x1b6608` writes zero there instead, selected by a toggle at `priv+1560`, so the register alternates across table re-arms.
+
+**lnr `0x3d14` is recovered but its shipped value is stale.** Two 9-bit fields packed at `0x1bbc38` from payload words `0x88` and `0x8c`, each scaled by the strength level at `priv+752` through the formula at `0x1bef08`. Strength 55 reproduces both measured vendor captures bit-exactly and is the only integer that fits both. At the abscissa this driver configures, 3938/256, that gives `0x00490049` and not the `0x004a004a` shipped, which needs a band-3 blend around gain 6.4 to 7.2. The constant is a replay from a different capture and should be computed. `audit-provenance.py` reports it separately for that reason.
+
+Not established: lsc `0x4c40`. Its writer is `0x1b64e0`, sourced from the shared shadow container at `+0x34c4`, and **no store anywhere in the library writes that shadow word**. The only other filler is the hardware read-back at `0x1b4e88`, and the trace shows that read returning `0x80` where the register is then written as `0x00010040` with no intervening read. Something outside this library mutates the word in between.
+
+### cm2: the clamp windows come from an AE-indexed ladder (recovered)
+
+Static analysis against the tuning blob; no hardware run. Bank `0x4800` carries two clamp windows in one run at `+0x1c` through `+0x28`, low and high bound each, followed by a reciprocal of each window's width at `+0x2c` and `+0x30`.
+
+**All six come from one 24-byte record in the tuning file.** The packer is `conver_cm2_tuning_pra_to_snr1_reg` at `0x1a0578`, and its tail is the whole mechanism:
+
+	ldur q0, [x24, #-236]      the four bounds, 16 bytes
+	str  q0, [x23, #1072]      stored verbatim to bank+0x1c
+	sub  w0, w3, w10           hi1 - lo1
+	sub  w2, w8, w9            hi2 - lo2
+	mov  w1, #0x400            1024
+	sdiv w0, w1, w0
+	sdiv w1, w1, w2
+	stp  w0, w1, [x19, #44]    bank+0x2c and bank+0x30
+
+The four bounds are copied as a single 16-byte vector, so they are not four values but one record. The two reciprocals are then `1024` divided by the widths of the windows three words above them, with `sdiv` truncating toward zero, which is the same multiply-instead-of-divide arrangement LTM uses for its tile areas.
+
+**The record is selected by the AE state.** The caller, `isp_sub_process_reg_compute` at `0x1a07c8`, reaches the ladder through `isp_get_tuning_manager()`, then `+544` for an array of `0x3b1e8`-byte per-instance records, then `+24` for the sensor tuning blob. The ladder is at blob `+0xa1378`: rows of 168 bytes indexed by the AEC trigger, records of 24 bytes within a row indexed by colour temperature. The live extent of each axis is at `+0xa130c` and `+0xa1310`, reading 5 and 1, and the AEC and CT trigger ladders themselves are at `+0xa1318` and `+0xa1340`. Four paths write the record: a straight 24-byte copy when both indices land exactly, one-dimensional interpolation along either axis, and bilinear.
+
+**Two of the six are an operating point, not a constant.** Three bounds hold the same value down every live row, `1`, `2` and `1023`, so the driver's values are those verbatim. The fourth is `1022` in four rows and `1000` in one, the interpolation gate at `+0xa1308` is set, and the driver installs `1006`, which no row holds. So `0x4824` is an interpolation between rows and `0x4830`, being `1024/(1023 - 1006) = 60`, moves with it. Both track the scene.
+
+`scripts/isp/check-cm2-ladder.py` reads the ladder out of the blob, checks each bound against it, and rebuilds both reciprocals from the four bounds in the driver's own tables.
+
 ## Sensor registers that differ between stacks without meaning anything
 
 A live-against-live comparison of all 3328 readable sensor registers, ours mid-stream on slot B against the vendor's mid-stream on slot A, leaves twelve differences. None of them is configuration. Four groups, all accounted for:
