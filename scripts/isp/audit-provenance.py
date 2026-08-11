@@ -72,6 +72,11 @@ REGDIFF = HERE / 'isp-regdiff.py'
 # stages are recovered; never raise it without saying why in the commit.
 BASELINE = 0
 
+# The count of registers that still need a register read off a running unit.
+# This is the stricter bar: a value can have a known provenance and still be a
+# recording. Ratchets the same way.
+DEVICE_BASELINE = 23
+
 # The frame and statistics-grid dimensions the driver configures. A register
 # whose value is one of these, or a pair of them packed into halfwords, is
 # carrying geometry rather than tuning data.
@@ -91,6 +96,66 @@ GEOMETRY = {1920, 1080, 960, 540, 36, 16, 1088, 1092, 1928, 241, 135}
 # valid bit over them, so the block is pointed at vendor memory and armed.
 # Inert today because lut3d is disabled, and worth fixing before it is not.
 #
+# The fourteen the driver publishes and never replaces. None has a driver-owned
+# buffer: thirteen appear only in the generated table, and 0x75a0 and 0x75bc
+# appear once more in ar_isp_output_arm carrying the same vendor address.
+#
+# Twelve belong to stages that do not run here: the HDR statistics at 0x1d68,
+# 0x1dc0, 0x1e5c and 0x1f88 need a second sensor exposure, lut3d at 0x5810 to
+# 0x5858 is disabled, and awbs_stats at 0x6c90 and 0x6d38 is gated off. Those
+# are inert while that holds.
+#
+# The four af_stats ones are inert too, and settling that took real work
+# because two sources appeared to disagree. ar-isp-priv.h says af_stats is
+# disabled on this sensor; the tuning flag at blob+0xd5484 reads 1.
+#
+# **ar-isp-priv.h is right.** The flag gates only the tuning-driven half.
+# isp_sub_enable at 0x1f4e28 has the final word and branches on
+# is_af_supported at priv+820, an external algorithm registration set only by
+# a 0xb0d ctl that nothing in this driver sends. With it clear the routine
+# clears bit 0 of 0x7400 and zeroes 0x75ac and 0x75b0, which is exactly what
+# this driver installs and what the vendor capture reads back.
+#
+# Two corrections follow. ar-isp-gates.h has the polarity inverted for 0x7400
+# bit 0, 0x75ac and 0x75b0: they are enable-high, not bypass-high, which is
+# why isp-pipeline.py calls the stage undecided. And 0x7558 is not a gate at
+# all; it is a per-frame A/B phase select on priv+824 that this driver freezes,
+# harmless only while the block is off.
+# **Three of these are enabled accumulators pointing at vendor memory.**
+# 0x1d68, 0x1dc0 and 0x1f88 are engine+0x40, the buffer address, of the three
+# HDR rro instances, and each instance's accumulator enable at engine+0x48
+# reads 1. ar_isp_stats_arm in ar-isp-tables.c re-arms rro, rro_face and hist
+# from driver-owned allocations and does not touch these, so they keep the
+# vendor's MMZ address.
+#
+# They are believed inert only because the HDR path never receives a second
+# exposure on this sensor module, so nothing clocks the accumulators. That is
+# a weaker guarantee than the af_stats one, where the enable itself is provably
+# clear. If anything ever triggers them they DMA into memory this driver has
+# not reserved. Worth settling on the device, and worth not writing them
+# meanwhile: the enable and the address are both ours to withhold.
+#
+# 0x6c90 and 0x6d38 are one pointer written twice, `ldr x0,[x23,#40]` then
+# stored at 0x1f7818 and 0x1f781c, which is why they are equal.
+#
+# The layout is computable even though the base is not, which is the route to
+# making these device-independent without waiting on anything.
+#
+# In the 0x2b arena five consecutive buffers sit at an exact constant stride of
+# 0x2a00, running from the four lut3d descriptors straight into af_stats
+# 0x7574, with 0x758c 0x800 further on. That stride is the lut3d flush size
+# 0x2800 plus 0x200, and it holds across two different modules, so this is one
+# arena allocator with a fixed record size rather than per-module mallocs. In
+# the 0x2a arena the stride between hdr_rro instances is 0x11000, which is the
+# 0x8000 buffer extent double-buffered plus 0x1000.
+#
+# So the offsets within an arena follow from buffer extents this tree already
+# records. Only the arena base depends on what the vendor allocated first, and
+# a driver that allocates its own arena computes every one of these addresses
+# rather than replaying them. That is the fix, and it needs no device.
+DMA_NOT_OVERWRITTEN = (0x1D68, 0x1DC0, 0x1E5C, 0x1F88, 0x5810, 0x5828, 0x5840,
+                       0x5858, 0x6C90, 0x6D38, 0x7574, 0x758C, 0x75A0, 0x75BC)
+
 # Two further gaps this rule does not see. ar_isp_output_arm in ar-isp-main.c
 # is not one of the tables load_tables() reads, so the eight vendor addresses
 # it writes are invisible here, as are the different values it installs at
@@ -493,6 +558,46 @@ EXPLAINED.update({
             'bit 0 of 0x3c64 at 0x1a25bc. No instruction anywhere sets this '
             'bit, and the cnf packer never writes this offset, so it is '
             'neither an enable nor a copy of the strength',
+    # hdr_awbs_stats' mesh grid, computed by isp_awb_mesh_grid_stats_set_format
+    # at 0x1f93f0 and stored as four separate words at 0x1f9550 to 0x1f9560.
+    # The frame over the ROI quadruple {0,0,1,1} gives 1920>>6 = 30 and
+    # 1080/36 = 30, halved by 1 << ([ctx+812] + 1) to 15, then the HDR-only
+    # tail ((n + 1) & ~1) - 2 gives 14. The vendor image carries 15 because the
+    # non-HDR twin at 0x1f6c90 has the identical prologue and no tail, and the
+    # ISP-init template carries that page's value in this bank.
+    0x1E7C: 'hdr_awbs_stats: the mesh grid, 14 from the frame over the ROI '
+            'with the HDR-only correction at 0x1f9534',
+    0x1E80: 'hdr_awbs_stats: the same, stored at 0x1f9558',
+    0x1E84: 'hdr_awbs_stats: the same, stored at 0x1f955c',
+    0x1E88: 'hdr_awbs_stats: the same, stored at 0x1f9560',
+
+    0x0C10: 'dpc: a per-frame read-modify-write at 0x1c8704, setting bit 1 '
+            'then clearing bit 0, so the image 1 becomes 3 and then 2. Bit 0 '
+            'is the enable and bit 1 the bypass, and the branch is an AE and '
+            'tuning decision re-evaluated every frame from tuning +0x6ce8 and '
+            '+0x6cfc, not a constant. 2 means DPC bypassed; a capture shows it '
+            'flipping to enabled mid-run, so this driver bakes in one phase',
+    0x0D08: 'dpc: 0x1ff with bit 8 cleared at 0x1c89e8, once, immediately '
+            'after the defect LUT is written and its window at 0x0c0c closed. '
+            'No image covers it because the dpc template is 0x108 bytes, '
+            'ending one word below. What bit 8 selects, and whether 0x1ff is '
+            'the reset value, are not established: no capture reads this '
+            'register before the read-modify-write',
+    0x6C34: 'awbs_stats: the vendor\'s reserved carveout base, from '
+            'get_camera_server()+1584 at 0x1f7820, which is the literal '
+            '0x02000000 hard-coded at 0x145ef4 alongside a 32 MiB size. The '
+            'same constant the HDR line buffer uses, so it is a code constant '
+            'rather than a runtime allocation',
+    0x6C38: 'awbs_stats: the same carveout base, fetched a second time at '
+            '0x1f782c and stored at 0x1f783c, which is why the pair is equal',
+    0x6C00: 'awbs_stats: the image 1 with bit 0 cleared and bit 1 set. Bit 0 '
+            'is the stage enable, cleared at 0x1f78c8 because the tuning flag '
+            'at blob+0xbbe98 reads zero. Bit 1 is set by the read-modify-write '
+            'at 0x1f6cf0, on the get_start_opt()->[12268] branch, which is the '
+            'same gate that sets bit 1 of 0x6400 and 0x6000',
+    0x1E50: 'hdr_awbs_stats: a constant 1 stored at 0x1f9454, on the same '
+            'get_start_opt()->[12268] branch; the other arm takes a different '
+            'path entirely',
     0x4C24: 'lsc: the same 52 the enable path writes to bank+0x30, masked '
             'into the low byte here at 0x1b6504 to 0x1b6514. It is not three '
             'gate bits: 0x34 passes the gate test only because it equals '
@@ -504,31 +609,12 @@ EXPLAINED.update({
             'register alternates across table re-arms',
 })
 
-# Registers whose derivation is recovered but whose shipped value does not
-# follow from it at the operating point this driver configures. The provenance
-# question is answered; the value is still a replay, and a stale one.
-MISMATCHED = {
+EXPLAINED.update({
     0x2834: 'ltm: the vendor writes zero here, from its own template image, '
             'which ar-isp-library.h carries and the trace shows installed in '
-            'the contiguous 0x2800 to 0x2844 block. The hardware then puts 4 '
-            'back, which is what the state capture read and what the trim '
-            'table replays. **Parity is writing zero, not writing 4.**',
-    0x3D14: 'lnr: two 9-bit fields packed at 0x1bbc38 from payload words 0x88 '
-            'and 0x8c, each scaled by the strength level at priv+752 through '
-            'the formula at 0x1bef08, which is trunc(v * s / 50) clamped at '
-            's = 100. The strength is NOT recovered: no integer s reproduces '
-            'the two measured captures under that formula, since they hold 76 '
-            'and 73 where the blended ladder words are 28 and 25, and 76 is '
-            'not even reachable from any integer word at the s = 55 once '
-            'claimed. Under an additive bias instead, 17 integer strengths '
-            'fit, so the ladder does not determine it either.\n'
-            '**What stands is a measurement, not a computation**: the dark '
-            'capture is at this driver\'s own abscissa, 3938/256, and reads '
-            '0x00490049, where the driver ships 0x004a004a. The shipped value '
-            'needs a band-3 blend around gain 6.4 to 7.2, so it is a replay '
-            'from a different operating point either way',
-}
-EXPLAINED.update(MISMATCHED)
+            'the contiguous 0x2800 to 0x2844 block. The later live value is '
+            'hardware state, so the trim table excludes it.',
+})
 
 
 # Stages both the register gate and the vendor's own tuning file agree are
@@ -579,19 +665,42 @@ DISABLED_STAGES = {
 # "read but never written" is much stronger than "never referenced at all",
 # and neither has been confirmed against the device yet.
 HARDWARE_OWNED = {
-    0x6060: 'read at 0x1ff268 and 0x1ff308, never written; the value is '
-            'multiplied by the stats queue slot index and added to the buffer '
-            'base, and the second read is a load whose result is discarded',
-    0x6478: 'read at 0x202658 and 0x2027dc, never written; same slot-index use '
-            'and same discarded second read',
-    0x6514: 'read at 0x1f8f80 and 0x1f8ff4, never written; same shape, and '
-            'ar-isp-main.c already flags this one as unmeasured',
-    0x647C: 'neither read nor written anywhere in the library, so the evidence '
-            'is absence only',
-    0x6518: 'neither read nor written anywhere in the library, so the evidence '
-            'is absence only',
-    0x651C: 'neither read nor written anywhere in the library, so the evidence '
-            'is absence only',
+    # Comparing the installed values against five device captures, 0x6060,
+    # 0x6478, 0x647c and 0x6514 never read back what this driver writes, while
+    # 0x6518, 0x651c and 0x705c always do, which is why ar_isp_kept holds the
+    # first two.
+    #
+    # **That comparison is weaker than the test ar-isp-main.c already records
+    # and must not override it.** That one toggled the trim parameter and
+    # re-read, which separates "the write did nothing" from "a later applier
+    # overwrote it"; a snapshot cannot. It found 0x7054 lands in its high half
+    # and deliberately left it in place rather than skip it on half a result,
+    # and the captures agree: the high half matches in three of five. It also
+    # records 0x6514 as unmeasured, on a page that capture did not dump.
+    #
+    # So the only safe reading here is that these registers are hardware-owned,
+    # which is what this class says. Deciding which writes to drop needs the
+    # A/B rerun, not this comparison.
+    #
+    # These four are counters, and the evidence is now positive rather than an
+    # absence. Each sits exactly one word past the end of its own module's
+    # static image, is read and multiplied by a queue-node field to locate the
+    # statistics buffer, and reads a DIFFERENT value in every capture: 6, 7, 5,
+    # 15 and 3 across five sweeps, never the 10 or 11 this driver installs.
+    # A symbolic scan that propagates the bank pointer through split-base,
+    # indexed, stp, stur and NEON forms finds no store at any of them.
+    0x6060: 'raw_hist_stats: a hardware counter one word past its image, read '
+            'at 0x1ff268 and multiplied by a queue-node field at 0x1ff288 to '
+            'locate the buffer. Five captures read five different values',
+    0x6478: 'rro_stats: the same, read at 0x202658 and multiplied at 0x202684',
+    0x647C: 'rro_stats: tracks 0x6478 in every capture',
+    0x6514: 'rro_face_stats: the same, read at 0x1f8f80 and multiplied at '
+            '0x1f8fa0; it tracks the rro_stats pair except in one capture, '
+            'the same off-by-one this driver\'s own recording caught',
+    0x6518: 'rro_face_stats: no writer, and unlike the counters above it reads '
+            '1 on all five captures including the vendor\'s, so the value we '
+            'carry is at least stable',
+    0x651C: 'rro_face_stats: the same, stable at 1 across every capture',
     0x7054: 'isp_input vsync monitor: a live counter. No 0x7054 immediate '
             'exists in the library, split-base and indexed forms were '
             'searched, and the offset appears zero times across all nine MMIO '
@@ -602,7 +711,10 @@ HARDWARE_OWNED = {
             'and identical across all five captures. Bits 31:16 are named '
             'ro_blank_h by the vendor\'s own printf at 0x368360; the low half '
             'is not established',
-    0x00EC: 'no writer and no reader on the ISP base anywhere in the library, '
+    0x00EC: 'MEASURED on the device: the trim A/B reads 0x56008600 with the '
+            'pass on and off alike, and never the 0x6008400 this driver '
+            'writes, so that write provably never takes effect. No writer and '
+            'no reader on the ISP base anywhere in the library, '
             'and the vendor never touches it in any capture: no access to '
             '0x00e8, 0x00ec or 0x00f0 in 115554 traced writes, nor in the '
             'read traces. The offsets the vendor does touch below 0x100 are '
@@ -690,8 +802,10 @@ def table_body(path: pathlib.Path, name: str) -> str:
 #
 #   ccm, rgb2yuv   a static block lifted from the vendor's ISP-init template,
 #                  per ar-isp-ccm-init.h and ar-isp-rgb2yuv.h
-#   dpc            a device capture of the image the vendor installs, per
-#                  ar-isp-dpc.h, which records the unit and the date
+#   dpc            read from a device, per ar-isp-dpc.h, which records the
+#                  unit and the date. 63 of its 67 registers turn out to equal
+#                  the vendor's library image and two more are the frame, so
+#                  only the remaining two are a capture with no other source
 VENDOR_STATIC = {'ccm', 'rgb2yuv'}
 DEVICE_CAPTURE = {'dpc'}
 
@@ -711,7 +825,7 @@ def derived_registers() -> dict[int, str]:
          for i in range(rnr['AR_ISP_RNR_TAIL_REGS'])), 'rnr')
 
     lnr = defines(DRIVERS / 'ar-isp-lnr.h')
-    skipped = {0x3D10, 0x3D14}
+    skipped = {0x3D10}
     add((a for a in (lnr['AR_ISP_LNR_BANK'] + 4 * i
                      for i in range(lnr['AR_ISP_LNR_REGS']))
          if a not in skipped), 'lnr')
@@ -817,11 +931,26 @@ def main() -> int:
         value = final[off]
         if off in derived:
             stage = derived[off]
-            if stage in DEVICE_CAPTURE:
-                return 'device capture of a vendor static block'
-
             if stage in VENDOR_STATIC:
                 return 'vendor static block'
+
+            # A device-captured stage is only a recording where the capture is
+            # the only source. Most of dpc turns out to equal the vendor's own
+            # library image, and two of its registers are the frame, so those
+            # are held to the stronger class rather than excused by the stage
+            # they belong to.
+            if stage in DEVICE_CAPTURE:
+                if library.get(off) == value:
+                    return 'library image'
+
+                if is_geometry(value):
+                    return 'frame geometry / grid'
+
+                # A hand-recovered mechanism outranks the stage it belongs to.
+                if off in EXPLAINED:
+                    return 'explained'
+
+                return 'device capture, no other source'
 
             return 'derived from the blob'
 
@@ -869,7 +998,7 @@ def main() -> int:
     order = ['derived from the blob', 'library image', 'explained',
              'stage gate', 'zero write', 'frame geometry / grid',
              'vendor DMA address', 'stage switched off', 'hardware-owned',
-             'vendor static block', 'device capture of a vendor static block',
+             'vendor static block', 'device capture, no other source',
              'UNEXPLAINED']
     print(f'ISP registers the driver writes: {len(final)}\n')
     for kind in order:
@@ -883,12 +1012,83 @@ def main() -> int:
                  f'does not list, so those registers are counted as traceable '
                  f'without ever being shown')
 
-    if MISMATCHED:
-        print(f'\n  {len(MISMATCHED):5}  of the explained are a stale replay: '
-              f'the derivation is recovered and the shipped value does not '
-              f'follow from it at the operating point this driver configures')
-        for off in sorted(MISMATCHED):
-            print(f'         {off:#06x}  {final[off]:#010x}')
+    # The second axis, and the one that matters for rebuilding this driver on
+    # a bench with no camera attached: can the value be regenerated from
+    # checked-in sources plus the two capture artifacts that are themselves
+    # files, the vendor library and the tuning blob? A class that can is
+    # device-independent. A class that cannot needs a register read off a
+    # running unit, which means it is correct only at the operating point and
+    # on the silicon it was read from.
+    device_sourced = {
+        'device capture, no other source':
+            'read off a device, with no vendor image or code behind it',
+        'hardware-owned':
+            'the block writes it; the value we carry is what it happened to '
+            'hold when the state was captured',
+        'stage switched off':
+            'excused because the stage does not run, which is not a '
+            'derivation; it reverts to a recording the day it is enabled',
+    }
+    # A union, not a sum: a register can be both a vendor DMA address the
+    # driver never overwrites and on a stage that does not run, and counting
+    # it twice would overstate the problem.
+    #
+    # The DMA class splits. The driver replaces most of these with its own
+    # allocation at arm time, which is device-independent; the ones in
+    # DMA_NOT_OVERWRITTEN are published as the vendor read them.
+    # Stale replay values are driver bugs rather than device-sourced facts.
+    # Keep them out of this axis; audit must report none separately.
+    sourced = {off for off in final if classify(off) in device_sourced}
+    sourced |= {off for off in DMA_NOT_OVERWRITTEN if off in final}
+    needs_device = len(sourced)
+
+    print(f'\n  {len(final) - needs_device:5}  regenerable without a device, '
+          f'from the library, the tuning blob and the driver\'s own '
+          f'configuration')
+    print(f'  {needs_device:5}  needs a register read off a running unit')
+    counted: set[int] = set()
+    for kind, why in device_sourced.items():
+        regs = {off for off in sourced if classify(off) == kind} - counted
+        counted |= regs
+        if regs:
+            print(f'         {len(regs):5}  {kind}: {why}')
+
+    regs = {o for o in DMA_NOT_OVERWRITTEN if o in final} - counted
+    counted |= regs
+    print(f'         {len(regs):5}  vendor DMA the driver never overwrites: we '
+          f'publish the vendor\'s carveout address')
+    # For most of the device-sourced set, "derive the value" is the wrong
+    # goal and always was. A register the block owns has no software source to
+    # find, and one on a stage that does not run has no correct value at all.
+    # The device-independent answer is to stop writing it. Recorded per group
+    # so the remaining work is a decision list rather than a search.
+    print('\n  what would make each device-sourced group independent:')
+    for group, fix in (
+            ('hardware-owned',
+             'rerun the trim A/B in ar-isp-main.c over the pages it missed, '
+             'then skip the writes it shows do nothing. Do not decide this '
+             'from snapshot comparison: that cannot tell a dead write from '
+             'one a later applier overwrites, and it already disagrees with '
+             'the A/B on 0x7054'),
+            ('stage switched off',
+             'stop writing them while the stage is off, and derive them from '
+             'its packer on the day it is enabled'),
+            ('vendor DMA, inert stages',
+             'stop writing the twelve on HDR, lut3d and awbs_stats, which the '
+             'pipeline table reports as absent, off and off. All fourteen are '
+             'in ar_isp_setup_1080p60, which ar_isp_is_hw_owned does not '
+             'guard, so this means dropping them from the generated setup '
+             'table rather than adding them to a list'),
+            ('vendor DMA, af_stats',
+             'give af_stats a driver-owned buffer, after settling whether the '
+             'stage runs: ar-isp-priv.h says it is disabled, the tuning flag '
+             'at blob+0xd5484 says it is not'),
+            ('device capture 0x0c10',
+             'recover the vendor write; ar_isp_output_arm carries the same '
+             'register as a 3-then-2 sequence, so the source is in that path'),
+            ('device capture 0x0d08',
+             'recover the vendor write; no image covers the offset')):
+        print(f'    {group}: {fix}')
 
     unexplained = tally['UNEXPLAINED']
     backed = len(final) - unexplained
@@ -915,6 +1115,16 @@ def main() -> int:
             listed = ' '.join(f'{r:#06x}' for r in sorted(regs)[:8])
             more = ' ...' if len(regs) > 8 else ''
             print(f'    {name:<20}{len(regs):4}   {listed}{more}')
+
+    if needs_device > DEVICE_BASELINE:
+        print(f'\nregression: {needs_device} registers need a device read '
+              f'against a baseline of {DEVICE_BASELINE}')
+        return 1
+
+    if needs_device < DEVICE_BASELINE:
+        print(f'\nimproved: {needs_device} need a device read against a '
+              f'baseline of {DEVICE_BASELINE}; lower DEVICE_BASELINE to '
+              f'{needs_device}')
 
     if unexplained > BASELINE:
         print(f'\nregression: {unexplained} unexplained against a baseline of '
