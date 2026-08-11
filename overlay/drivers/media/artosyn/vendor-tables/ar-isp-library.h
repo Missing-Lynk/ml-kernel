@@ -5,7 +5,7 @@
  *
  * Read from the ISP-init template array in libmpp_service.so (sha256
  * 4cfc8e6cfb42d8c821137993b95b152f). Each entry of that array is a {source,
- * length}} descriptor; the submodule that installs it is named by the
+ * length} descriptor; the submodule that installs it is named by the
  * ar_log_func format string at the get_isp_init_config call site that
  * loads it, and the bank it installs at is a literal in that module's
  * constructor, added to the mapped ISP base. Both are code, so no
@@ -14,10 +14,18 @@
  * An image is exactly its descriptor length. Registers past that bound
  * are not part of it, whatever the library data segment holds there.
  *
- * The vendor installs these with a compare-then-write primitive, so a
- * register already holding its image value is never written and cannot
- * appear in an MMIO trace. That is why the image, not the trace, is the
- * source: the trace is a subset by construction.
+ * The install is an unconditional word-by-word copy of the whole
+ * image to the mapped bank, isp_memcpy at the call site above, so every
+ * word of it does reach the hardware. The library carries a
+ * compare-then-write primitive too, isp_memcpy_bycmp, but only eight
+ * call sites use it and none of them is an image install.
+ *
+ * The image is still the source rather than the write trace, for a
+ * different reason: it is code and data with a descriptor length that
+ * bounds it exactly, where a trace is a recording through one window
+ * over one boot. A value read off an image is placed by the vendor's
+ * own arithmetic; a value read off a trace is correct only where the
+ * capture happened to be looking.
  *
  * Not applied by the driver. It is the reference set that says which of
  * the values the driver does apply have a vendor origin.
