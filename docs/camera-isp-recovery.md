@@ -540,7 +540,16 @@ With the shift applied, three relations hold on every instance, and they are wha
 
 Static analysis plus the captured page; no hardware run. Bank `0x2800` carries a module control word at `+0x00`, frame dimensions at `+0x04`, the coefficient page at `+0x08` and the `ltm_stats` output at `+0x0c`.
 
-**The page is 64 tiles of a 128-sample transfer curve.** Each curve is `u16` in a `0x100` slot, so the page is exactly `0x4000`. Every curve starts at zero and rises monotonically to just under 1024, a 10-bit output range, and all 64 are distinct. The extent is measured three ways that agree: the captured page holds 64 well-formed curves and turns to unrelated data at exactly `0x4000`, the publish site flushes `0x4000`, and the producer loop writes its tile count times `0x100` into the same buffer. **How the 64 tiles map onto the frame is not established**; an 8x8 grid is the obvious reading and nothing here proves it.
+**The page is 64 tiles of a 128-sample transfer curve.** Each curve is `u16` in a `0x100` slot, so the page is exactly `0x4000`. Every curve starts at zero and rises monotonically to just under 1024, a 10-bit output range, and all 64 are distinct. The extent is measured three ways that agree: the captured page holds 64 well-formed curves and turns to unrelated data at exactly `0x4000`, the publish site flushes `0x4000`, and the producer loop writes its tile count times `0x100` into the same buffer.
+
+**The 64 tiles are an 8 by 8 grid, solved rather than assumed.** Bank `0x2800` carries eight reciprocal tile areas at `+0x10` through `+0x2c`, and the packer at `0x18c418` builds them by doubling the tile counts, dividing the frame to get the tile size, carrying the remainder into the last column and the last row, and storing `2^26` divided by each area with `sdiv`:
+
+	tw = W / nx                th = H / ny
+	tw_last = W % nx + tw      th_last = H % ny + th
+
+At 1920 x 1080 that gives tiles of 120 x 67 with a 75-pixel last row, and all eight registers reproduce exactly. Searching every grid up to 32 by 32, **exactly one** reproduces all eight, and its tile count is the 64 curves the page independently holds. `scripts/isp/check-ltm-tiles.py` runs that search and fails if the solution stops being unique.
+
+The reciprocals exist so the block can normalise a tile histogram by multiplying instead of dividing, which is what the doubled and quadrupled variants are for: the same tile area at three summed resolutions.
 
 **It has no stored source.** The SIMD loops at `0x18a4f8` (gtm2 family) and `0x18dbb8` (ltm, byte-identical) are the init-time identity ramp generators: no data input, they write `out[tile][i] = i * 8`. The real per-frame computation is CLAHE, in the algorithm object `ltm` and `gtm2` share (`isp_sub_gtm2_algo_creat` at `0x18bd34`; the per-frame compute is vtable slot `+56` = `0x28a098`). Stages, layout, the double-buffered page with a moving descriptor, and the worker-thread-versus-inline mode flag (`get_start_opt()->[12220]`) are recovered; the final curve-to-page stage is the remaining hole. The vendor's captured page deviates from the identity ramp by at most 34 counts of 1016, which is what makes the driver's identity page a faithful static stand-in.
 

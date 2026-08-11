@@ -59,7 +59,7 @@ REGDIFF = HERE / 'isp-regdiff.py'
 
 # The count of unexplained registers this tree is known to have. Lower it as
 # stages are recovered; never raise it without saying why in the commit.
-BASELINE = 86
+BASELINE = 78
 
 # ar_isp_recovered is generated but no longer applied: every one of its entries
 # is past the end of a submodule image, so none has a vendor value behind it.
@@ -161,6 +161,25 @@ RRO_FIELDS = {
 for _name, _bank, _shift in RRO_INSTANCES:
     for _off, _why in RRO_FIELDS.items():
         EXPLAINED.setdefault(_bank + _shift + _off, _why)
+
+# ltm's reciprocal tile areas. The packer at 0x18c418 divides 2^26 by each tile
+# area with sdiv, so the block can normalise a tile histogram by multiplying.
+# check-ltm-tiles.py reproduces all eight, and solves the tile grid they imply:
+# exactly one grid up to 32 by 32 fits, and its tile count is the 64 curves the
+# coefficient page independently holds.
+LTM_BANK = 0x2800
+LTM_RECIPROCALS = {
+    0x10: 'the tile area', 0x14: 'the tile area doubled',
+    0x18: 'the tile area quadrupled', 0x1c: 'the last column',
+    0x20: 'the last column doubled', 0x24: 'the last row',
+    0x28: 'the last row doubled', 0x2c: 'the corner tile',
+}
+
+for _off, _what in LTM_RECIPROCALS.items():
+    EXPLAINED.setdefault(
+        LTM_BANK + _off,
+        f'ltm: 2^26 divided by {_what}, precomputed so the block normalises a '
+        f'tile histogram by multiplying')
 
 
 def reg_arrays(path: pathlib.Path) -> dict[str, list[tuple[int, int]]]:
