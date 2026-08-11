@@ -434,7 +434,7 @@ Each table has a descriptor register holding a physical address, and a bit in `0
 
 Gamma has three descriptors and the vendor points all three at one buffer. The sequence is not a one-time setup: the vendor reissues it on every AE update, which is what makes republishing our own addresses after the replay an ordinary operation rather than a special case.
 
-**Each descriptor also has a length, and it is not the allocation size.** `0x0034`, `0x0044` and `0x0054` hold the transfer length in units of 32 bytes. The vendor writes `0x200` during setup, describing the whole `0x4000` allocation, and then **`0x80` immediately before the commit**, describing `0x1000`. The three slots carry the same base and the same length with no offset or stride field between them, so they are channel aliases fetching the same first `0x1000` bytes, not three slices of the buffer. That is also why the three captured gamma dumps are byte-identical.
+**Each descriptor also has a length, and it is not the allocation size.** `0x0034`, `0x0044` and `0x0054` hold the transfer length in 16-byte records, the same granule the LSC and LUT3D descriptors use. The vendor writes `0x200` during setup, describing the whole `0x2000` allocation, and then **`0x80` immediately before the commit**, which is `0x800`, exactly `AR_ISP_GAMMA_PAGE`. An earlier reading here said 32-byte units; no shift exists in the library, every length store is a bare immediate, and the three descriptors whose flush size is a constant in the same function all give 16: compander `0x780` against a `0x7800` flush, LUT3D `0x280` against `0x2800`, HDR `0x80` against `0x800`. The three slots carry the same base and the same length with no offset or stride field between them, so they are channel aliases fetching the same first `0x1000` bytes, not three slices of the buffer. That is also why the three captured gamma dumps are byte-identical.
 
 Two consequences. The `0x4000` memcpy in the vendor handler is the size of its software allocation and must not be read as a DMA length. And **the tail from `0x1000` to `0x3fff` is never fetched**: it is per-record software state that rides along in the same copy, which is why it decodes as high-entropy nonsense and why it differs between captures without meaning anything.
 
@@ -628,7 +628,9 @@ So a register here can have no pointer formed to it anywhere and still be writte
 	and w1, w1, #0xfc001fff     clear bits[25:13]
 	orr w1, w1, w2, lsl #13     height
 
-It decodes to 1924 x 1084, the frame padded by four in each dimension, which is the input the VIF measures. `0x0008` under the same layout decodes to 1920 x 1080 exactly, the active frame, with mode 1 and the same untouched top nibble. Only `0x0004`'s layout is proven by a decoding instruction; no pointer to `base+0x8` is formed anywhere in the library and its shadow producer is not found, so `0x0008` is carried from its neighbour rather than proven on its own.
+It decodes to 1924 x 1084, the frame padded by four in each dimension, which is the input the VIF measures.
+
+`0x0008` is not a computed counterpart. Template entry 49 carries `0x54870780` at both `+0` and `+4`, so the two registers start identical and only `0x0004` is patched, in three separate single-field writes the trace shows one at a time. That its image word happens to decode to the active frame is the image's own operating point, not a derivation: it would read 1920 x 1080 at any other frame size.
 
 **`0x000c` is a bit, not geometry.** `0x1c9614` clears a 3-bit selector and sets bit 5, giving `0x20` exactly; `0x1d1f88` and three others clear it again. Bit 5 moves in lockstep with `0x4404` bit 0 and `0x4834` bit 2.
 
@@ -655,6 +657,25 @@ which is `0xb0280052` exactly. Bits that could be set and are not name the stage
 
 Not attributed: `0x00ec`. It has no writer and no reader on the ISP base anywhere in the library, and the vendor never touches it in any capture: no access to `0x00e8`, `0x00ec` or `0x00f0` in 115554 traced writes or in the read traces. The offsets the vendor does touch below `0x100` are `0x00` to `0x68` contiguous plus `0x90`, `0xb8` and `0xc4` to `0xdc`. It is outside template entry 49, and the value exists nowhere in the library as a dword.
 
+### The isp_input page is a vsync monitor (recovered)
+
+Static analysis against the library and the MMIO traces; no hardware run. The page at ISP base `+0x7000` is mapped by the ISP open path at `0x1ca260` and had been reporting as `awbs_stats`, because the bank map carried no entry between `0x6c00` and `0x7200`. That mattered beyond a mislabel: `awbs_stats` is a disabled stage, so ten registers on a page that does run were being excused with it.
+
+**Eight registers are a tap routing map.** `isp_hw_module_set_ctl` at `0x1d3448` copies one 32-byte `.rodata` constant at `0x367370`, `{0, 3, 8, 14, 15, 23, 22, 31}`, with two NEON quadword loads at `0x1d3a9c`, and each register takes one slot into a 5-bit `mux_sel` field by read-modify-write.
+
+The vendor's own debug command names the block and every field. The help text at `0x367f10` is "ISP hardware info debug command", the printf at `0x368360` is `mux_sel=%d module : %s : hcnt %d vcnt %d ro_blank_h=%d`, and the `%s` indexes a 32-pointer name table at `0x412510`. So the eight values decode:
+
+	0x7058  mux 0   vsync_in              0x7094  mux 15  nr3d_vsync_o
+	0x7088  mux 3   debug_hdr_vysnc       0x7098  mux 23  defog_vsync
+	0x708c  mux 8   rnr_vsync             0x709c  mux 22  cnf_vsync
+	0x7090  mux 14  dpp2ccml_vysnc        0x70a0  mux 31  debug_scaler_y_vsync
+
+Eight monitor channels tapping eight points spread along the pipeline, with `0x7050` reporting `{vcnt[28:16], hcnt[12:0]}` for whichever tap is selected. `0x7040` bit 0 is a reset pulse and `0x704c` bit 0 triggers a DDR-to-DVP path, both from the same debug tool.
+
+**Two registers on the page are not configuration at all.** `0x7054` is a live counter: no such immediate exists in the library, split-base and indexed forms were searched, the offset appears zero times across all nine MMIO traces including the ones that record reads, and five device captures read five different values. `0x705c` is status, identical across all five captures, whose upper half the vendor's own printf calls `ro_blank_h`. Both sit in the trim table, whose header already allowed that some of its entries are counters and status words that ignore writes.
+
+One caveat on `0x7058`: bits 14 and 19 are hardware state the vendor preserves by reading before writing, and this driver installs the whole word as a flat captured constant.
+
 ### The colour and noise stages, and one operating point three of them share (recovered)
 
 Static analysis against the library and the tuning blob; no hardware run.
@@ -665,13 +686,27 @@ Static analysis against the library and the tuning blob; no hardware run.
 
 **The three agree on one AE operating point, and that is what makes them checkable.** cm2's installed field is 30, which needs a gain in `[0.9375, 0.96875)`; no ladder row holds one, so it is an interpolation between rows 1 and 2. The blend fraction is independently pinned by the `lo2` bound at `0x4824`, which `check-cm2-ladder.py` already proves interpolates 1022 to 1000 giving 1006, forcing the fraction into `[16/22, 17/22)`. Every fraction in that interval gives `floor(32 * gain)` = 30. The abscissa it implies is about 292, which falls in cm's second band, selecting cm's row 1 whose gain is 1.05, and `floor(32 * 1.05)` is 33, which is what `0x483c` holds.
 
-**rnr's two registers are a bit and a line-length difference.** `0x1800` bit 3 is `payload word 0 > 1` at `0x198f78`, and the ladder word is 1 at the driver's band where the image was built at a higher one, which is the whole difference between `0xe0` and the image's `0xe8`. `0x1890` is `(line length - width + 500)` with bit 16 set, built at `0x19aab4` and stored in two parts; at 1080p60 the line length is 2200, so `2200 - 1920 + 500` is `0x30c`.
+**rnr's two registers are a bit and a width difference.** `0x1800` bit 3 is packed at `0x19b250` by **birnr**, not by rnr, from word 1 of the birnr ladder at blob `+0xb35e4`. That ladder is all zeros in this blob, so the bit is clear at every abscissa, which is the whole difference between `0xe0` and the image's `0xe8`. `0x1890` is `(x - width + 500)` with bit 16 set, built at `0x19aab4` and stored as two read-modify-writes of one register. The width operand is solid; `x` is field `+80` of the 96-byte set-format payload, and no call site initialises it, so identifying it as the line length rests on 2200 - 1920 = 280 being plausible blanking rather than on the code.
 
 **lsc `0x4c30` is a constant.** 52, stored at `0x1b6518`, the same value that reaches bank `+0x24` and bank `+0x28`. The alternate branch at `0x1b6608` writes zero there instead, selected by a toggle at `priv+1560`, so the register alternates across table re-arms.
 
-**lnr `0x3d14` is recovered but its shipped value is stale.** Two 9-bit fields packed at `0x1bbc38` from payload words `0x88` and `0x8c`, each scaled by the strength level at `priv+752` through the formula at `0x1bef08`. Strength 55 reproduces both measured vendor captures bit-exactly and is the only integer that fits both. At the abscissa this driver configures, 3938/256, that gives `0x00490049` and not the `0x004a004a` shipped, which needs a band-3 blend around gain 6.4 to 7.2. The constant is a replay from a different capture and should be computed. `audit-provenance.py` reports it separately for that reason.
+**lnr `0x3d14` has a recovered mechanism, an unrecovered strength, and a stale shipped value.** Two 9-bit fields packed at `0x1bbc38` from payload words `0x88` and `0x8c`, each scaled by the strength level at `priv+752` through the formula at `0x1bef08`, which is `trunc(v * s / 50)` clamped at `s = 100`.
 
-Not established: lsc `0x4c40`. Its writer is `0x1b64e0`, sourced from the shared shadow container at `+0x34c4`, and **no store anywhere in the library writes that shadow word**. The only other filler is the hardware read-back at `0x1b4e88`, and the trace shows that read returning `0x80` where the register is then written as `0x00010040` with no intervening read. Something outside this library mutates the word in between.
+The strength is not recovered. The two measured captures hold 76 and 73 where the blended ladder words are 28 and 25, and no integer `s` produces that under this formula; at `s = 55` the value 76 is not reachable from any integer word at all, since `trunc(1.1v)` steps 75 to 77. Under an additive bias instead, 17 integer strengths fit, so the ladder does not pin it either.
+
+What stands is a measurement rather than a computation: the dark capture is at this driver's own abscissa, 3938/256, and reads `0x00490049` where the driver ships `0x004a004a`. The shipped value needs a band-3 blend around gain 6.4 to 7.2, so it is a replay from a different operating point either way. `audit-provenance.py` reports it separately for that reason.
+
+**lsc `0x4c40` is the shading enable and strength**, and it resisted longest for two reasons worth recording. It sits past the end of the lsc template image, which covers `0x4c00` to `0x4c3c` only, so no vendor image backs it. And the store that fills its shadow word uses a split base:
+
+	mov x3, #0x3400
+	add x0, x19, x3
+	str w1, [x0, #196]        shadow container + 13508
+
+so a search for a store at immediate 13508 finds nothing, because the immediate is 196.
+
+Bit 16 is the enable and the low byte is the strength in Q7, written from two branches of one routine that share a store. The enabled branch at `0x1b4e58` sets the bit and quantises with `fcvtzu ..., #7` clamped to 128; the disabled branch at `0x1b4c20` clears the bit and forces `0x80`. Both inputs come from the lens-shading record the tuning manager copies from blob `+0x9090` at `0x174b10`, where the strength reads 0.5 and the enable 1, giving `(1 << 16) | 64`.
+
+That also explains the one confusing observation in the capture: the hardware read-back of this bank reads `0x00000080` here, which is the disabled branch's output, and the value pushed afterwards is the enabled branch's, with no read in between. `libmpi_vin.so`'s public `AR_MPI_ISP_SetMeshShadingAttr` corroborates the region independently, copying `0xe9f8` for the manual table and `0x678` for the record stride, both of which match what the library uses.
 
 ### cm2: the clamp windows come from an AE-indexed ladder (recovered)
 
