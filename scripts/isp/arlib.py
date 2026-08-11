@@ -10,9 +10,24 @@ import struct
 import sys
 from collections.abc import Sequence
 
-# The second LOAD segment maps file 0x4004d0 at 0x4104d0. Every VMA this tree
-# quotes is in that segment, so VMA - 0x10000 is its file offset.
-VMA_TO_FILE = 0x10000
+# The skew between a VMA and its file offset is per segment, not global. The
+# second LOAD segment maps file 0x4004d0 at 0x4104d0, so .data and .data.rel.ro
+# are shifted by 0x10000; .text and .rodata are not shifted at all. Applying
+# one constant to every VMA silently returns the wrong bytes for any .rodata
+# read, which is where the float constants several checkers need live.
+#
+# The boundary is the start of the shifted segment. A VMA below it is a file
+# offset already.
+SHIFTED_SEGMENT_VMA = 0x4104D0
+SHIFTED_SEGMENT_SKEW = 0x10000
+
+
+def file_offset(vma: int) -> int:
+    """The file offset of a VMA, with the skew its segment actually carries."""
+    if vma >= SHIFTED_SEGMENT_VMA:
+        return vma - SHIFTED_SEGMENT_SKEW
+
+    return vma
 
 # ISP-init template array: the contiguous {u64 source, u64 length} descriptor
 # list the service copies its static payloads from. See
@@ -36,7 +51,7 @@ def lib_slice(lib: bytes, vma: int, length: int, what: str) -> bytes:
     Python truncates an out-of-range slice silently, so the bounds are checked
     here rather than left to the caller's unpack.
     """
-    off = vma - VMA_TO_FILE
+    off = file_offset(vma)
     if off < 0 or off + length > len(lib):
         sys.exit(f"{what}: VMA 0x{vma:x} + 0x{length:x} lies outside the library")
 
