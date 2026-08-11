@@ -352,6 +352,7 @@ static void ar_isp_configure(struct ar_isp *isp)
 	 */
 	ar_isp_rgb2yuv_apply(isp);
 	ar_isp_ladders_apply(isp, false);
+	ar_isp_de3d_geom_apply(isp, false);
 
 	isp->configured = true;
 
@@ -559,6 +560,7 @@ static void ar_isp_configure_prefix(struct ar_isp *isp, size_t n)
 	ar_isp_tables_apply(isp);
 	ar_isp_rgb2yuv_apply(isp);
 	ar_isp_ladders_apply(isp, false);
+	ar_isp_de3d_geom_apply(isp, false);
 
 	isp->configured = true;
 
@@ -606,6 +608,7 @@ static int ar_isp_ladders_set(void *data, u64 val)
 
 	if (val)
 		ar_isp_ladders_apply(isp, false);
+		ar_isp_de3d_geom_apply(isp, false);
 
 	return 0;
 }

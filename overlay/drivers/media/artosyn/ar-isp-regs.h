@@ -59,20 +59,42 @@
 #define AR_ISP_DE3D_BUF2_B		0x2e88
 
 /*
- * Sizes, and the honest state of them. The vendor packs the three at
- * 0x2b439200, 0x2b614200 and 0x2b703200, so the gaps bound the first two at
- * 0x1db000 and 0xef000: it cannot have used more without overlapping. Nothing
- * sits above the third, so its gap says nothing and the size here is a guess
- * carried at the larger of the two measured bounds.
+ * Sizes, derived from the vendor's own arithmetic rather than from the gaps
+ * between its allocations.
  *
- * Getting this wrong is a hardware DMA writing past a buffer we own. The
- * isp_cma reservation is no-map, so an overrun stays inside the reserved region
- * and cannot reach kernel memory, but it would quietly corrupt our own tables.
- * A dump of the vendor's layout above 0x2b703200 would settle it.
+ * The de3d module computes its memory requirement in libmpp_service.so at
+ * 0x1c4b6c and 0x1c4e08, from the same two strides it programs into the bank:
+ *
+ *   buffer 0 is stride x height, stride being the padded width in tiles of 20
+ *   at sixteen bytes each rounded up to 256 (1792 at 1928 wide), so 1792 x
+ *   1080;
+ *
+ *   buffer 1 is half of that. The module adds `w0 + (w0 >> 1)` for the pair at
+ *   0x1c4bbc, which is buffer 0 plus half of it, and that ratio is the only
+ *   thing that term can mean;
+ *
+ *   buffer 2 is the block-grid stride, ceil(width / 8) rounded up to 256, times
+ *   ceil(height / 8) + 2 rows. That product is computed outright at 0x1c4e64.
+ *
+ * The two that can be checked against the vendor's own layout both land just
+ * inside it: 0x1d8800 against the 0x1db000 gap and 0xec400 against 0xef000,
+ * each about ten kilobytes short, which is the slack of a page-aligned
+ * allocator. Nothing sits above the third, so its gap never bounded anything
+ * and the previous size here was the larger of the other two carried over as a
+ * guess; the derivation puts it at 0x8900.
+ *
+ * Rounded up to a page, because the vendor's own allocations are and because
+ * the failure mode is one-sided: over-allocating wastes reserved memory, while
+ * under-allocating is a hardware DMA writing past a buffer we own. The isp_cma
+ * reservation is no-map, so an overrun stays inside the reserved region and
+ * cannot reach kernel memory, but it would quietly corrupt our own tables.
+ *
+ * kernel/scripts/isp/check-de3d-geometry.py recomputes all three and fails if
+ * either of the two bounded ones stops fitting.
  */
-#define AR_ISP_DE3D_BUF0_SIZE		0x1db000
-#define AR_ISP_DE3D_BUF1_SIZE		0xef000
-#define AR_ISP_DE3D_BUF2_SIZE		0x1db000
+#define AR_ISP_DE3D_BUF0_SIZE		0x1d9000
+#define AR_ISP_DE3D_BUF1_SIZE		0x0ed000
+#define AR_ISP_DE3D_BUF2_SIZE		0x009000
 
 /* Output stage geometry and commit. */
 #define AR_ISP_OUT_SIZE			0x2e04

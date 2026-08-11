@@ -59,7 +59,7 @@ REGDIFF = HERE / 'isp-regdiff.py'
 
 # The count of unexplained registers this tree is known to have. Lower it as
 # stages are recovered; never raise it without saying why in the commit.
-BASELINE = 128
+BASELINE = 114
 
 # ar_isp_recovered is generated but no longer applied: every one of its entries
 # is past the end of a submodule image, so none has a vendor value behind it.
@@ -202,6 +202,13 @@ def derived_registers() -> dict[int, str]:
 
     de3d = defines(DRIVERS / 'ar-isp-de3d.h')
     body = table_body(DRIVERS / 'ar-isp-de3d.h', 'ar_isp_de3d_regs')
+    add((de3d['AR_ISP_DE3D_BANK'] + int(m, 16)
+         for m in re.findall(r'\{\s*(0x[0-9a-f]+),', body)), 'de3d')
+
+    # The half of de3d's bank that is derived from the frame geometry and the
+    # sensor line length rather than from the gain ladder. Proved by
+    # check-de3d-geometry.py, which reproduces the live vendor bank exactly.
+    body = table_body(DRIVERS / 'ar-isp-de3d-geom.h', 'ar_isp_de3d_geom_regs')
     add((de3d['AR_ISP_DE3D_BANK'] + int(m, 16)
          for m in re.findall(r'\{\s*(0x[0-9a-f]+),', body)), 'de3d')
 

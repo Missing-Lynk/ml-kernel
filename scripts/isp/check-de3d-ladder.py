@@ -54,7 +54,8 @@ SLOPE_NUM = 65532
 REGS = [
     (0x2E00, 0x0000000C), (0x2E10, 0xFFFFFFFF), (0x2E14, 0xFFFFFFFF),
     (0x2E18, 0xFFFFFFFF), (0x2E1C, 0x00003FFF), (0x2E20, 0x01FF00FF),
-    (0x2E28, 0x000001FF), (0x2E2C, 0xFFFFFFFF), (0x2E4C, 0x00003FFF),
+    (0x2E28, 0x000001FF), (0x2E2C, 0xFFFFFFFF), (0x2E30, 0x000000FF),
+    (0x2E4C, 0x00003FFF),
     (0x2E90, 0x3C010077), (0x2E94, 0x00FFFFFF), (0x2E9C, 0x00FFFFFF),
     (0x2EA0, 0xFFFFFFFF), (0x2EA4, 0x03FF1FFF), (0x2EA8, 0x03FF0FFF),
     (0x2EAC, 0x000001FF), (0x2EB0, 0xFFFFFFFF), (0x2EB4, 0x000000FF),
@@ -186,6 +187,8 @@ def de3d_from_blob(blob: bytes, gain_q16: int) -> list[int]:
         fld(0x44, 9),
         (fld(0x48, 8) << 24) | (fld(0x4C, 8) << 16) | (fld(0x50, 8) << 8) |
         fld(0x54, 8),
+        # 0x2E30, a byte store in the vendor packer so only bits 7:0 move.
+        fld(0x58, 8),
         fld(0x5C, 14),
         (fld(0xC8, 1) << 26) | (fld(0xCC, 1) << 27) | (fld(0xD0, 1) << 28) |
         (fld(0xD4, 1) << 29) | (fld(0xD8, 3) << 4) | fld(0xDC, 3) |
@@ -229,6 +232,34 @@ def main() -> int:
     edges = struct.unpack_from(f"<{COUNT * 2}f", blob, BANDS)
     if list(edges) != sorted(edges) or len(set(edges)) != COUNT * 2:
         sys.exit("band edges are not strictly increasing")
+
+    # 0x2E30's field is not in MEASURED, because the two abscissas were
+    # captured before the register was attributed. It is checked directly
+    # instead: constant across every band, and equal to the live vendor byte.
+    LIVE_2E30_BYTE = 0xFC
+    fields = {word(blob, b, 0x58) & 0xFF for b in range(COUNT)}
+    if fields != {LIVE_2E30_BYTE}:
+        sys.exit(f"0x2e30: field 0x58 reads {sorted(fields)} across the bands, "
+                 f"expected {LIVE_2E30_BYTE:#04x} in all of them")
+
+    print(f"0x2e30 low byte {LIVE_2E30_BYTE:#04x} constant across all "
+          f"{COUNT} bands, matching the live vendor bank")
+
+    # The abscissa the vendor was streaming at when out/au-chain/slotA.txt was
+    # taken, measured by inverting this transform and rnr's and lnr's:
+    # scripts/isp/solve-ladder-abscissa.py. All three agree, which is what
+    # makes it a measurement rather than a fit. Asserted here so a change to
+    # the transform that still passed the two abscissas below but moved this
+    # one would not go unnoticed.
+    SLOT_A = (6.8857, 6.8948)
+    lo = struct.unpack_from("<f", blob, BANDS)[0]
+    hi = struct.unpack_from("<f", blob, BANDS + (COUNT - 1) * 8 + 4)[0]
+    if not lo <= SLOT_A[0] and SLOT_A[1] <= hi:
+        sys.exit(f"the measured slot A abscissa {SLOT_A} is outside the "
+                 f"ladder's {lo}..{hi} band range")
+
+    print(f"slot A was streaming at {SLOT_A[0]}x..{SLOT_A[1]}x, inside the "
+          f"ladder's {lo:g}..{hi:g} bands")
 
     for gain_q16, want in MEASURED.items():
         band, t_q24 = select(blob, gain_q16)

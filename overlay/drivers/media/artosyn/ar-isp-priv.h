@@ -128,6 +128,7 @@ static inline void ar_isp_rmw(struct ar_isp *isp, u32 off, u32 mask, u32 val)
  * reached through one of these.
  */
 void ar_isp_de3d_publish(struct ar_isp *isp);
+void ar_isp_de3d_geom_apply(struct ar_isp *isp, bool verbose);
 void ar_isp_stats_arm(struct ar_isp *isp, unsigned int half);
 const void *ar_isp_stats_ready(struct ar_isp *isp, const void *buf, size_t size);
 void ar_isp_stats_publish(struct ar_isp *isp);

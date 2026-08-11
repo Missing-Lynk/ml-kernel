@@ -21,7 +21,7 @@
 
 /*
  * Register bank. The ladder owns 50 registers: the control word at +0x00 (two
- * enable bits), seventeen bit-packed scalar registers between 0x2e10 and
+ * enable bits), eighteen bit-packed scalar registers between 0x2e10 and
  * 0x2eb4 and the 32-register byte-packed curve at 0x2ebc..0x2f38. Registers
  * with bits owned elsewhere carry a mask of the ladder-owned bits and the
  * apply path read-modify-writes. The buffer-address registers stay with
@@ -37,7 +37,7 @@
  * carried, like rnr's and lnr's.
  */
 #define AR_ISP_DE3D_BANK		0x2e00
-#define AR_ISP_DE3D_REGS		50
+#define AR_ISP_DE3D_REGS		51
 #define AR_ISP_DE3D_CURVE_REGS		32
 #define AR_ISP_DE3D_CURVE_OFF		0xe0
 
@@ -46,7 +46,7 @@
  * seventeen scalars. ar_isp_de3d_from_blob writes the scalars by index, so the
  * two halves have to add up to the whole array.
  */
-#define AR_ISP_DE3D_SCALAR_REGS		18
+#define AR_ISP_DE3D_SCALAR_REGS		19
 
 _Static_assert(AR_ISP_DE3D_SCALAR_REGS + AR_ISP_DE3D_CURVE_REGS ==
 	       AR_ISP_DE3D_REGS, "de3d scalar and curve counts must cover the bank");
@@ -104,6 +104,7 @@ static const struct ar_isp_de3d_reg ar_isp_de3d_regs[AR_ISP_DE3D_REGS] = {
 	{ 0x20, 0x01ff00ff },
 	{ 0x28, 0x000001ff },
 	{ 0x2c, 0xffffffff },
+	{ 0x30, 0x000000ff },
 	{ 0x4c, 0x00003fff },
 	{ 0x90, 0x3c010077 },
 	{ 0x94, 0x00ffffff },
@@ -218,23 +219,30 @@ static inline void ar_isp_de3d_from_blob(u32 *dst, const u8 *blob, u32 gain_q16)
 	dst[6] = F(0x44, 9);							/* 0x2e28 */
 	dst[7] = (F(0x48, 8) << 24) | (F(0x4c, 8) << 16) | (F(0x50, 8) << 8) |
 		 F(0x54, 8);							/* 0x2e2c */
-	dst[8] = F(0x5c, 14);							/* 0x2e4c */
-	dst[9] = (F(0xc8, 1) << 26) | (F(0xcc, 1) << 27) | (F(0xd0, 1) << 28) |
+	/*
+	 * A byte store in the vendor packer, strb w15, [x21, #48], so only the
+	 * low byte moves and the rest of the register keeps its init value.
+	 * Field 0x58 reads 252 in all twelve bands, which is why this is
+	 * constant across the gain range rather than a ladder in practice.
+	 */
+	dst[8] = F(0x58, 8);							/* 0x2e30 */
+	dst[9] = F(0x5c, 14);							/* 0x2e4c */
+	dst[10] = (F(0xc8, 1) << 26) | (F(0xcc, 1) << 27) | (F(0xd0, 1) << 28) |
 		 (F(0xd4, 1) << 29) | (F(0xd8, 3) << 4) | F(0xdc, 3) |
 		 (1u << 16);							/* 0x2e90 */
-	dst[10] = (F(0x6c, 8) << 16) | (F(0x70, 8) << 8) | F(0x74, 8);		/* 0x2e94 */
-	dst[11] = V(0x7c, 1) | (V(0x80, 1) << 1) | (V(0x84, 1) << 2) |
+	dst[11] = (F(0x6c, 8) << 16) | (F(0x70, 8) << 8) | F(0x74, 8);		/* 0x2e94 */
+	dst[12] = V(0x7c, 1) | (V(0x80, 1) << 1) | (V(0x84, 1) << 2) |
 		  (V(0x88, 1) << 3) | (V(0x2e0, 1) << 4) | (V(0x2e4, 1) << 5) |
 		  (V(0x2e8, 1) << 6) | (V(0x2ec, 1) << 7) | (F(0x2f0, 8) << 8) |
 		  (F(0x2f4, 8) << 16);						/* 0x2e9c */
-	dst[12] = F(0x8c, 8) | (asym << 8) | (F(0x94, 8) << 16) |
+	dst[13] = F(0x8c, 8) | (asym << 8) | (F(0x94, 8) << 16) |
 		  (F(0x98, 8) << 24);						/* 0x2ea0 */
-	dst[13] = F(0x9c, 13) | (F(0xa0, 10) << 16);				/* 0x2ea4 */
-	dst[14] = F(0xa4, 12) | (F(0xa8, 10) << 16);				/* 0x2ea8 */
-	dst[15] = F(0xac, 9);							/* 0x2eac */
-	dst[16] = (F(0xb0, 8) << 24) | (F(0xb4, 8) << 16) | (F(0xb8, 8) << 8) |
+	dst[14] = F(0x9c, 13) | (F(0xa0, 10) << 16);				/* 0x2ea4 */
+	dst[15] = F(0xa4, 12) | (F(0xa8, 10) << 16);				/* 0x2ea8 */
+	dst[16] = F(0xac, 9);							/* 0x2eac */
+	dst[17] = (F(0xb0, 8) << 24) | (F(0xb4, 8) << 16) | (F(0xb8, 8) << 8) |
 		  F(0xbc, 8);							/* 0x2eb0 */
-	dst[17] = F(0xc0, 8);							/* 0x2eb4 */
+	dst[18] = F(0xc0, 8);							/* 0x2eb4 */
 
 	/* The byte-packed curve, 0x2ebc..0x2f38. */
 	for (i = 0; i < AR_ISP_DE3D_CURVE_REGS; i++) {

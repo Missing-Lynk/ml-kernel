@@ -42,6 +42,7 @@
 #include "vendor-tables/ar-isp-rgb2yuv.h"
 #include "ar-isp-lnr.h"
 #include "ar-isp-de3d.h"
+#include "ar-isp-de3d-geom.h"
 #include "ar-isp-cfa.h"
 #include "ar-isp-cnf.h"
 
@@ -221,6 +222,53 @@ static bool ar_isp_seed_from_vendor(struct ar_isp *isp, void *dst,
  * accumulates it rebuilds from the frames it sees; the first frames run against
  * an empty history, which is cold-boot behaviour.
  */
+/*
+ * ar_isp_de3d_geom_apply - the thirteen registers de3d derives from geometry.
+ *
+ * Separate from the ladder because it is not gain-keyed: the vendor computes
+ * these once per configuration from the frame and the sensor line length, and
+ * they do not read the tuning file. Read-modify-write, because several share a
+ * word with the submodule's static image.
+ *
+ * The padded width is taken from the block's own 0x2e04 rather than assumed,
+ * so a geometry change the driver makes elsewhere carries through here without
+ * a second source of truth. See ar-isp-de3d-geom.h and
+ * kernel/scripts/isp/check-de3d-geometry.py.
+ */
+void ar_isp_de3d_geom_apply(struct ar_isp *isp, bool verbose)
+{
+	u32 regs[AR_ISP_DE3D_GEOM_REGS];
+	u32 size = readl(isp->base + AR_ISP_DE3D_BANK + 0x04);
+	u32 width = size >> 16;
+	u32 height = size & 0x1fff;
+
+	if (!width || !height) {
+		if (verbose)
+			dev_info(isp->dev,
+				 "de3d: geometry register reads 0x%08x, pass skipped\n",
+				 size);
+
+		return;
+	}
+
+	ar_isp_de3d_geom_pack(regs, width, height, AR_ISP_DE3D_HTS,
+			      AR_ISP_DE3D_WORK_MODE);
+
+	for (unsigned int i = 0; i < AR_ISP_DE3D_GEOM_REGS; i++) {
+		u32 off = AR_ISP_DE3D_BANK + ar_isp_de3d_geom_regs[i].off;
+		u32 mask = ar_isp_de3d_geom_regs[i].mask;
+		u32 v = readl(isp->base + off);
+
+		writel((v & ~mask) | (regs[i] & mask), isp->base + off);
+	}
+
+	if (verbose)
+		dev_info(isp->dev,
+			 "de3d: geometry %ux%u hts %u, %u registers derived\n",
+			 width, height, AR_ISP_DE3D_HTS,
+			 AR_ISP_DE3D_GEOM_REGS);
+}
+
 void ar_isp_de3d_publish(struct ar_isp *isp)
 {
 	static const u16 reg[3][2] = {
