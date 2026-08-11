@@ -45,6 +45,13 @@ and carried no entry between lms 0x7264 and acm 0x7600. Everything from 0x7264
 to 0x75fc therefore reported as lms, including the whole 0x7400 af_stats bank.
 lms is 20 registers wide and measured off, so a large block of statistics
 registers was being read as a gain-keyed image stage.
+
+The same gap existed between awbs_stats 0x6c00 and nuc_dpc 0x7200. The ISP
+open path maps base+0x7000 as its own page, at 0x1ca260 in the vendor library,
+and awbs_stats' image is 105 registers ending at 0x6da0, so everything at
+0x70xx was reporting as awbs_stats. That mattered more than a mislabel:
+audit-provenance.py excuses awbs_stats as a disabled stage, so ten registers
+on a page that does run were being excused with it.
 """
 BANKS = [
     (0x8600, "ir_lms_horz"),
@@ -55,6 +62,7 @@ BANKS = [
     (0x7264, "lms"),
     (0x7230, "qgg"),
     (0x7200, "nuc_dpc"),
+    (0x7000, "isp_input"),
     (0x6C00, "awbs_stats"),
     (0x64C8, "rro_face_stats"),
     (0x6400, "rro_stats"),
