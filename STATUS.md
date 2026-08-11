@@ -21,7 +21,7 @@ Tags used below: **DONE** (working, hardware-validated) - **PARTIAL** (works, wi
 
 Air units only; the goggle has no camera hardware. Architecture (which block is stock IP and which is Artosyn-specific) is in `PERIPHERALS.md`.
 
-`docs/camera-stack.md` is the source of truth for this section: its "Status" heading carries the per-block parity evidence against the streaming vendor, and its later sections carry what each block owns and what is still frozen. The rows below are verdicts only and deliberately do not restate it.
+`docs/camera-stack.md` is the source of truth for this section: its "Status" heading carries the per-block parity evidence against the streaming vendor, its pipeline table carries which ISP stage runs and where its values come from, and `docs/camera-isp-recovery.md` carries the register-level record behind both. The rows below are verdicts only and deliberately do not restate it.
 
 | Item | Status | Notes |
 |---|---|---|

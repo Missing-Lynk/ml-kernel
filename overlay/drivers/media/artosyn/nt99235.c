@@ -63,8 +63,10 @@
  * half-updated exposure and gain pair.
  *
  * Not to be confused with 0x8250-0x826d and 0x8550-0x855c, which look like the
- * obvious candidates. They are the sensor-MCU lens shading tables, committed
- * with 0x8201, and they have nothing to do with brightness. Nothing moves them
+ * obvious candidates. They are the camera module's own lens shading tables,
+ * committed with 0x8201, and they have nothing to do with brightness. The
+ * module applies that correction itself, before a pixel reaches the SoC, so it
+ * is upstream of the ISP's lsc bank rather than part of it. Nothing moves them
  * at runtime either: see nt99235_shading_regs.
  */
 #define NT99235_REG_GROUP_HOLD		0x0104
@@ -428,7 +430,7 @@ static const struct nt99235_reg nt99235_regs_1280x720p90[] = {
 	{ 0x826c, 0x20 }, { 0x9040, 0x09 }, { 0x9023, 0x60 }, { 0x8201, 0x0f },
 };
 
-/* The lens shading tables, installed after the mode table.
+/* The camera module's lens shading tables, installed after the mode table.
  *
  * The sensor object libsns_nt99235.so exports carries a shading entry point
  * (the function at 0x6e80, reached through the pointer at data 0x1b128) which
