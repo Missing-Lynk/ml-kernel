@@ -8,33 +8,29 @@
  * shows it configures the views, sets the per-view reset, and then captures
  * every frame through the ISP.
  *
- * This driver applies the vendor's register configuration for the 2-lane
- * 1080p60 sensor mode and starts the block. The configuration carries the
- * vendor's own DDR addresses and the device tree reserves that range no-map, so
- * the capture buffers are used as they are. That is enough to answer whether the
- * block produces a frame at all, which is what this driver is for. It is not the
- * final shape.
+ * This driver applies the recovered register configuration for the 2-lane
+ * 1080p60 sensor mode and starts the block. The setup replay still carries
+ * some vendor DDR addresses for quiescent stages, but the active coefficient,
+ * temporal-filter and statistics buffers used by the open path are allocated
+ * and published by ar-isp-tables.c.
  *
  * The buffers the block fetches from DRAM, and the register stages recomputed
  * from the tuning blob alongside them, are in ar-isp-tables.c. Both files share
  * struct ar_isp through ar-isp-priv.h.
  *
- * Not implemented here:
+ * Current scope:
  *
- *  - The per-frame loop. The vendor re-arms the statistics buffer addresses and
- *    runs three indirect-port transactions on every frame, driven by the VIF
- *    frame-start interrupt that ar-vif.c already owns. The output planes are
- *    programmed once during setup, outside that loop, so the first
- *    frame lands without it. Until that loop moves in here, ml-isploop drives
- *    it from userspace and re-arms the vendor's statistics addresses over the
- *    ones published here, so owning them only holds with the cycle disabled.
- *  - Auto-exposure itself. The statistics are readable; nothing consumes them.
- *  - Buffer allocation, geometry other than 1920x1080, and any V4L2 interface.
+ *  - The VIF frame-start interrupt republishes the driver-owned statistics
+ *    buffers when pingpong is enabled.
+ *  - ml-3a consumes the AE statistics and drives sensor exposure, gain and the
+ *    ISP ladder abscissas from userspace.
+ *  - Geometry is fixed at the vendor's 1920x1080 mode, and CVISP owns the V4L2
+ *    capture interface.
  *
- * Configuration provenance is in vendor-tables/ar-isp-defaults.h. Two thirds of
- * it comes from static per-submodule default blocks in the vendor library and
- * one third from the write trace; applying both reproduces the vendor's final
- * register state exactly. See ../../../../docs/camera-isp-recovery.md.
+ * Configuration provenance is audited by scripts/isp/audit-provenance.py. The
+ * values come from the tuning blob, static data in the vendor library, recovered
+ * packers, geometry and the driver's own allocations; camera-isp-recovery.md
+ * records the remaining device-sourced groups.
  */
 
 #include <linux/clk.h>

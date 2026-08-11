@@ -48,9 +48,11 @@ config VIDEO_ARTOSYN_ISP
 	depends on OF && VIDEO_DEV
 	help
 	  Bring-up driver for the ISP block on Artosyn Proxima SoCs, the route
-	  the vendor stack captures through. Applies the vendor register
-	  configuration for the 2-lane 1080p60 sensor mode and starts the
-	  block; it does not allocate buffers or expose a V4L2 interface.
+	  the vendor stack captures through. Applies the recovered 2-lane
+	  1080p60 register configuration, allocates the ISP-owned coefficient,
+	  temporal-filter and statistics buffers, fills them from the vendor
+	  tuning blob or recovered library templates, and publishes them to the
+	  block. CVISP exposes the V4L2 capture interface.
 
 	  To compile this driver as a module, choose M here: the module will be
 	  called ar-isp.

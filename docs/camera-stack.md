@@ -49,49 +49,49 @@ The verdict is cross-checked against a second, independent source: the enable fl
 |---|---|---|---|
 | **sensor correction** | | | |
 | `blc` | off | subtracts the per-channel black level, on CVISP bank 0x4200 rather than in the ISP register file | no ISP register written |
-| `gib` | off (tuning file only) | green imbalance between the two Bayer greens | no ISP register written |
-| `dpc` | undecided, tuning file says runs | replaces defective pixels | derived from the tuning file |
-| `lsc` | runs (file agrees) | lens shading: a 10x10 gain grid that lifts the corners | the vendor library image (2 still recorded) |
-| `digigain1` | off (file agrees) | digital gain ahead of the noise stages | no ISP register written |
-| `compander` | off (file agrees) | companding curve between the sensor range and the pipe | a DMA page |
-| `decompander` | off (file agrees) | the inverse curve | a DMA page |
+| `gib` | no gate recovered | green imbalance between the two Bayer greens | no ISP register written |
+| `dpc` | undecided | replaces defective pixels | derived from the tuning file |
+| `lsc` | runs (inferred) | lens shading: a 10x10 gain grid that lifts the corners | the vendor library image |
+| `digigain1` | off (inferred) | digital gain ahead of the noise stages | no ISP register written |
+| `compander` | off (inferred) | companding curve between the sensor range and the pipe | a DMA page |
+| `decompander` | off (inferred) | the inverse curve | a DMA page |
 | **noise reduction** | | | |
-| `rnr` | runs | radial noise reduction, strength rising toward the corners | derived from the tuning file (2 still recorded) |
-| `birnr` | runs, tuning file says off | bilateral noise reduction in the Bayer domain | derived from the tuning file (2 still recorded) |
-| `lee_lnr` | runs | luma noise reduction, bank 0x3cc8, which the register map calls lnr | derived from the tuning file (1 still recorded) |
+| `rnr` | runs | radial noise reduction, strength rising toward the corners | derived from the tuning file |
+| `birnr` | runs | bilateral noise reduction in the Bayer domain | derived from the tuning file |
+| `lee_lnr` | runs | luma noise reduction, bank 0x3cc8, which the register map calls lnr | derived from the tuning file |
 | `de3d` | no gate recovered | temporal noise reduction across frames, the motion-sensitive stage | derived from the tuning file |
-| `raw_3dnr` | off (tuning file only) | raw-domain temporal filter | no ISP register written |
+| `raw_3dnr` | no gate recovered | raw-domain temporal filter | no ISP register written |
 | **demosaic** | | | |
 | `cfa` | no gate recovered | Bayer to RGB, the point where the image gains three channels | derived from the tuning file |
 | **colour** | | | |
-| `wb` | runs | per-channel white balance gains | the vendor library image (2 still recorded) |
+| `wb` | runs | per-channel white balance gains | the vendor library image |
 | `ccm1` | runs | the 3x3 colour correction matrix | derived from the tuning file |
 | `ccm2` | no gate recovered | a second colour matrix | derived from the tuning file |
-| `cm` | runs | colour manipulation | the vendor library image (1 still recorded) |
-| `cm2` | runs | a second colour manipulation block | a recording of the vendor (7 still recorded) |
+| `cm` | runs | colour manipulation | the vendor library image |
+| `cm2` | runs | a second colour manipulation block | read out of the vendor packer |
 | `acm` | off | adaptive colour manipulation | the vendor library image |
 | `cnf` | runs | chroma noise filter | derived from the tuning file |
 | `lut3d` | off | a 3D colour lookup table in four DMA banks | the vendor library image |
 | `qgg` | no gate recovered | quadratic green gain | the vendor library image |
 | `lms` | off | long/medium/short colour space conversion | the vendor library image |
 | **tone** | | | |
-| `gamma` | runs (file agrees) | the gamma transfer curve, fetched as a DMA page | a DMA page |
-| `drc` | runs (file agrees) | dynamic range compression, fetched as a DMA page | cleared (4 still recorded) |
-| `ltm` | no gate recovered | local tone mapping: 64 per-tile transfer curves, recomputed per frame | a recording of the vendor (11 still recorded) |
-| `gtm2` | runs | global tone mapping, sharing ltm bank 0x2800 | a recording of the vendor (11 still recorded) |
+| `gamma` | runs (inferred) | the gamma transfer curve, fetched as a DMA page | a DMA page |
+| `drc` | runs (inferred) | dynamic range compression, fetched as a DMA page | cleared |
+| `ltm` | no gate recovered | local tone mapping: 64 per-tile transfer curves, recomputed per frame | read out of the vendor packer |
+| `gtm2` | runs | global tone mapping, sharing ltm bank 0x2800 | read out of the vendor packer |
 | **colour space** | | | |
 | `rgb2yuv` | no gate recovered | RGB to YUV, the point where the image becomes luma and chroma | derived from the tuning file |
 | **geometry** | | | |
-| `binning_filter` | off (tuning file only) | binning ahead of the scaler | no ISP register written |
+| `binning_filter` | no gate recovered | binning ahead of the scaler | no ISP register written |
 | **statistics** | | | |
-| `rro_stats` | runs | the 36x16 zone grid AE meters from | the vendor library image (6 still recorded) |
-| `face_rro_stats` | runs | a second zone grid over a smaller window | a recording of the vendor (9 still recorded) |
-| `raw_his_stats` | runs | the Bayer histogram, 128 bins by 4 lanes | the vendor library image (2 still recorded) |
-| `awbs_stats` | off | the white-balance accumulator | the vendor library image (13 still recorded) |
-| `af_stats` | undecided, tuning file says runs | the autofocus accumulator | the vendor library image (5 still recorded) |
-| `derolling_stats` | runs (tuning file only) | rolling-shutter statistics | no ISP register written |
-| `rgb_his_stats` | runs (tuning file only) | the RGB histogram | no ISP register written |
-| `rgb_max_stats` | runs (tuning file only) | per-channel maxima | no ISP register written |
+| `rro_stats` | runs | the 36x16 zone grid AE meters from | the vendor library image (2 still recorded) |
+| `face_rro_stats` | runs | a second zone grid over a smaller window | the vendor library image (3 still recorded) |
+| `raw_his_stats` | runs | the Bayer histogram, 128 bins by 4 lanes | the vendor library image (1 still recorded) |
+| `awbs_stats` | off | the white-balance accumulator | the vendor library image |
+| `af_stats` | undecided | the autofocus accumulator | the vendor library image |
+| `derolling_stats` | no gate recovered | rolling-shutter statistics | no ISP register written |
+| `rgb_his_stats` | no gate recovered | the RGB histogram | no ISP register written |
+| `rgb_max_stats` | no gate recovered | per-channel maxima | no ISP register written |
 The `hdr` and `ir` families have banks in the register map and are absent from the pipeline: `hdr` needs a second sensor exposure and `ir` an infrared channel, and this camera module produces neither.
 
 Three stages recompute continuously as the scene changes rather than sitting at a configured value: `rnr`, `lee_lnr` and `de3d` all interpolate between gain bands in the tuning file. `cfa` and `cnf` do the same through their own record layout. All five take one abscissa, and `ml-3a` drives it.
@@ -240,7 +240,7 @@ The full chain, sensor through CVISP, captures processed colour frames on the op
 - **Sensor.** Configuration verified equivalent: mode table matches the vendor library write for write in order, and all 184 live registers read back bit-identical to the streaming vendor mid-stream. Exposure and gain are driven explicitly; the vendor drives them from AE.
 - **CSI-2 link.** Every `INT_ST_*` bank reads zero on the steady-state second read, matching the vendor. The banks are clear-on-read: always read twice.
 - **VIF front end.** Measures the incoming timing correctly (`0x1f0` = `0x0784043c`) and matches the vendor's live values; frame starts fire at frame rate. The four registers the vendor's end state differs in (`0x080`, `0x08c`, `0x140`, `0x2bc`) were set to vendor values on hardware with no effect.
-- **ISP.** Register state vendor-identical over the modeled range; every DMA descriptor points at driver-generated memory (`camera-isp-recovery.md`, "What the driver owns").
+- **ISP.** Register state vendor-identical over the modeled range. The active coefficient pages, temporal-filter buffers and AE statistics buffers are driver-owned; the remaining device-sourced entries are tracked by `scripts/isp/audit-provenance.py` (`camera-isp-recovery.md`, "What the driver owns").
 - **CVISP.** Configured, armed per frame start, sustains 60 fps.
 - **CGU.** The open stack programs three of the fourteen registers the vendor programs; the rest, including two reset-control writes, are inherited from boot state. Unexplained but measured harmless in the working chain.
 
@@ -334,5 +334,3 @@ The same distinction applies to VIF frame starts: `ml-isploop` counts frame star
 | Vendor MMIO write trace, per block and wide sweep | capture harness `glue/camera/au-slotA-mmiotrace.sh`, shim `native/mmiotrace.c`; the logs are capture artifacts, not in the tree |
 | The pipeline table above | `scripts/isp/isp-pipeline.py`, over `vendor-tables/ar-isp-gates.h` and `scripts/isp/audit-provenance.py` |
 | What the vendor writes, and where each value came from | `camera-isp-recovery.md` |
-
-
