@@ -304,9 +304,11 @@ def main() -> None:
         emit(f' * libmpp_service.so (sha256 {digest[:DIGEST_CHARS]}).\n')
         emit(' *\n')
         emit(' * Entries marked "recovered" were not present in the vendor MMIO write\n')
-        emit(' * trace. The vendor pushes its shadow image with a write-only-if-changed\n')
-        emit(' * primitive, so a register already holding its target value is never\n')
-        emit(' * written and cannot appear in a trace. Their values come from the block\n')
+        emit(' * trace. That absence is a property of the trace, not of the install:\n')
+        emit(' * the vendor pushes each shadow image with an unconditional word-by-word\n')
+        emit(' * copy, so every word of it does reach the hardware. A trace is a\n')
+        emit(' * recording through one window over one boot, and is correct only where\n')
+        emit(' * the capture happened to be looking. Their values come from the block\n')
         emit(' * alone, confirmed identical across every copy of it.\n')
         emit(' *\n')
         emit(' * Page 0x28 has a single known copy, so its values cannot be\n')
@@ -318,8 +320,8 @@ def main() -> None:
         emit('struct ar_isp_reg {\n\tu16 off;\n\tu32 val;\n};\n\n')
         emit('/*\n')
         emit(' * The complete static default set. Not applied by the driver, which\n')
-        emit(' * applies ar_isp_recovered followed by ar_isp_setup_1080p60 and reaches\n')
-        emit(' * the same state in fewer writes. Kept because it is the mode-independent\n')
+        emit(' * applies ar_isp_kept followed by ar_isp_setup_1080p60 and reaches the\n')
+        emit(' * same state in fewer writes. Kept because it is the mode-independent\n')
         emit(' * half of the configuration, and a driver that supports a second sensor\n')
         emit(' * mode needs it rather than the 1080p60 table.\n')
         emit(' */\n')
@@ -334,18 +336,6 @@ def main() -> None:
             note = f'\t/* {kind} */'
             for off, val, traced in regs:
                 emit(f'\t{{ 0x{off:04x}, 0x{val:08x} }},{"" if traced else note}\n')
-
-        emit('};\n\n')
-
-        emit('/*\n')
-        emit(' * Registers with a static default that the setup phase never writes.\n')
-        emit(' * Apply these first, then ar_isp_setup_1080p60 in order.\n')
-        emit(' */\n')
-        emit('static const struct ar_isp_reg ar_isp_recovered[] = {\n')
-        for _page, _ncopies, _verified, regs in pages:
-            for off, val, seen in regs:
-                if not seen:
-                    emit(f'\t{{ 0x{off:04x}, 0x{val:08x} }},\n')
 
         emit('};\n\n')
 

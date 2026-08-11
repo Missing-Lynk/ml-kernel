@@ -286,22 +286,20 @@ static const struct ar_isp_reg ar_isp_lnr_fix[] = {
 };
 
 /*
- * The two registers of ar_isp_recovered that the block keeps.
+ * Two registers that no vendor submodule image covers and that the block
+ * nonetheless keeps.
  *
- * ar_isp_recovered was built on the premise that each vendor submodule default
- * block is a 64-register page. It is not: a block is the length its descriptor
- * in the ISP-init template array gives, and every submodule image shorter than
- * a page had the following bytes of the library data segment emitted after it
- * as if they were registers. vendor-tables/ar-isp-library.h carries the images
- * at their true length; scripts/isp/check-isp-library.py measures the overrun.
+ * A submodule default block is the length its descriptor in the ISP-init
+ * template array gives, not the 64-register page an earlier reading assumed.
+ * vendor-tables/ar-isp-library.h carries the images at their true length, and
+ * scripts/isp/check-isp-library.py measures how far a page-sized reading
+ * overruns each one.
  *
- * All 328 entries of ar_isp_recovered fall in that overrun, and every register
- * a submodule image does cover is already in the setup table, so the table
- * contributes nothing a vendor image backs. 323 of the entries are the last
- * write to their register, and 321 of those read back zero on both the vendor
- * device and this one, which is the block discarding them. These two are the
- * pair that reads back what was written, on both, so they are kept rather than
- * assumed inert.
+ * These two lie in that overrun, so no vendor image backs their values. They
+ * are kept because they read back what was written, on the vendor device and
+ * on this one; the rest of the overrun reads back zero, which is the block
+ * discarding it. Their provenance is a recording, and audit-provenance.py
+ * counts them as such.
  */
 static const struct ar_isp_reg ar_isp_kept[] = {
 	{ 0x6518, 0x00000001 },

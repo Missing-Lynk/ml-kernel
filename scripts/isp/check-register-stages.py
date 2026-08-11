@@ -69,9 +69,10 @@ STAGES = (
     ("digigain2", CVISP, 0x4700, 0x4800),
 )
 
-# The tables the driver applies, in the order it applies them.
-APPLIED = ("ar_isp_recovered", "ar_isp_setup_1080p60", "ar_isp_vendor_trim",
-           "ar_isp_output_fix")
+# The tables the driver applies, in the order it applies them. ar_isp_kept and
+# ar_isp_lnr_fix are applied too but are declared in ar-isp-main.c rather than
+# in the generated header, and hold two and one register respectively.
+APPLIED = ("ar_isp_setup_1080p60", "ar_isp_vendor_trim", "ar_isp_output_fix")
 
 # ar_isp_vendor_trim is measured from a live read-back rather than derived from
 # what the vendor wrote, so where it disagrees with the trace it is targeting a
