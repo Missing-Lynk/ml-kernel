@@ -39,7 +39,13 @@ The AR8030 can power up in a state where it enumerates with the correct vendor (
 
 The GPIO23 reset pulse does not clear it, so the wedge sits below the reset domain. The DTS carries no regulator or power-enable for the AR8030 and GPIO23 is the only control line, so software cannot power-cycle the chip: the remedy is a cold power cycle with the battery out, and a warm reboot may not be enough. Note this is not stale state from another slot; `ml-rf-bringup` pulses the reset and then waits for `0x8030` specifically, so the firmware and its config are re-downloaded on every bring-up.
 
-Possible debugging step (not implemented): `wait_ar8030()` in `ml-rf-bringup` reads every enumerated device ID while scanning and discards it, then reports `AR8030 never enumerated on SDIO` on timeout, which is misleading here because the chip did enumerate. Recording the observed `vendor:device` pairs and printing them on timeout would name this state at boot instead of leaving `ml-linkd` retrying without a reason. Whether a longer or repeated reset hold recovers the chip is untested.
+`wait_ar8030()` in `ml-rf-bringup` now records the `vendor:device` pairs it scans and prints them on timeout, so this state names itself instead of reporting the misleading `AR8030 never enumerated on SDIO`. Whether a longer or repeated reset hold recovers the chip is untested.
+
+## The pre-load gate must match the id_table [confirmed]
+
+`ml-rf-bringup` waits for the chip on the SDIO bus before loading the module, and that wait accepts `0x8030` **and** `0x8031`, which is exactly the driver's `id_table` (`kernel/modules/artosyn_sdio.c:2196-2197`). A narrower gate refuses a chip the driver would have bound: a programmed chip that kept its firmware across an SoC reboot enumerates as `0x8031`, and a gate waiting for a literal `8030` times out with `artosyn_sdio` never inserted, no `sdio0`, and `ml-linkd` retrying - indistinguishable at a glance from the corrupt-ID state above.
+
+The vendor has no such gate. `start_ar813x.sh` toggles GPIO23, sleeps 0.5 s, `insmod`s with `fw_name=`/`cfg_name=`, and lets the SDIO core match; it checks only the `insmod` exit status, then sleeps 2 s and runs `ifconfig sdio0`. There is no retry around reset, `insmod` or `ifconfig` anywhere in the stock boot path, and no recovery for a bad device ID - the stock module's aliases are `4152:8030` and `4152:8031` only, so a `4152:2a22` chip never reaches its probe either. Provenance: stock rootfs `/usr/usrdata/ar813x/start_ar813x.sh:52-80`, `/usr/usrdata/run.sh:121-134`, and the stock `artosyn_sdio.ko` `.modinfo` alias table (handoff 101).
 
 ## Clock glue: `dw_mci-artosyn` (mmc0 taps) [confirmed]
 
