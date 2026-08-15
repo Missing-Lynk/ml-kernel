@@ -27,13 +27,15 @@ Air units only; the goggle has no camera hardware. Architecture (which block is 
 |---|---|---|
 | End-to-end capture (sensor -> CSI-2 -> VIF -> ISP -> CVISP) | DONE | the full chain captures processed colour frames at 1080p60 on the open stack, validated by marker count and by rendered images |
 | Per-block parity: sensor, CSI-2 link, VIF front end, ISP, CVISP | DONE | each vendor-identical over its modeled range; drivers in `overlay/drivers/media/artosyn/`, evidence per block in `docs/camera-stack.md` "Status" |
-| Gain-keyed ISP stages (`rnr`, `lnr`, `de3d`) | DONE | derived from the tuning-file ladders rather than transcribed, bit-exact at both measured vendor operating points; the proofs are `scripts/isp/check-{rnr,lnr,de3d}-ladder.py` |
-| AE closed loop | DONE | `native/ml-3a.c` meters the `rro_stats` zone grid and drives sensor exposure, sensor gain and the three ladder abscissas from one exposure-table index |
+| ISP register provenance | DONE | `scripts/isp/audit-provenance.py`: 1260 driver-written ISP registers, 1258 regenerable from the tuning blob, vendor library or driver configuration, 2 hardware-owned readbacks, 0 unexplained replay values and 0 device-capture-only values |
+| AE-derived ISP stages (`rnr`, `lnr`, `de3d`, `cfa`, `cnf`, `cm`, `cm2`) | PARTIAL | all seven derive from the tuning-file ladders rather than transcribed state; `rnr`/`lnr`/`de3d` are hardware-validated at measured vendor operating points, while `cfa`/`cnf`/`cm`/`cm2` are implemented and offline-checked, pending gate boot. The first five key on the AE gain; `cm`/`cm2` key on the AEC trigger scalar, pinned to the operating point the vendor's traced state measures until that scalar's producer is recovered |
+| AE closed loop | DONE | `native/ml-3a.c` meters the `rro_stats` zone grid and drives sensor exposure, sensor gain and the gain-keyed ISP ladder abscissa from one exposure-table index; CFA/CNF/CM/CM2 hardware proof is tracked by the gate-validation row |
 | Camera -> wave5 encoder | PARTIAL | 1080p60 reaches the encoder, but only the first encoder instance per firmware boot is reliable; the defect is in the codec firmware, not the camera path (`docs/wave5-encoder-instance-reuse.md`) |
 | CGU camera leaves | PARTIAL | the open stack programs three of the fourteen registers the vendor programs; the rest are inherited from boot state, unexplained but measured harmless in the working chain |
 | VIF view-engine (bypass) path | NOT DONE | implemented from the register map but unvalidated: no bypass view has ever delivered a frame, on either stack, and the vendor holds the views in reset |
-| `cfa` and `cnf` recompute transforms | NOT DONE | the two remaining AEC-triggered stages; they run replayed state today. Next recovery target |
-| AWB, tone-table selection, LTM tile curves | NOT DONE | held constant where the vendor's 3A moves them; loops to implement, not registers to fix |
+| `cfa`, `cnf`, `cm` and `cm2` gate validation | NOT DONE | transforms are implemented and offline-checked; remaining work is the hardware gate boot plus a vendor/open capture that exercises the blend path |
+| Tone-table selection and LTM tile curves | NOT DONE | held constant where the vendor's 3A moves them; the shipped tuning gates AWB off, so AWB is a beyond-vendor item rather than a parity blocker |
+| `raw_3dnr` classification | DONE | disabled in the shipped NT99235 FPV path; `scripts/isp/check-raw-3dnr.py` checks the zero tuning gate and zero stock/open bank heads |
 
 ## RF chip (AR8030)
 

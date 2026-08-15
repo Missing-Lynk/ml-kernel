@@ -4,11 +4,12 @@ An open Linux 6.18.36 kernel for the Artosyn Proxima-9311 SoC + AR8030 RF link, 
 
 Drives:
 - Display (DRM/KMS)
+- Air-unit camera capture (NT99235 -> CSI-2 -> VIF -> ISP -> CVISP)
 - Video codec (wave5, V4L2)
 - AR8030 RF link
 - Board peripherals (SD/SDIO, buttons, status LED, buzzer, backlight, ADC, RTC)
 
-The same SoC/RF chip pair shows up across goggle, VRx, VTx, and air-unit products, and nothing here is device-specific except where noted, for example the panel/backlight/button peripherals a display-and-keypad unit has and a camera-only air unit would not. This repo's hardware validation happens on a goggle, the BetaFPV VR04 HD.
+The same SoC/RF chip pair shows up across goggle, VRx, VTx, and air-unit products, and nothing here is device-specific except where noted, for example the panel/backlight/button peripherals a display-and-keypad unit has and a camera-only air unit would not. Hardware validation is split across the BetaFPV VR04 HD goggle and its matching air unit.
 
 Naming: `AR9311` in driver names is this same SoC, the Proxima-9311, as in `clk-ar9311-cgu`. `AR9301` names its QSPI-NAND controller IP, `spi-ar9301`.
 
@@ -68,6 +69,47 @@ Note: for full base-image reproducibility, pin the `scripts/Dockerfile` `FROM` t
 - `STATUS.md`: the single progress table for everything under `kernel/` - update progress there, not in the docs below.
 - `PERIPHERALS.md`: per-peripheral architecture - what works via a stock/mainline driver vs. what needed a custom one.
 - `docs/`: curated register-level reference, one file per peripheral - the current-state "why" behind the code in `overlay/`, `patches/`, and `modules/`.
+
+Air-unit camera and ISP ownership are documented in `docs/camera-stack.md`, with the full
+register provenance in `docs/camera-isp-recovery.md`. The reproducibility gate is
+`scripts/isp/audit-provenance.py`: the current ISP register set has 1260 driver-written
+registers, 1258 regenerable from the NT99235 tuning blob, `libmpp_service.so` static images,
+or driver-owned geometry/DMA state, two hardware-owned readbacks, zero unexplained replay
+values, and zero device-capture-only values.
+
+That boundary is source-based. Swapping in a newer vendor `nt99235_tuning_preview_fpv.bin`
+updates the blob-fed ISP stages; swapping in a newer `libmpp_service.so` updates the generated
+static tables under `overlay/drivers/media/artosyn/vendor-tables/`. Re-run the generators and
+`scripts/isp/audit-provenance.py` after either input changes.
+
+Minimal ISP input-refresh loop, from this directory:
+
+```sh
+TUNING=../out/air-gather/camera/nt99235_tuning_preview_fpv.bin
+LIB=../out/air-gather/vendor-root/usr/lib/libmpp_service.so
+
+python3 scripts/isp/gen-isp-library.py --lib "$LIB" \
+    -o overlay/drivers/media/artosyn/vendor-tables/ar-isp-library.h
+python3 scripts/isp/isp-gates.py --lib "$LIB" --blob "$TUNING" \
+    --header overlay/drivers/media/artosyn/vendor-tables/ar-isp-gates.h
+python3 scripts/isp/gen-ccm.py --lib "$LIB" --blob "$TUNING" \
+    > overlay/drivers/media/artosyn/vendor-tables/ar-isp-ccm-init.h
+python3 scripts/isp/gen-gamma-page1.py --lib "$LIB" \
+    > overlay/drivers/media/artosyn/vendor-tables/ar-isp-gamma-page1.h
+python3 scripts/isp/gen-drc-tail.py --lib "$LIB" \
+    > overlay/drivers/media/artosyn/vendor-tables/ar-isp-drc-tail.h
+python3 scripts/isp/gen-compander.py --lib "$LIB" \
+    > overlay/drivers/media/artosyn/vendor-tables/ar-isp-compander.h
+python3 scripts/isp/gen-rgb2yuv.py --lib "$LIB" \
+    > overlay/drivers/media/artosyn/vendor-tables/ar-isp-rgb2yuv.h
+
+python3 scripts/isp/check-ladder-c.py --tuning "$TUNING"
+python3 scripts/isp/check-tone-selector.py --tuning "$TUNING" --lib "$LIB"
+python3 scripts/isp/audit-provenance.py
+```
+
+The scripts pin the vendor layouts they decode. A digest or structural mismatch is a map change to
+recover and document before committing regenerated headers.
 
 Nothing here talks to a device. Everything host-side that does - the build + RAM-boot inner loop, the slot-B flashers, serial and U-Boot access, recovery - lives in the sibling `../glue/` tree and is documented in `../glue/README.md`.
 
