@@ -82,6 +82,19 @@ and every later frame would be an IDR for the life of the instance. Two forces o
 consecutive frames are enough to latch it, which is reachable whenever a receiver
 requests IDRs faster than one frame apart.
 
+(9) Vendor parity for the open parameters that have no V4L2 control. wave5's
+sequence-init writes several fields the driver hardcodes; the vendor MPP service
+drives the same firmware from its own default template, which is recovered field
+by field in userspace/docs/air-video-benchmark.md. Six differ, and each is set to
+the vendor's value: hvs_max_delta_qp 10 -> 4, rdo_skip 1 -> 0,
+lambda_scaling_enable 1 -> 0, rc_weight_buf 128 -> 1, tmvp_enable 0 -> 1 and
+max_num_merge 0 -> 2. hvs_max_delta_qp is the one that bounds an intra picture:
+with CU-level rate control on, it caps how far a block may be coded below the
+picture QP, and 10 permits an intra picture six QP steps finer than the vendor
+allows. max_num_merge 0 is not a vendor difference so much as a gap - the field
+takes 1 or 2 and nothing ever wrote it. The fields the vendor agrees with
+upstream on are left alone.
+
 --- a/drivers/media/platform/chips-media/wave5/wave5-vpu-enc.c
 +++ b/drivers/media/platform/chips-media/wave5/wave5-vpu-enc.c
 @@ -125,6 +125,30 @@
@@ -488,7 +501,68 @@ requests IDRs faster than one frame apart.
  	return 0;
  }
  
-@@ -1343,17 +1543,20 @@
+@@ -1156,9 +1356,21 @@
+ 	else
+ 		open_param->src_format = FORMAT_420;
+ 
++	/*
++	 * Values with no V4L2 control are set to what the vendor's MPP service opens this same
++	 * firmware with. Its defaults live in a rodata template that
++	 * ar_video_h26x_enc_exe_gen_default_param() copies into the channel object, and every field
++	 * is named by that function's own log strings; the recovered table is in
++	 * userspace/docs/air-video-benchmark.md. Fields the vendor agrees with upstream on
++	 * (gop_preset_idx 9, hvs_qp_scale 2, skip_intra_trans, intra_nx_n_enable, the six noise
++	 * weights, rc_weight_param 16) are left alone.
++	 */
+ 	open_param->wave_param.gop_preset_idx = PRESET_IDX_IPP_SINGLE;
+ 	open_param->wave_param.hvs_qp_scale = 2;
+-	open_param->wave_param.hvs_max_delta_qp = 10;
++	/* Vendor hvsMaxDeltaQp. Bounds how far CU-level RC may pull a block below the picture QP,
++	 * so upstream's 10 permits an intra picture 6 QP steps finer than the vendor allows.
++	 */
++	open_param->wave_param.hvs_max_delta_qp = 4;
+ 	open_param->wave_param.skip_intra_trans = 1;
+ 	open_param->wave_param.intra_nx_n_enable = 1;
+ 	open_param->wave_param.nr_intra_weight_y = 7;
+@@ -1167,8 +1379,16 @@
+ 	open_param->wave_param.nr_inter_weight_y = 4;
+ 	open_param->wave_param.nr_inter_weight_cb = 4;
+ 	open_param->wave_param.nr_inter_weight_cr = 4;
+-	open_param->wave_param.rdo_skip = 1;
+-	open_param->wave_param.lambda_scaling_enable = 1;
++	/* Vendor rdoSkip / lambdaScalingEnable, both 0 under its useRecommendEncParam 0. Skipping
++	 * rate-distortion optimisation spends more bits for the same QP.
++	 */
++	open_param->wave_param.rdo_skip = 0;
++	open_param->wave_param.lambda_scaling_enable = 0;
++	/* Vendor tmvpEnable / maxNumMerge. Neither has a control, so both were left at the zero the
++	 * instance is allocated with; max_num_merge 0 is outside the 1..2 the field accepts.
++	 */
++	open_param->wave_param.tmvp_enable = 1;
++	open_param->wave_param.max_num_merge = 2;
+ 
+ 	open_param->line_buf_int_en = true;
+ 	open_param->pic_width = inst->conf_win.width;
+@@ -1176,9 +1396,17 @@
+ 	open_param->frame_rate_info = inst->frame_rate;
+ 	open_param->rc_enable = inst->rc_enable;
+ 	if (inst->rc_enable) {
++		/* -1 selects the firmware's own initial QP, and matches the vendor's initialRcQp
++		 * (the s32FirstFrameStartQp its SetRcParam leaves at -1). Under it the first
++		 * intra picture of an instance appears to be coded at wave_param.intra_qp: the
++		 * vendor's open-parameter template carries intraQP 35 and its session-opening
++		 * IDR measures exactly QP 35 on the wire (glue/capture/hevc-slice-qp.py over
++		 * archive/out/rf-capture/assoc-arm.c0.h265). Untested on this side.
++		 */
+ 		open_param->wave_param.initial_rc_qp = -1;
+ 		open_param->wave_param.rc_weight_param = 16;
+-		open_param->wave_param.rc_weight_buf = 128;
++		/* Vendor rcWeightBuf. Upstream's 128 is the Chips&Media reference value. */
++		open_param->wave_param.rc_weight_buf = 1;
+ 	}
+ 	open_param->wave_param.mb_level_rc_enable = input.mb_level_rc_enable;
+ 	open_param->wave_param.cu_level_rc_enable = input.cu_level_rc_enable;
+@@ -1343,17 +1571,20 @@
  
  		ret = wave5_set_enc_openparam(&open_param, inst);
  		if (ret) {
@@ -513,7 +587,7 @@ requests IDRs faster than one frame apart.
  
  		if (inst->mirror_direction) {
  			wave5_vpu_enc_give_command(inst, ENABLE_MIRRORING, NULL);
-@@ -1376,6 +1579,8 @@
+@@ -1376,6 +1607,8 @@
  			dev_warn(inst->dev->dev, "Sequence not found: %d\n", ret);
  			goto return_buffers;
  		}
@@ -522,7 +596,7 @@ requests IDRs faster than one frame apart.
  		ret = switch_state(inst, VPU_INST_STATE_INIT_SEQ);
  		if (ret)
  			goto return_buffers;
-@@ -1390,6 +1595,7 @@
+@@ -1390,6 +1623,7 @@
  		}
  
  		ret = switch_state(inst, VPU_INST_STATE_PIC_RUN);
@@ -530,7 +604,7 @@ requests IDRs faster than one frame apart.
  	}
  	if (ret)
  		goto return_buffers;
-@@ -1579,6 +1785,7 @@
+@@ -1579,6 +1813,7 @@
  	inst->dev = dev;
  	inst->type = VPU_INST_TYPE_ENC;
  	inst->ops = &wave5_vpu_enc_inst_ops;
@@ -538,7 +612,7 @@ requests IDRs faster than one frame apart.
  
  	inst->codec_info = kzalloc(sizeof(*inst->codec_info), GFP_KERNEL);
  	if (!inst->codec_info) {
-@@ -1740,6 +1947,8 @@
+@@ -1740,6 +1975,8 @@
  	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
  			  V4L2_CID_MPEG_VIDEO_PREPEND_SPSPPS_TO_IDR,
  			  0, 1, 1, 0);
