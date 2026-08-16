@@ -54,11 +54,16 @@ import argparse
 import struct
 import sys
 
-HEADER = 0x24548
-BANDS = 0x24558
-PAYLOAD = 0x245D8
-STRIDE = 0xA4
-COUNT = 5
+from blob_layout import Layout
+
+_LAY = Layout.load()
+
+
+HEADER = _LAY["cfa_header"].offset
+BANDS = _LAY["cfa_bands"].offset
+PAYLOAD = _LAY["cfa_payload"].offset
+STRIDE = _LAY["cfa_payload"].stride
+COUNT = _LAY["cfa_payload"].count
 BANK = 0x0800
 
 # ar_isp_cfa_runs, as (bank offset, record offset, register count).

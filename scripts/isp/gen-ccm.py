@@ -45,6 +45,10 @@ import sys
 from collections.abc import Sequence
 
 import arlib
+from blob_layout import Layout
+
+_LAY = Layout.load()
+
 
 # Entries of the ISP-init template array (arlib.TEMPLATE_ARRAY_VMA).
 CCM1_ENTRY = 33
@@ -88,13 +92,13 @@ Q8_MAG_MAX = 0x7FFF
 Q8_SIGN = 0x8000
 Q8_ONE = 1 << Q8_FRAC_BITS
 
-GATE_CCM1 = 0x253FC
-GATE_CCM2 = 0x2595C
-LADDER = 0x25438
-ILLUMINANTS = 8
-BANKS = 0x25470
-BANK_STRIDE = 0x24
-BANKS_USED = 4
+GATE_CCM1 = _LAY["ccm1_gate"].offset
+GATE_CCM2 = _LAY["ccm2_gate"].offset
+LADDER = _LAY["ccm_illuminants"].offset
+ILLUMINANTS = _LAY["ccm_illuminants"].count
+BANKS = _LAY["ccm_banks"].offset
+BANK_STRIDE = _LAY["ccm_banks"].stride
+BANKS_USED = _LAY["ccm_banks"].count
 
 # Kelvin bounds the illuminant ladder has to stay inside to still be a colour-temperature
 # sequence rather than a misread offset.

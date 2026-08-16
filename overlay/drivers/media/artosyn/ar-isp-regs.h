@@ -13,6 +13,7 @@
 #ifndef AR_ISP_REGS_H
 #define AR_ISP_REGS_H
 
+#include "vendor-tables/ar-isp-blob.h"
 #include <linux/bits.h>
 
 #include "ar-isp-stats.h"
@@ -303,6 +304,5 @@
  * not something to parse on a best-effort basis.
  */
 #define AR_ISP_TUNING_FIRMWARE		"artosyn/nt99235-tuning-preview-fpv.bin"
-#define AR_ISP_TUNING_SIZE		0xd6c58
 
 #endif /* AR_ISP_REGS_H */

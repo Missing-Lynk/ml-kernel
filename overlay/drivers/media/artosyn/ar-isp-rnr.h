@@ -16,6 +16,7 @@
 #ifndef AR_ISP_RNR_H
 #define AR_ISP_RNR_H
 
+#include "vendor-tables/ar-isp-blob.h"
 #include "ar-isp-ladder.h"
 
 /*
@@ -36,14 +37,6 @@
  * Payload words 2..13 feed the low register halves and 14..25 the high halves,
  * one word per register.
  */
-#define AR_ISP_RNR_BLOB_HEADER		0x79d8
-#define AR_ISP_RNR_HDR_MODE		0x08
-#define AR_ISP_RNR_HDR_COUNT		0x0c
-#define AR_ISP_RNR_HDR_SELECT		0x10
-#define AR_ISP_RNR_BLOB_BANDS		0x79ec
-#define AR_ISP_RNR_BLOB_PAYLOAD		0x7a6c
-#define AR_ISP_RNR_BLOB_STRIDE		0x160
-#define AR_ISP_RNR_BANDS		12
 #define AR_ISP_RNR_LO_WORD		2
 #define AR_ISP_RNR_HI_WORD		14
 

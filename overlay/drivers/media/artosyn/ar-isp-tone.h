@@ -28,18 +28,13 @@
 #ifndef AR_ISP_TONE_H
 #define AR_ISP_TONE_H
 
+#include "vendor-tables/ar-isp-blob.h"
 #include "ar-isp-bytes.h"
 #include "ar-isp-codec.h"
 #include "ar-isp-ladder.h"
 
 /* Band tables, and the header word holding each entry count. */
-#define AR_ISP_GAMMA_BLOB_HEADER	0x26afc
-#define AR_ISP_GAMMA_BLOB_COUNT		0x26b04
-#define AR_ISP_GAMMA_BLOB_BANDS		0x26b0c
 
-#define AR_ISP_DRC_BLOB_HEADER		0x17a88
-#define AR_ISP_DRC_BLOB_COUNT		0x17a90
-#define AR_ISP_DRC_BLOB_BANDS		0x17a9c
 
 /* A band is two float32, the inclusive low and high edge. */
 #define AR_ISP_TONE_BAND_STRIDE		8

@@ -28,6 +28,7 @@
 #ifndef AR_ISP_CNF_H
 #define AR_ISP_CNF_H
 
+#include "vendor-tables/ar-isp-blob.h"
 #include "ar-isp-ladder.h"
 
 /*
@@ -84,10 +85,6 @@
  * default, like rnr's and lnr's, and only its clamp is carried. That clamp is
  * what bounds a corrupt file to a value the field can hold.
  */
-#define AR_ISP_CNF_BLOB_BANDS		0x8e1dc
-#define AR_ISP_CNF_BLOB_PAYLOAD		0x8e25c
-#define AR_ISP_CNF_BLOB_STRIDE		0x80c
-#define AR_ISP_CNF_BANDS		11
 #define AR_ISP_CNF_INTERP		1
 #define AR_ISP_CNF_WORD_STRENGTH	0x04
 #define AR_ISP_CNF_STRENGTH_MIN		1
@@ -210,12 +207,15 @@ struct ar_isp_cnf_static {
 
 static const struct ar_isp_cnf_static
 ar_isp_cnf_statics[AR_ISP_CNF_STATIC_REGS] = {
-	{ 0x8e1a8, 0x8e1b4, AR_ISP_CNF_STATIC_WIDE_MASK },	/* 0x3c8c */
-	{ 0x8e1c0, 0x8e1cc, AR_ISP_CNF_STATIC_NARROW_MASK },	/* 0x3c90 */
-	{ 0x8e1ac, 0x8e1b8, AR_ISP_CNF_STATIC_WIDE_MASK },	/* 0x3c94 */
-	{ 0x8e1c4, 0x8e1d0, AR_ISP_CNF_STATIC_NARROW_MASK },	/* 0x3c98 */
-	{ 0x8e1b0, 0x8e1bc, AR_ISP_CNF_STATIC_WIDE_MASK },	/* 0x3c9c */
-	{ 0x8e1c8, 0x8e1d4, AR_ISP_CNF_STATIC_NARROW_MASK },	/* 0x3ca0 */
+	/* B is the run's base; the wide words come first, then the narrow pair. */
+#define B AR_ISP_CNF_STATIC_BLOB
+	{ B + 0x00, B + 0x0c, AR_ISP_CNF_STATIC_WIDE_MASK },	/* 0x3c8c */
+	{ B + 0x18, B + 0x24, AR_ISP_CNF_STATIC_NARROW_MASK },	/* 0x3c90 */
+	{ B + 0x04, B + 0x10, AR_ISP_CNF_STATIC_WIDE_MASK },	/* 0x3c94 */
+	{ B + 0x1c, B + 0x28, AR_ISP_CNF_STATIC_NARROW_MASK },	/* 0x3c98 */
+	{ B + 0x08, B + 0x14, AR_ISP_CNF_STATIC_WIDE_MASK },	/* 0x3c9c */
+	{ B + 0x20, B + 0x2c, AR_ISP_CNF_STATIC_NARROW_MASK },	/* 0x3ca0 */
+#undef B
 };
 
 /* One register of that run, and the mask of the bits it owns. */

@@ -27,6 +27,11 @@ import struct
 import sys
 from types import ModuleType
 
+from blob_layout import Layout
+
+_LAY = Layout.load()
+
+
 HERE = pathlib.Path(__file__).resolve().parent
 
 BANK = 0x4834
@@ -37,12 +42,12 @@ COS_FIELD = 0x14
 COS_FIELD_2 = 0x18
 
 GAIN_MASK = 0x7F
-HEADER = 0x89CFC
-HDR_INTERP = 0x04
-HDR_AEC_COUNT = 0x08
-HDR_CT_COUNT = 0x0C
-AEC_AXIS = 0x89D10
-TABLE = 0x89D70
+HEADER = _LAY["cm_header"].offset
+HDR_INTERP = _LAY["cm_header"].fields["interp"]
+HDR_AEC_COUNT = _LAY["cm_header"].fields["aec_count"]
+HDR_CT_COUNT = _LAY["cm_header"].fields["ct_count"]
+AEC_AXIS = _LAY["cm_aec_axis"].offset
+TABLE = _LAY["wb"].offset
 AEC_ROWS = 5
 CT_COLUMNS = 7
 RECORD_STRIDE = 8

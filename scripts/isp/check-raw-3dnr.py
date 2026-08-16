@@ -20,7 +20,12 @@ import re
 import struct
 import sys
 
-RAW_3DNR_GATE = 0x0B500C
+from blob_layout import Layout
+
+_LAY = Layout.load()
+
+
+RAW_3DNR_GATE = _LAY["raw_3dnr_gate"].offset
 RAW_3DNR_SECTION = ("isp", 0x4000)
 RAW_3DNR_WORDS = 64
 

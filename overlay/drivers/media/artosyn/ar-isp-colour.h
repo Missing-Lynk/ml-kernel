@@ -22,6 +22,7 @@
 #ifndef AR_ISP_COLOUR_H
 #define AR_ISP_COLOUR_H
 
+#include "vendor-tables/ar-isp-blob.h"
 #include "ar-isp-bytes.h"
 
 /*
@@ -57,13 +58,6 @@
  * static init block (carried in vendor-tables/ar-isp-ccm-init.h) for the whole
  * session.
  */
-#define AR_ISP_CCM_BLOB_GATE		0x253fc
-#define AR_ISP_CCM_BLOB_LADDER		0x25438
-#define AR_ISP_CCM_BLOB_ILLUMINANTS	8
-#define AR_ISP_CCM_BLOB_BANKS		0x25470
-#define AR_ISP_CCM_BLOB_BANK_STRIDE	0x24
-#define AR_ISP_CCM_BLOB_BANKS_USED	4
-#define AR_ISP_CCM2_BLOB_GATE		0x2595c
 
 /*
  * LUT3D module-local descriptor bank. +0x00 is the module control word, bit 0

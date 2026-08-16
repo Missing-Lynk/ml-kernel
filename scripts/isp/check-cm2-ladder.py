@@ -51,6 +51,11 @@ import struct
 import sys
 from types import ModuleType
 
+from blob_layout import Layout
+
+_LAY = Layout.load()
+
+
 HERE = pathlib.Path(__file__).resolve().parent
 
 BANK = 0x4800
@@ -65,10 +70,11 @@ NUMERATOR = 1024
 # The ladder in the tuning blob. TABLE is the base of the records; the two
 # counts bound the live extent of each axis, and the gate says whether the
 # packer's caller interpolates between rows or copies one verbatim.
-INTERPOLATE_GATE = 0xA1308
-AEC_COUNT, CT_COUNT = 0xA130C, 0xA1310
-AEC_AXIS = 0xA1318
-TABLE = 0xA1378
+INTERPOLATE_GATE = _LAY["cm2_header"].field_offset("interp")
+AEC_COUNT = _LAY["cm2_header"].field_offset("aec_count")
+CT_COUNT = _LAY["cm2_header"].field_offset("ct_count")
+AEC_AXIS = _LAY["cm2_aec_axis"].offset
+TABLE = _LAY["cm2_clamp"].offset
 ROW_STRIDE, RECORD_STRIDE = 168, 24
 
 # Byte offsets of the four bounds inside a 24-byte record. The two floats

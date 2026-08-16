@@ -17,6 +17,7 @@
 #ifndef AR_ISP_DE3D_H
 #define AR_ISP_DE3D_H
 
+#include "vendor-tables/ar-isp-blob.h"
 #include "ar-isp-ladder.h"
 
 /*
@@ -39,7 +40,6 @@
 #define AR_ISP_DE3D_BANK		0x2e00
 #define AR_ISP_DE3D_REGS		51
 #define AR_ISP_DE3D_CURVE_REGS		32
-#define AR_ISP_DE3D_CURVE_OFF		0xe0
 
 /*
  * Where the curve starts in the register array: the control word plus the
@@ -63,13 +63,6 @@ _Static_assert(AR_ISP_DE3D_SCALAR_REGS + AR_ISP_DE3D_CURVE_REGS ==
  * record's 0x8c against the upper record's 0x90 (the packer's one asymmetric
  * input, measured at both capture points).
  */
-#define AR_ISP_DE3D_BLOB_HEADER		0x9631c
-#define AR_ISP_DE3D_HDR_COUNT		0x08
-#define AR_ISP_DE3D_HDR_SELECT		0x0c
-#define AR_ISP_DE3D_BLOB_BANDS		0x9632c
-#define AR_ISP_DE3D_BLOB_PAYLOAD	0x963ac
-#define AR_ISP_DE3D_BLOB_STRIDE		0x2f8
-#define AR_ISP_DE3D_BANDS		12
 
 /* The asymmetric blend: the lower record's 0x8c against the upper's 0x90. */
 #define AR_ISP_DE3D_ASYM_LO		0x8c

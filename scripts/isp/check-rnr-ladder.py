@@ -40,11 +40,16 @@ import argparse
 import struct
 import sys
 
-HEADER = 0x79D8
-BANDS = 0x79EC
-PAYLOAD = 0x7A6C
-STRIDE = 0x160
-COUNT = 12
+from blob_layout import Layout
+
+_LAY = Layout.load()
+
+
+HEADER = _LAY["rnr_header"].offset
+BANDS = _LAY["rnr_bands"].offset
+PAYLOAD = _LAY["rnr_payload"].offset
+STRIDE = _LAY["rnr_payload"].stride
+COUNT = _LAY["rnr_payload"].count
 LO_WORD = 2
 HI_WORD = 14
 REGS = 12

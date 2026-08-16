@@ -18,6 +18,7 @@
 #ifndef AR_ISP_CODEC_H
 #define AR_ISP_CODEC_H
 
+#include "vendor-tables/ar-isp-blob.h"
 #include "ar-isp-bytes.h"
 
 /* Gamma: a 0x4000 allocation whose first two 0x800 pages are transfer curves. */
@@ -31,9 +32,6 @@
  * u32, selected by an AE-derived index. Only every eighth entry is used, which is
  * how 4096 blob entries become the 512 the packed page holds.
  */
-#define AR_ISP_GAMMA_BLOB_OFFSET	0x26b90
-#define AR_ISP_GAMMA_BLOB_STRIDE	0x4000
-#define AR_ISP_GAMMA_BLOB_CURVES	5
 #define AR_ISP_GAMMA_BLOB_ENTRIES	4096
 #define AR_ISP_GAMMA_DECIMATE		8
 
@@ -49,10 +47,7 @@
  * A profile holds the two banks the dynamic half of the page is built from, at
  * its start and at +0x404.
  */
-#define AR_ISP_DRC_BLOB_OFFSET		0x17b1c
-#define AR_ISP_DRC_BLOB_STRIDE		0xc8c
 #define AR_ISP_DRC_BLOB_BANK1		0x404
-#define AR_ISP_DRC_BLOB_PROFILES	6
 
 /*
  * The tone selector picks a low and a high entry and blends them, so neither
@@ -107,9 +102,6 @@ static inline u32 ar_isp_tone_blend(u32 low, u32 high, u32 t_q12)
  */
 #define AR_ISP_LSC_SIZE			0x680
 #define AR_ISP_LSC_REGION_A		0x340
-#define AR_ISP_LSC_GRID			100
-#define AR_ISP_LSC_BLOB_Y		0x910c
-#define AR_ISP_LSC_BLOB_X		0x929c
 #define AR_ISP_LSC_Q			11
 
 /*

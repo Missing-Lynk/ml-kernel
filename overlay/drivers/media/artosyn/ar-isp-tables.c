@@ -23,6 +23,7 @@
 
 #include <linux/dma-mapping.h>
 #include <linux/firmware.h>
+#include <linux/of.h>
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/of_reserved_mem.h>
@@ -1287,6 +1288,7 @@ void ar_isp_tables_apply(struct ar_isp *isp)
 void ar_isp_tables_prepare(struct ar_isp *isp)
 {
 	struct device *dev = isp->dev;
+	const char *fw;
 	int ret;
 
 	/* Mask before the pool, matching vif and cvisp: the descriptor registers
@@ -1373,10 +1375,14 @@ void ar_isp_tables_prepare(struct ar_isp *isp)
 			dev_warn(dev, "de3d buffers unavailable, falling back to the vendor's\n");
 	}
 
-	ret = request_firmware(&isp->tuning, AR_ISP_TUNING_FIRMWARE, dev);
+	/* The layout is the same for all three sensors; the values are the board's. */
+	if (of_property_read_string(dev->of_node, "artosyn,tuning-firmware", &fw))
+		fw = AR_ISP_TUNING_FIRMWARE;
+
+	ret = request_firmware(&isp->tuning, fw, dev);
 	if (ret) {
 		dev_warn(dev, "no %s (%d), tables cannot be generated\n",
-			 AR_ISP_TUNING_FIRMWARE, ret);
+			 fw, ret);
 		isp->tuning = NULL;
 
 		return;
@@ -1384,7 +1390,7 @@ void ar_isp_tables_prepare(struct ar_isp *isp)
 
 	if (isp->tuning->size != AR_ISP_TUNING_SIZE) {
 		dev_warn(dev, "%s is %zu bytes, expected %u; ignoring it\n",
-			 AR_ISP_TUNING_FIRMWARE, isp->tuning->size,
+			 fw, isp->tuning->size,
 			 AR_ISP_TUNING_SIZE);
 		release_firmware(isp->tuning);
 		isp->tuning = NULL;

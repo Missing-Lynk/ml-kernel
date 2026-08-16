@@ -41,7 +41,7 @@ into the AE exposure-table index for comparison.
         --drc-page out/au-tone-tables/pre-drc.bin \\
         --capture out/au-snapshot/registers.txt \\
         --capture out/au-chain/slotA.txt \\
-        --exp-table userspace/ml-aed/ml-aed-exptable.h
+        --exp-table
 
 Add --gamma-curve/--drc-profile to intersect a capture whose tone pages were
 also identified; the script then reports whether the two agree, which is the
@@ -56,6 +56,8 @@ import struct
 import subprocess
 import sys
 import tempfile
+
+from blob_layout import Blob
 
 HERE = pathlib.Path(__file__).resolve().parent
 DRIVERS = HERE.parent.parent / 'overlay' / 'drivers' / 'media' / 'artosyn'
@@ -418,12 +420,14 @@ def invert_gain(binary: pathlib.Path, tuning: pathlib.Path,
     return lo, hi
 
 
-def read_exp_table(path: pathlib.Path) -> list[int]:
-    """The vendor exposure table, as {gain Q8} per index, from ml-aed's header."""
-    text = pathlib.Path(path).read_text()
-    body = text[text.index('mlaed_exp_table'):]
+def read_exp_table(blob: bytes) -> list[int]:
+    """The vendor exposure table, as {gain Q8} per index.
 
-    return [int(g) for g, _ in re.findall(r'\{(\d+),\s*(\d+)\}', body)]
+    Read from the tuning blob through the shared layout, not from a generated header: the same
+    366 entries the ISP driver and ml-aed use, at the one offset blob-layout.toml records.
+    """
+    return [int.from_bytes(record[:4], "little")
+            for record in Blob(blob).records("ae_exposure_table")]
 
 
 def report_drc_pages(blob: bytes, paths: list[pathlib.Path]) -> bool:
@@ -515,9 +519,9 @@ def main() -> int:
                          'measures the scalar, then both are rebuilt from it '
                          'through the shipped selector and builders and '
                          'compared back; repeatable')
-    ap.add_argument('--exp-table',
-                    help='userspace/ml-aed/ml-aed-exptable.h, to report the gain a capture '
-                         'inverts to as an AE exposure-table index')
+    ap.add_argument('--exp-table', action='store_true',
+                    help='report the gain a capture inverts to as an AE exposure-table index, '
+                         'read from the tuning blob through blob-layout.toml')
     args = ap.parse_args()
 
     blob = pathlib.Path(args.tuning).read_bytes()
@@ -554,7 +558,7 @@ def main() -> int:
 
             results.append((path, want, lo, hi, gain))
 
-    table = read_exp_table(args.exp_table) if args.exp_table else None
+    table = read_exp_table(blob) if args.exp_table else None
 
     print('scalar measured from cm and cm2:\n')
     failed = False

@@ -29,6 +29,7 @@
 #ifndef AR_ISP_CFA_H
 #define AR_ISP_CFA_H
 
+#include "vendor-tables/ar-isp-blob.h"
 #include "ar-isp-ladder.h"
 
 /*
@@ -67,13 +68,6 @@
  * for all 41, and check-cfa-ladder.py asserts that equivalence so a future
  * tuning file that breaks it fails rather than diverging silently.
  */
-#define AR_ISP_CFA_BLOB_HEADER		0x24548
-#define AR_ISP_CFA_HDR_COUNT		0x08
-#define AR_ISP_CFA_HDR_SELECT		0x0c
-#define AR_ISP_CFA_BLOB_BANDS		0x24558
-#define AR_ISP_CFA_BLOB_PAYLOAD		0x245d8
-#define AR_ISP_CFA_BLOB_STRIDE		0xa4
-#define AR_ISP_CFA_BANDS		5
 
 _Static_assert(AR_ISP_CFA_REGS * 4 == AR_ISP_CFA_BLOB_STRIDE,
 	       "cfa runs must consume the whole payload record");

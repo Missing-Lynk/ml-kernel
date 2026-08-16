@@ -16,6 +16,7 @@
 #ifndef AR_ISP_LNR_H
 #define AR_ISP_LNR_H
 
+#include "vendor-tables/ar-isp-blob.h"
 #include "ar-isp-ladder.h"
 
 /*
@@ -30,13 +31,6 @@
  * Ladder in the tuning file. The header words are enable, interpolate, band
  * count, abscissa selector.
  */
-#define AR_ISP_LNR_BLOB_HEADER		0x89e88
-#define AR_ISP_LNR_HDR_COUNT		0x08
-#define AR_ISP_LNR_HDR_SELECT		0x0c
-#define AR_ISP_LNR_BLOB_BANDS		0x89e98
-#define AR_ISP_LNR_BLOB_PAYLOAD		0x89f18
-#define AR_ISP_LNR_BLOB_STRIDE		0x428
-#define AR_ISP_LNR_BANDS		11
 
 /*
  * The byte-packed curve: registers 38 to 85, four payload words each. The
@@ -45,8 +39,6 @@
  */
 #define AR_ISP_LNR_CURVE_REGS		48
 #define AR_ISP_LNR_CURVE_FIRST_REG	38
-#define AR_ISP_LNR_CURVE_OFF_LOW	0x110
-#define AR_ISP_LNR_CURVE_OFF_HIGH	0x228
 #define AR_ISP_LNR_CURVE_SPLIT		16
 #define AR_ISP_LNR_CURVE_STRIDE		16
 

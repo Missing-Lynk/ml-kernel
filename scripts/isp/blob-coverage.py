@@ -9,17 +9,23 @@ contents, so the structure has to come from the code that reads it.
 
 Two layers are reported.
 
+Both layers come from `blob-layout.toml`, which is the one place a blob offset is written down.
+This file used to carry its own copies, which is how four offsets the kernel decodes came to be
+absent from the report.
+
 **Records.** Every submodule reads its enable gate out of the blob through one
 fixed chain (`isp_get_tuning_manager`, the per-sensor array at +544, that
 sensor's image at +24, then a literal displacement). `isp-gates.py` derives those
 displacements from the library, and in ascending order they bound the records:
 each gate is the head of its module's record, so the next gate is the end of it.
-29 are recovered, which is fewer than the 54 banks, so a span here holds one
-record or several. Treat a record size as an upper bound, not a struct member.
+A ladder's enable word is its gate, so the anchors are the layout's gate sections
+plus each header's `enable` field. Fewer are recovered than the 54 banks, so a
+span here holds one record or several. Treat a record size as an upper bound,
+not a struct member.
 
-**Fields.** Spans a value is actually read out of, with a known meaning and
-extent, taken from the generators and checkers in this directory. This is the
-number that says how much of the file is understood.
+**Fields.** Every section of the layout: spans with a known extent, and mostly a
+known interpretation. This is the number that says how much of the file is
+understood, and a section of kind `opaque` counts as extent-only.
 
 Raw percentage-of-file is the wrong headline: for any one sensor most of the blob
 is zero, because the file carries slots for stages this unit does not run. The
@@ -37,93 +43,18 @@ import argparse
 import pathlib
 import sys
 
-BLOB_SIZE = 0xD6C58
+from blob_layout import Layout
 
-# Module gate offsets, ascending. Reproduce with:
-#   isp-gates.py --lib libmpp_service.so --blob <tuning> --all
-# and read the flag column. They are derived from the library, not guessed.
-FLAGS = (
-    ('blc', 0x000024), ('compander', 0x006CC4), ('dpc', 0x006CE8),
-    ('rnr', 0x0079D8), ('decompander', 0x00906C), ('lsc', 0x009090),
-    ('drc', 0x017A88), ('gib', 0x0243E4), ('ccm1', 0x0253FC),
-    ('ccm2', 0x02595C), ('gamma', 0x026AFC), ('gtm2', 0x07ABD8),
-    ('lut3d', 0x07B634), ('cm', 0x089CFC), ('lee_lnr', 0x089E88),
-    ('cnf', 0x08E198), ('cm2', 0x0A1304), ('hdr_lsc', 0x0A16C0),
-    ('acm', 0x0B00B8), ('lms', 0x0B288C), ('ir_rnr', 0x0B2BF4),
-    ('birnr', 0x0B3550), ('digigain1', 0x0B4000), ('ir_lms_horz', 0x0B4EE4),
-    ('raw_3dnr', 0x0B500C), ('binning_filter', 0x0B6348),
-    ('derolling_stats', 0x0B64F8), ('awbs_stats', 0x0BBE98),
-    ('af_stats', 0x0D5484),
-)
+# The layout is the only place a blob offset is written down. This file used to carry its own
+# FIELDS and FLAGS tables, which is how four offsets the kernel decodes came to be missing from
+# the coverage report.
+LAYOUT = Layout.load()
+BLOB_SIZE = LAYOUT.size
+FLAGS = LAYOUT.anchors()
+FIELDS = LAYOUT.spans()
 
-# The lsc record array: four populated records, records 4 and up all zero. Each
-# is a 0x38 header then four 100-point float32 grids. Only two grids per record
-# reach the hardware page, so the other two are stored and unread.
-LSC_RECORD = 0x90D4
-LSC_STRIDE = 0x678
+# Gap folding uses one record header as its scale; the lsc record's is the smallest we know.
 LSC_HEADER = 0x38
-LSC_GRID = 100 * 4
-
-# (start, length, what) for every span a value is read out of.
-FIELDS = (
-    (0x000024, 4, 'blc gate'),
-    (0x000034, 8 * 5, 'blc gain ladder, 5 float pairs'),
-    (0x0000B4, 0x20 * 5, 'blc entries, 5 x 0x20'),
-    (0x006CC4, 4, 'compander gate'),
-    (0x006CE8, 4, 'dpc gate'),
-    (0x0079D8, 0x14, 'rnr ladder header'),
-    (0x0079EC, 0x80, 'rnr band abscissas'),
-    (0x007A6C, 0x160 * 12, 'rnr ladder payload, 12 rows'),
-    (0x00906C, 4, 'decompander gate'),
-    (0x009090, 4, 'lsc gate'),
-    (0x009104, 4, 'lsc shading strength'),
-    (0x009108, 4, 'lsc shading enable'),
-    (0x00910C, LSC_GRID, 'lsc record 0 grid 0, the third field of each point'),
-    (0x00929C, LSC_GRID, 'lsc record 0 grid 1, the duplicated field'),
-    (0x017A88, 4, 'drc gate'),
-    # Six profiles carry sensor-specific data; the first four are populated and
-    # profiles 4 and 5 hold under a dozen non-zero bytes each.
-    (0x017B1C, 0xC8C * 6, 'drc profiles, 6 x 0xc8c'),
-    (0x0243E4, 4, 'gib gate'),
-    (0x024548, 0x10, 'cfa ladder header'),
-    (0x024558, 0x80, 'cfa band abscissas'),
-    (0x0245D8, 0xA4 * 5, 'cfa ladder payload, 5 rows'),
-    (0x0253FC, 4, 'ccm1 gate'),
-    (0x025438, 0x50 * 8, 'ccm illuminant ladder, 8 entries'),
-    (0x02595C, 4, 'ccm2 gate'),
-    (0x026AFC, 4, 'gamma gate'),
-    (0x026B90, 0x4000 * 5, 'gamma curves, 5 x 4096 u32'),
-    (0x07ABD8, 4, 'gtm2 gate'),
-    (0x07B634, 4, 'lut3d gate'),
-    (0x089CFC, 4, 'cm gate'),
-    (0x089D70, 5 * 7 * 4, 'wb, 5 AEC rows by 7 CT columns'),
-    (0x089E88, 0x10, 'lnr ladder header'),
-    (0x089E98, 0x80, 'lnr band abscissas'),
-    (0x089F18, 0x428 * 11, 'lnr ladder payload, 11 rows'),
-    (0x08E198, 4, 'cnf gate'),
-    (0x08E1DC, 0x80, 'cnf band abscissas'),
-    (0x08E25C, 0x80C * 11, 'cnf ladder payload, 11 rows'),
-    (0x09631C, 0x10, 'de3d ladder header'),
-    (0x09632C, 0x80, 'de3d band abscissas'),
-    (0x0963AC, 0x2F8 * 12, 'de3d ladder payload, 12 rows'),
-    (0x0A1304, 4, 'cm2 gate'),
-    (0x0A1308, 4, 'cm2 interpolate gate'),
-    (0x0A1378, 0x20 * 8, 'cm2 clamp bounds, 8 records'),
-    (0x0A16C0, 4, 'hdr_lsc gate'),
-    (0x0B00B8, 4, 'acm gate'),
-    (0x0B288C, 4, 'lms gate'),
-    (0x0B2BF4, 4, 'ir_rnr gate'),
-    (0x0B3550, 4, 'birnr gate'),
-    (0x0B35E4, 0x100, 'birnr ladder row 1, all zero'),
-    (0x0B4000, 4, 'digigain1 gate'),
-    (0x0B4EE4, 4, 'ir_lms_horz gate'),
-    (0x0B500C, 4, 'raw_3dnr gate'),
-    (0x0B6348, 4, 'binning_filter gate'),
-    (0x0B64F8, 4, 'derolling_stats gate'),
-    (0x0BBE98, 4, 'awbs gate, the same flag awb reads'),
-    (0x0D5484, 4, 'af_stats gate'),
-    (0x0D5BD0, 1348 * 3, 'af mode ladder, 3 rows'),
-)
 
 
 def merge(spans):

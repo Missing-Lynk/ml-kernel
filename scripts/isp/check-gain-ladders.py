@@ -44,14 +44,20 @@ import struct
 import sys
 from collections.abc import Sequence
 
+from blob_layout import Layout
+
+_LAY = Layout.load()
+
+
 ISP_BASE = 0x08C00000
 
 # Table base and entry stride, read from the blend at 0x199600 for rnr, 0x1bdb48
 # for lnr and 0x1c6e54 for de3d. All are offsets into the sensor's tuning blob.
-TABLES = (
-    ("rnr", 0x7A6C, 0x160, 0x1800, 0x1C00),
-    ("lnr", 0x89F18, 0x428, 0x3CC8, 0x3E20),
-    ("de3d", 0x963AC, 0x2F8, 0x2E00, 0x2F40),
+TABLES = tuple(
+    (stage, _LAY[f"{stage}_payload"].offset, _LAY[f"{stage}_payload"].stride, lo, hi)
+    for stage, lo, hi in (("rnr", 0x1800, 0x1C00),
+                          ("lnr", 0x3CC8, 0x3E20),
+                          ("de3d", 0x2E00, 0x2F40))
 )
 
 # rnr's oracle. Two arrays of twelve, at these entry offsets, feed the low and

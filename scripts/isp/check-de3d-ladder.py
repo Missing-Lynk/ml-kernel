@@ -42,11 +42,16 @@ import argparse
 import struct
 import sys
 
-HEADER = 0x9631C
-BANDS = 0x9632C
-PAYLOAD = 0x963AC
-STRIDE = 0x2F8
-COUNT = 12
+from blob_layout import Layout
+
+_LAY = Layout.load()
+
+
+HEADER = _LAY["de3d_header"].offset
+BANDS = _LAY["de3d_bands"].offset
+PAYLOAD = _LAY["de3d_payload"].offset
+STRIDE = _LAY["de3d_payload"].stride
+COUNT = _LAY["de3d_payload"].count
 
 # ar-isp-de3d.h calls this AR_ISP_DE3D_SLOPE_NUM.
 SLOPE_NUM = 65532

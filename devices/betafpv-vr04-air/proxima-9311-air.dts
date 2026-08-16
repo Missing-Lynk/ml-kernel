@@ -631,6 +631,14 @@
 			clocks = <&pixclk 5>, <&pixclk 6>;	/* cgu_isp_clk, cgu_isp_hdr_clk */
 			clock-names = "isp", "isp_hdr";
 			memory-region = <&isp_cma>;
+			/*
+			 * The sensor's tuning file. The layout inside it is the same for every
+			 * sensor the vendor ships, so the driver is sensor-agnostic; only which
+			 * file to load is a board fact, and that is this. Must agree with
+			 * ISP_TUNING_NAME in the rootfs board.conf, which is what stages it.
+			 * Omitting it keeps the driver's compiled-in default.
+			 */
+			artosyn,tuning-firmware = "artosyn/nt99235-tuning-preview-fpv.bin";
 			status = "okay";
 		};
 

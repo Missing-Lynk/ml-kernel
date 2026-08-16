@@ -21,11 +21,16 @@ import struct
 import sys
 from collections.abc import Sequence
 
-HEADER = 0x89E88
-BANDS = 0x89E98
-PAYLOAD = 0x89F18
-STRIDE = 0x428
-COUNT = 11
+from blob_layout import Layout
+
+_LAY = Layout.load()
+
+
+HEADER = _LAY["lnr_header"].offset
+BANDS = _LAY["lnr_bands"].offset
+PAYLOAD = _LAY["lnr_payload"].offset
+STRIDE = _LAY["lnr_payload"].stride
+COUNT = _LAY["lnr_payload"].count
 BANK = 0x3CC8
 REGS = 86
 SKIP = {0x3D10}

@@ -32,11 +32,10 @@
 #ifndef AR_ISP_LADDER_H
 #define AR_ISP_LADDER_H
 
+#include "vendor-tables/ar-isp-blob.h"
 #include "ar-isp-bytes.h"
 
 /* Header words at the same offset in all three stages. */
-#define AR_ISP_LADDER_HDR_ENABLE	0x00
-#define AR_ISP_LADDER_HDR_INTERP	0x04
 
 /* One band-edge record: a [low, high] float32 pair. */
 #define AR_ISP_LADDER_BAND_STRIDE	8

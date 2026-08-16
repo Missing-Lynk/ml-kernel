@@ -40,14 +40,19 @@ import struct
 import subprocess
 import sys
 
-GAMMA_HEADER = 0x26AFC
-GAMMA_COUNT = 0x26B04
-GAMMA_BANDS = 0x26B0C
+from blob_layout import Layout
+
+_LAY = Layout.load()
+
+
+GAMMA_HEADER = _LAY["gamma_header"].offset
+GAMMA_COUNT = _LAY["gamma_header"].field_offset("count")
+GAMMA_BANDS = _LAY["gamma_header"].field_offset("bands")
 GAMMA_MAX = 5
 
-DRC_HEADER = 0x17A88
-DRC_COUNT = 0x17A90
-DRC_BANDS = 0x17A9C
+DRC_HEADER = _LAY["drc_header"].offset
+DRC_COUNT = _LAY["drc_header"].field_offset("count")
+DRC_BANDS = _LAY["drc_header"].field_offset("bands")
 DRC_MAX = 6
 
 HEADER_ENABLE = 0x00

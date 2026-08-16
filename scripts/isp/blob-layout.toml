@@ -1,0 +1,758 @@
+# The sensor tuning blob, as one mapping. Every consumer reads its offsets from here: the coverage
+# tool, the per-stage checkers, the glue codecs, and (generated) the kernel and ml-aed.
+#
+# The vendor loads the file whole and addresses it by literal displacement from its base
+# (isp_get_tuning_manager, the per-sensor array at +544, sensor index x 0x3b1e8, that sensor's image
+# at +24). The file has no table of contents and no checksum; every offset came from reading the
+# code that reads it, and each row says which.
+#
+# `offset` is ALWAYS absolute. C addresses several relatively, so grepping the tree for an absolute
+# offset misses them: 0x79e0 is AR_ISP_RNR_BLOB_HEADER + AR_ISP_RNR_HDR_MODE. Relative
+# displacements go in `fields` on the owning row.
+#
+# kinds:
+#   gate          one u32, 0 or 1, checked by a stage before it runs
+#   scalar        one value
+#   array         `count` elements of `elem`, contiguous
+#   record_array  `count` records of `stride` bytes
+#   header        a small struct; `fields` names the displacements within it
+#   bands         the float32 abscissa array a ladder selects on
+#   payload       a ladder's payload records, `count` x `stride`
+#   page          a large contiguous table the hardware fetches
+#   opaque        extent known, interpretation not
+
+[meta]
+size = 0xd6c58
+# One layout, three sensors; only the values differ. check-blob-layout.py tests that.
+sensors = ["nt99235", "sc231", "sc2210"]
+
+# ---------------------------------------------------------------------------
+# blc
+# ---------------------------------------------------------------------------
+
+[[section]]
+name = "blc_gate"
+stage = "blc"
+offset = 0x000024
+kind = "gate"
+elem = "u32"
+doc = "black level correction enable"
+
+[[section]]
+name = "blc_ladder"
+stage = "blc"
+offset = 0x000034
+kind = "array"
+elem = "f32"
+count = 10
+doc = "gain ladder, 5 float pairs"
+
+[[section]]
+name = "blc_entries"
+stage = "blc"
+offset = 0x0000b4
+kind = "record_array"
+count = 5
+stride = 0x20
+fields = { scale = 0x00, level = 0x10 }
+doc = "5 pedestal records; four scale lanes then four level lanes"
+
+# ---------------------------------------------------------------------------
+# gates with no decoded payload
+#
+# 16 stages where only the enable flag is understood. isp-gates.py derives the offsets from
+# libmpp_service.so: each stage reads its flag through one fixed chain.
+# ---------------------------------------------------------------------------
+
+[[section]]
+name = "compander_gate"
+stage = "compander"
+offset = 0x006cc4
+kind = "gate"
+elem = "u32"
+doc = "the payload is NOT in the blob; it is a library constant, see ar-isp-compander.h"
+
+[[section]]
+name = "dpc_gate"
+stage = "dpc"
+offset = 0x006ce8
+kind = "gate"
+elem = "u32"
+doc = "defect pixel correction enable"
+
+[[section]]
+name = "decompander_gate"
+stage = "decompander"
+offset = 0x00906c
+kind = "gate"
+elem = "u32"
+
+[[section]]
+name = "gib_gate"
+stage = "gib"
+offset = 0x0243e4
+kind = "gate"
+elem = "u32"
+
+[[section]]
+name = "gtm2_gate"
+stage = "gtm2"
+offset = 0x07abd8
+kind = "gate"
+elem = "u32"
+
+[[section]]
+name = "lut3d_gate"
+stage = "lut3d"
+offset = 0x07b634
+kind = "gate"
+elem = "u32"
+
+[[section]]
+name = "hdr_lsc_gate"
+stage = "hdr_lsc"
+offset = 0x0a16c0
+kind = "gate"
+elem = "u32"
+
+[[section]]
+name = "acm_gate"
+stage = "acm"
+offset = 0x0b00b8
+kind = "gate"
+elem = "u32"
+
+[[section]]
+name = "lms_gate"
+stage = "lms"
+offset = 0x0b288c
+kind = "gate"
+elem = "u32"
+
+[[section]]
+name = "ir_rnr_gate"
+stage = "ir_rnr"
+offset = 0x0b2bf4
+kind = "gate"
+elem = "u32"
+
+[[section]]
+name = "digigain1_gate"
+stage = "digigain1"
+offset = 0x0b4000
+kind = "gate"
+elem = "u32"
+doc = "CONFLICT: the digigain1/digigain2 gate has also been read at 0xb6518. This offset is the library-derived one from isp-gates.py; both stand until one is disproved."
+
+[[section]]
+name = "ir_lms_horz_gate"
+stage = "ir_lms_horz"
+offset = 0x0b4ee4
+kind = "gate"
+elem = "u32"
+
+[[section]]
+name = "raw_3dnr_gate"
+stage = "raw_3dnr"
+offset = 0x0b500c
+kind = "gate"
+elem = "u32"
+
+[[section]]
+name = "binning_filter_gate"
+stage = "binning_filter"
+offset = 0x0b6348
+kind = "gate"
+elem = "u32"
+
+[[section]]
+name = "derolling_stats_gate"
+stage = "derolling_stats"
+offset = 0x0b64f8
+kind = "gate"
+elem = "u32"
+
+[[section]]
+name = "awbs_gate"
+stage = "awbs_stats"
+offset = 0x0bbe98
+kind = "gate"
+elem = "u32"
+doc = "the same flag the awb path reads; clear on this unit, which is why ccm1 keeps the identity"
+
+# ---------------------------------------------------------------------------
+# rnr, the gain-keyed ladder pattern
+#
+# Five stages share this shape: a header, a float32 abscissa array, and payload records selected by
+# the abscissa with a Q24 blend between neighbours. Only the addressing is here.
+# ---------------------------------------------------------------------------
+
+[[section]]
+name = "rnr_header"
+stage = "rnr"
+offset = 0x0079d8
+kind = "header"
+length = 0x14
+fields = { enable = 0x00, interp = 0x04, mode = 0x08, count = 0x0c, select = 0x10 }
+doc = "rnr is the only one of the five with a mode word; the others start their count at 0x08"
+
+[[section]]
+name = "rnr_bands"
+stage = "rnr"
+offset = 0x0079ec
+kind = "bands"
+elem = "f32"
+count = 32
+doc = "band abscissas, gain axis 1.0 to 2048"
+
+[[section]]
+name = "rnr_payload"
+stage = "rnr"
+offset = 0x007a6c
+kind = "payload"
+count = 12
+stride = 0x160
+doc = "words 2..13 feed the low register halves, 14..25 the high halves"
+
+# ---------------------------------------------------------------------------
+# lsc
+# ---------------------------------------------------------------------------
+
+[[section]]
+name = "lsc_gate"
+stage = "lsc"
+offset = 0x009090
+kind = "gate"
+elem = "u32"
+
+[[section]]
+name = "lsc_strength"
+stage = "lsc"
+offset = 0x009104
+kind = "scalar"
+elem = "u32"
+doc = "shading strength"
+
+[[section]]
+name = "lsc_enable"
+stage = "lsc"
+offset = 0x009108
+kind = "scalar"
+elem = "u32"
+doc = "shading enable, distinct from the stage gate above"
+
+[[section]]
+name = "lsc_grid_y"
+stage = "lsc"
+offset = 0x00910c
+kind = "array"
+elem = "f32"
+count = 100
+doc = "record 0 grid 0, the third field of each point"
+
+[[section]]
+name = "lsc_grid_x"
+stage = "lsc"
+offset = 0x00929c
+kind = "array"
+elem = "f32"
+count = 100
+doc = "record 0 grid 1, the duplicated field"
+
+[[section]]
+name = "lsc_records"
+stage = "lsc"
+offset = 0x0090d4
+kind = "record_array"
+count = 4
+stride = 0x678
+doc = "four populated records, 4 and up all zero. Each is a 0x38 header then four 100-point float32 grids; only two grids per record reach the hardware page, the other two are stored and unread."
+
+# ---------------------------------------------------------------------------
+# drc and gamma, the trigger-scalar tone pair
+#
+# These two key on the AEC trigger scalar (axis 0 to 550), NOT the gain axis the five ladders use.
+# One scalar selects a band in each and the gap between bands is the Q12 blend region.
+# ---------------------------------------------------------------------------
+
+[[section]]
+name = "drc_gate"
+stage = "drc"
+offset = 0x017a88
+kind = "gate"
+elem = "u32"
+
+[[section]]
+name = "drc_header"
+stage = "drc"
+offset = 0x017a88
+kind = "header"
+length = 0x18
+fields = { enable = 0x00, count = 0x08, bands = 0x14 }
+doc = "the gate is this header's enable word; count at 0x17a90, band table at 0x17a9c"
+
+[[section]]
+name = "drc_bands"
+stage = "drc"
+offset = 0x017a9c
+kind = "bands"
+elem = "f32"
+count = 12
+doc = "6 profiles x 2 edges: 0-80, 100-130, 150-180, 210-270, 290-380, 410-500"
+
+[[section]]
+name = "drc_profiles"
+stage = "drc"
+offset = 0x017b1c
+kind = "record_array"
+count = 6
+stride = 0xc8c
+doc = "first four populated; profiles 4 and 5 hold under a dozen non-zero bytes each. Each profile's first two 0x404 windows decode to a 257-sample curve through the 20-bit three-lane codec in glue/isp/drc-codec.py."
+
+[[section]]
+name = "drc_bank1"
+stage = "drc"
+offset = 0x017f20
+kind = "opaque"
+length = 0x404
+doc = "the second 0x404 window of profile 0, at profile base + 0x404. Same codec."
+
+[[section]]
+name = "gamma_gate"
+stage = "gamma"
+offset = 0x026afc
+kind = "gate"
+elem = "u32"
+
+[[section]]
+name = "gamma_header"
+stage = "gamma"
+offset = 0x026afc
+kind = "header"
+length = 0x18
+fields = { enable = 0x00, count = 0x08, bands = 0x10 }
+doc = "curve count 5 at 0x26b04, band table at 0x26b0c"
+
+[[section]]
+name = "gamma_bands"
+stage = "gamma"
+offset = 0x026b0c
+kind = "bands"
+elem = "f32"
+count = 10
+doc = "5 curves x 2 edges: 0-40, 80-130, 150-250, 280-330, 360-450"
+
+[[section]]
+name = "gamma_curves"
+stage = "gamma"
+offset = 0x026b90
+kind = "page"
+count = 5
+stride = 0x4000
+elem = "u32"
+doc = "5 curves of 4096 u32. The blend runs on the stored curves and the result is decimated afterwards; that order is the vendor's and is not interchangeable."
+
+# ---------------------------------------------------------------------------
+# cfa
+# ---------------------------------------------------------------------------
+
+[[section]]
+name = "cfa_header"
+stage = "cfa"
+offset = 0x024548
+kind = "header"
+length = 0x10
+fields = { enable = 0x00, interp = 0x04, count = 0x08, select = 0x0c }
+
+[[section]]
+name = "cfa_bands"
+stage = "cfa"
+offset = 0x024558
+kind = "bands"
+elem = "f32"
+count = 32
+
+[[section]]
+name = "cfa_payload"
+stage = "cfa"
+offset = 0x0245d8
+kind = "payload"
+count = 5
+stride = 0xa4
+
+# ---------------------------------------------------------------------------
+# ccm
+# ---------------------------------------------------------------------------
+
+[[section]]
+name = "ccm1_gate"
+stage = "ccm1"
+offset = 0x0253fc
+kind = "gate"
+elem = "u32"
+doc = "clear on this unit, so ccm1 keeps the identity matrix. That is vendor behaviour, not a failure."
+
+[[section]]
+name = "ccm_illuminants"
+stage = "ccm1"
+offset = 0x025438
+kind = "record_array"
+count = 8
+stride = 0x50
+doc = "illuminant ladder; matrices are Q8 sign-magnitude"
+
+[[section]]
+name = "ccm_banks"
+stage = "ccm1"
+offset = 0x025470
+kind = "record_array"
+count = 4
+stride = 0x24
+doc = "4 of the 8 allocated banks are used"
+
+[[section]]
+name = "ccm2_gate"
+stage = "ccm2"
+offset = 0x02595c
+kind = "gate"
+elem = "u32"
+
+# ---------------------------------------------------------------------------
+# cm and cm2, the other trigger-scalar pair
+# ---------------------------------------------------------------------------
+
+[[section]]
+name = "cm_gate"
+stage = "cm"
+offset = 0x089cfc
+kind = "gate"
+elem = "u32"
+
+[[section]]
+name = "cm_header"
+stage = "cm"
+offset = 0x089cfc
+kind = "header"
+length = 0x10
+fields = { enable = 0x00, interp = 0x04, aec_count = 0x08, ct_count = 0x0c }
+
+[[section]]
+name = "cm_aec_axis"
+stage = "cm"
+offset = 0x089d10
+kind = "array"
+elem = "f32"
+count = 5
+doc = "the AEC abscissa cm's rows are selected on. Trigger-scalar axis, not the gain axis."
+
+[[section]]
+name = "wb"
+stage = "cm"
+offset = 0x089d70
+kind = "record_array"
+count = 35
+stride = 0x08
+doc = "5 AEC rows by 7 CT columns, cells of {gain f32, angle f32}. Static on this unit: the shipped tuning gates AWB off."
+
+[[section]]
+name = "cm2_gate"
+stage = "cm2"
+offset = 0x0a1304
+kind = "gate"
+elem = "u32"
+
+[[section]]
+name = "cm2_header"
+stage = "cm2"
+offset = 0x0a1304
+kind = "header"
+length = 0x10
+fields = { enable = 0x00, interp = 0x04, aec_count = 0x08, ct_count = 0x0c }
+doc = "the interp word at 0xa1308 is what blob-coverage called the cm2 interpolate gate"
+
+[[section]]
+name = "cm2_aec_axis"
+stage = "cm2"
+offset = 0x0a1318
+kind = "array"
+elem = "f32"
+count = 5
+doc = "cm2's AEC abscissa, the same trigger-scalar axis cm uses"
+
+[[section]]
+name = "cm2_clamp"
+stage = "cm2"
+offset = 0x0a1378
+kind = "record_array"
+count = 35
+stride = 0x18
+doc = "clamp bounds, 5 AEC rows by 7 CT columns of 24 bytes"
+
+[[section]]
+name = "cm2_saturation_gain"
+stage = "cm2"
+offset = 0x016b0c
+kind = "scalar"
+elem = "f32"
+doc = "fcvtzu takes it to unsigned Q5. 0.0 on this unit, so the vendor takes the [handle+804] override branch and not the blob path. NO code carries this offset yet."
+
+[[section]]
+name = "cm2_saturation_angle"
+stage = "cm2"
+offset = 0x016b10
+kind = "scalar"
+elem = "f32"
+doc = "0.0 on this unit, same override branch as the gain above. NO code carries this offset yet."
+
+# ---------------------------------------------------------------------------
+# lnr, cnf, de3d: the remaining gain-keyed ladders
+# ---------------------------------------------------------------------------
+
+[[section]]
+name = "lnr_header"
+stage = "lnr"
+offset = 0x089e88
+kind = "header"
+length = 0x10
+fields = { enable = 0x00, interp = 0x04, count = 0x08, select = 0x0c }
+
+[[section]]
+name = "lnr_bands"
+stage = "lnr"
+offset = 0x089e98
+kind = "bands"
+elem = "f32"
+count = 32
+
+[[section]]
+name = "lnr_payload"
+stage = "lnr"
+offset = 0x089f18
+kind = "payload"
+count = 11
+stride = 0x428
+fields = { curve_low = 0x110, curve_high = 0x228 }
+doc = "the two curve runs sit at fixed displacements inside each record"
+
+[[section]]
+name = "cnf_gate"
+stage = "cnf"
+offset = 0x08e198
+kind = "gate"
+elem = "u32"
+
+[[section]]
+name = "cnf_statics"
+stage = "cnf"
+offset = 0x08e1a8
+kind = "array"
+elem = "u32"
+count = 12
+fields = { wide_lo = 0x00, wide_hi = 0x0c, narrow_lo = 0x18, narrow_hi = 0x24 }
+doc = "twelve words feeding the six static cnf registers at ISP 0x3c8c..0x3ca0. Each register takes bits 10:0 from a lo word and the field at bit 11 from a hi word; the wide and narrow runs differ only in how many of the hi bits the register owns. Array literals in ar-isp-cnf.h, not defines."
+
+[[section]]
+name = "cnf_bands"
+stage = "cnf"
+offset = 0x08e1dc
+kind = "bands"
+elem = "f32"
+count = 32
+
+[[section]]
+name = "cnf_payload"
+stage = "cnf"
+offset = 0x08e25c
+kind = "payload"
+count = 11
+stride = 0x80c
+
+[[section]]
+name = "de3d_header"
+stage = "de3d"
+offset = 0x09631c
+kind = "header"
+length = 0x10
+fields = { enable = 0x00, interp = 0x04, count = 0x08, select = 0x0c }
+
+[[section]]
+name = "de3d_bands"
+stage = "de3d"
+offset = 0x09632c
+kind = "bands"
+elem = "f32"
+count = 32
+
+[[section]]
+name = "de3d_payload"
+stage = "de3d"
+offset = 0x0963ac
+kind = "payload"
+count = 12
+stride = 0x2f8
+fields = { curve = 0xe0 }
+
+# ---------------------------------------------------------------------------
+# birnr
+# ---------------------------------------------------------------------------
+
+[[section]]
+name = "birnr_gate"
+stage = "birnr"
+offset = 0x0b3550
+kind = "gate"
+elem = "u32"
+
+[[section]]
+name = "birnr_row1"
+stage = "birnr"
+offset = 0x0b35e4
+kind = "opaque"
+length = 0x100
+doc = "ladder row 1, all zero on this sensor"
+
+# ---------------------------------------------------------------------------
+# auto exposure
+#
+# The AE block sits between the derolling_stats gate at 0xb64f8 and the awbs_stats gate at 0xbbe98,
+# so either that record spans more than one module or AE has no gate of its own. Named `ae` here
+# until that is settled.
+#
+# ml-aed reads these six. None is a literal in libmpp_service.so. The heap offsets quoted below are
+# into the AEC state block at 0x9c47a0 in a live dump, a runtime copy of these bytes.
+# ---------------------------------------------------------------------------
+
+[[section]]
+name = "ae_exposure_table"
+stage = "ae"
+offset = 0x0b6524
+kind = "record_array"
+count = 366
+stride = 8
+doc = "{gain Q8 u32, line_count u32}. Shipped configuration for the fixed FPV preview mode (1080p60, ceiling 1125 lines, gain ceiling 64.0), not something the vendor computes. Heap copy at state+0x68 agrees over all 366."
+
+[[section]]
+name = "ae_target_curve"
+stage = "ae"
+offset = 0x0ba560
+kind = "record_array"
+count = 5
+stride = 8
+doc = "{index u32, target u32}, the luma target knots. Heap state+0x4000+184."
+
+[[section]]
+name = "ae_zone_weights"
+stage = "ae"
+offset = 0x0ba5ec
+kind = "array"
+elem = "u32"
+count = 4
+doc = "512, 1024, 512, then the right-shift 11 at 0xba5f8. Heap state+0x4000+120."
+
+[[section]]
+name = "ae_damping"
+stage = "ae"
+offset = 0x0ba5fc
+kind = "scalar"
+elem = "u32"
+doc = "50, the damping numerator; the law uses 50/256. Heap state+40."
+
+[[section]]
+name = "ae_tolerance"
+stage = "ae"
+offset = 0x0ba600
+kind = "scalar"
+elem = "u32"
+doc = "5, the settle tolerance in luma. Heap state+44."
+
+[[section]]
+name = "ae_log_ladder"
+stage = "ae"
+offset = 0x0ba620
+kind = "scalar"
+elem = "f32"
+doc = "77.893997. In this file and nowhere in libmpp_service.so. Heap state+36."
+
+# ---------------------------------------------------------------------------
+# af
+# ---------------------------------------------------------------------------
+
+[[section]]
+name = "af_stats_gate"
+stage = "af_stats"
+offset = 0x0d5484
+kind = "gate"
+elem = "u32"
+doc = "reads 1 on nt99235 and 0 on both other sensors, while the af_stats REGISTER gate reads 0 on a streaming unit. Polarity is per stage and some of these words are bypass bits, so this flag does not mean 'the stage runs'."
+
+[[section]]
+name = "af_mode_ladder"
+stage = "af_stats"
+offset = 0x0d5bd0
+kind = "record_array"
+count = 3
+stride = 1348
+
+# ---------------------------------------------------------------------------
+# C names
+#
+# The macros ar-isp-blob.h emits, per section. Spelled out, not derived: `ccm1_gate` is
+# `AR_ISP_CCM_BLOB_GATE` and no rule produces that from the section name.
+#
+# A name may appear under more than one section when the value is shared, as the two ladder header
+# words are; the generator emits it once and fails if the values disagree.
+# ---------------------------------------------------------------------------
+
+[c_names]
+blc_ladder      = { offset = "AR_ISP_BLC_BLOB_LADDER" }
+blc_entries     = { offset = "AR_ISP_BLC_BLOB_TABLE", count = "AR_ISP_BLC_ENTRIES", stride = "AR_ISP_BLC_ENTRY_SIZE" }
+rnr_header      = { offset = "AR_ISP_RNR_BLOB_HEADER" }
+rnr_bands       = { offset = "AR_ISP_RNR_BLOB_BANDS" }
+rnr_payload     = { offset = "AR_ISP_RNR_BLOB_PAYLOAD", stride = "AR_ISP_RNR_BLOB_STRIDE", count = "AR_ISP_RNR_BANDS" }
+lnr_header      = { offset = "AR_ISP_LNR_BLOB_HEADER" }
+lnr_bands       = { offset = "AR_ISP_LNR_BLOB_BANDS" }
+lnr_payload     = { offset = "AR_ISP_LNR_BLOB_PAYLOAD", stride = "AR_ISP_LNR_BLOB_STRIDE", count = "AR_ISP_LNR_BANDS" }
+de3d_header     = { offset = "AR_ISP_DE3D_BLOB_HEADER" }
+de3d_bands      = { offset = "AR_ISP_DE3D_BLOB_BANDS" }
+de3d_payload    = { offset = "AR_ISP_DE3D_BLOB_PAYLOAD", stride = "AR_ISP_DE3D_BLOB_STRIDE", count = "AR_ISP_DE3D_BANDS" }
+cfa_header      = { offset = "AR_ISP_CFA_BLOB_HEADER" }
+cfa_bands       = { offset = "AR_ISP_CFA_BLOB_BANDS" }
+cfa_payload     = { offset = "AR_ISP_CFA_BLOB_PAYLOAD", stride = "AR_ISP_CFA_BLOB_STRIDE", count = "AR_ISP_CFA_BANDS" }
+cnf_statics     = { offset = "AR_ISP_CNF_STATIC_BLOB" }
+cnf_bands       = { offset = "AR_ISP_CNF_BLOB_BANDS" }
+cnf_payload     = { offset = "AR_ISP_CNF_BLOB_PAYLOAD", stride = "AR_ISP_CNF_BLOB_STRIDE", count = "AR_ISP_CNF_BANDS" }
+drc_header      = { offset = "AR_ISP_DRC_BLOB_HEADER" }
+drc_bands       = { offset = "AR_ISP_DRC_BLOB_BANDS" }
+drc_profiles    = { offset = "AR_ISP_DRC_BLOB_OFFSET", stride = "AR_ISP_DRC_BLOB_STRIDE", count = "AR_ISP_DRC_BLOB_PROFILES" }
+gamma_header    = { offset = "AR_ISP_GAMMA_BLOB_HEADER" }
+gamma_bands     = { offset = "AR_ISP_GAMMA_BLOB_BANDS" }
+gamma_curves    = { offset = "AR_ISP_GAMMA_BLOB_OFFSET", stride = "AR_ISP_GAMMA_BLOB_STRIDE", count = "AR_ISP_GAMMA_BLOB_CURVES" }
+ccm1_gate       = { offset = "AR_ISP_CCM_BLOB_GATE" }
+ccm2_gate       = { offset = "AR_ISP_CCM2_BLOB_GATE" }
+ccm_illuminants = { offset = "AR_ISP_CCM_BLOB_LADDER", count = "AR_ISP_CCM_BLOB_ILLUMINANTS" }
+ccm_banks       = { offset = "AR_ISP_CCM_BLOB_BANKS", stride = "AR_ISP_CCM_BLOB_BANK_STRIDE", count = "AR_ISP_CCM_BLOB_BANKS_USED" }
+lsc_grid_y      = { offset = "AR_ISP_LSC_BLOB_Y", count = "AR_ISP_LSC_GRID" }
+lsc_grid_x      = { offset = "AR_ISP_LSC_BLOB_X" }
+cm_header       = { offset = "AR_ISP_CM_HEADER" }
+cm_aec_axis     = { offset = "AR_ISP_CM_AEC_AXIS", count = "AR_ISP_CM_AEC_ROWS" }
+wb              = { offset = "AR_ISP_CM_TABLE" }
+cm2_header      = { offset = "AR_ISP_CM2_HEADER" }
+cm2_aec_axis    = { offset = "AR_ISP_CM2_AEC_AXIS", count = "AR_ISP_CM2_AEC_ROWS" }
+cm2_clamp       = { offset = "AR_ISP_CM2_TABLE" }
+
+[c_fields]
+# Displacements within a header section. The shared pair comes out once.
+rnr_header  = { enable = "AR_ISP_LADDER_HDR_ENABLE", interp = "AR_ISP_LADDER_HDR_INTERP", mode = "AR_ISP_RNR_HDR_MODE", count = "AR_ISP_RNR_HDR_COUNT", select = "AR_ISP_RNR_HDR_SELECT" }
+lnr_header  = { enable = "AR_ISP_LADDER_HDR_ENABLE", interp = "AR_ISP_LADDER_HDR_INTERP", count = "AR_ISP_LNR_HDR_COUNT", select = "AR_ISP_LNR_HDR_SELECT" }
+de3d_header = { enable = "AR_ISP_LADDER_HDR_ENABLE", interp = "AR_ISP_LADDER_HDR_INTERP", count = "AR_ISP_DE3D_HDR_COUNT", select = "AR_ISP_DE3D_HDR_SELECT" }
+cfa_header  = { enable = "AR_ISP_LADDER_HDR_ENABLE", interp = "AR_ISP_LADDER_HDR_INTERP", count = "AR_ISP_CFA_HDR_COUNT", select = "AR_ISP_CFA_HDR_SELECT" }
+blc_entries  = { level = "AR_ISP_BLC_GROUP_OFF" }
+lnr_payload  = { curve_low = "AR_ISP_LNR_CURVE_OFF_LOW", curve_high = "AR_ISP_LNR_CURVE_OFF_HIGH" }
+de3d_payload = { curve = "AR_ISP_DE3D_CURVE_OFF" }
+cm_header   = { interp = "AR_ISP_CM_HDR_INTERP", aec_count = "AR_ISP_CM_HDR_AEC_COUNT", ct_count = "AR_ISP_CM_HDR_CT_COUNT" }
+cm2_header  = { interp = "AR_ISP_CM2_HDR_INTERP", aec_count = "AR_ISP_CM2_HDR_AEC_COUNT", ct_count = "AR_ISP_CM2_HDR_CT_COUNT" }
+
+[c_absolute_fields]
+# Header fields the driver reads without the header base, so they get a resolved absolute macro.
+drc_header   = { count = "AR_ISP_DRC_BLOB_COUNT" }
+gamma_header = { count = "AR_ISP_GAMMA_BLOB_COUNT" }

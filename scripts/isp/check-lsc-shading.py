@@ -48,13 +48,18 @@ import pathlib
 import struct
 import sys
 
+from blob_layout import Layout
+
+_LAY = Layout.load()
+
+
 HERE = pathlib.Path(__file__).resolve().parent
 
 REGISTER = 0x4C40
 
 # The lens-shading region in the tuning file, and the two fields at its head.
-REGION = 0x9090
-STRENGTH_AT, ENABLE_AT = 0x9104, 0x9108
+REGION = _LAY["lsc_gate"].offset
+STRENGTH_AT, ENABLE_AT = _LAY["lsc_strength"].offset, _LAY["lsc_enable"].offset
 
 # `fcvtzu ..., #7` at 0x1b4e5c, clamped against the 128 at 0x1b4e54.
 STRENGTH_SHIFT = 7

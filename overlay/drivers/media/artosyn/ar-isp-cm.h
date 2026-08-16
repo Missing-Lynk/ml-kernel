@@ -22,19 +22,13 @@
 #ifndef AR_ISP_CM_H
 #define AR_ISP_CM_H
 
+#include "vendor-tables/ar-isp-blob.h"
 #include "ar-isp-ladder.h"
 
 #define AR_ISP_CM_BANK			0x4834
 #define AR_ISP_CM_GAIN_REG		0x483c
 #define AR_ISP_CM_GAIN_MASK		0x0000007f
 
-#define AR_ISP_CM_HEADER		0x89cfc
-#define AR_ISP_CM_HDR_INTERP		0x04
-#define AR_ISP_CM_HDR_AEC_COUNT		0x08
-#define AR_ISP_CM_HDR_CT_COUNT		0x0c
-#define AR_ISP_CM_AEC_AXIS		0x89d10
-#define AR_ISP_CM_TABLE		0x89d70
-#define AR_ISP_CM_AEC_ROWS		5
 #define AR_ISP_CM_CT_COLUMNS		7
 #define AR_ISP_CM_RECORD_STRIDE	8
 #define AR_ISP_CM_ROW_STRIDE \

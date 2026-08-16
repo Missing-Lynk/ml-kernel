@@ -22,6 +22,7 @@
 #ifndef AR_ISP_CM2_H
 #define AR_ISP_CM2_H
 
+#include "vendor-tables/ar-isp-blob.h"
 #include "ar-isp-cm.h"
 
 #define AR_ISP_CM2_BANK			0x4800
@@ -34,13 +35,6 @@
 #define AR_ISP_CM2_RECIP1_REG		0x482c
 #define AR_ISP_CM2_RECIP2_REG		0x4830
 
-#define AR_ISP_CM2_HEADER		0xa1304
-#define AR_ISP_CM2_HDR_INTERP		0x04
-#define AR_ISP_CM2_HDR_AEC_COUNT	0x08
-#define AR_ISP_CM2_HDR_CT_COUNT	0x0c
-#define AR_ISP_CM2_AEC_AXIS		0xa1318
-#define AR_ISP_CM2_TABLE		0xa1378
-#define AR_ISP_CM2_AEC_ROWS		5
 #define AR_ISP_CM2_CT_COLUMNS		1
 #define AR_ISP_CM2_RECORD_STRIDE	24
 #define AR_ISP_CM2_ROW_STRIDE		168

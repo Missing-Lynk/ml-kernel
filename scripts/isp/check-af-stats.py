@@ -47,6 +47,11 @@ import pathlib
 import struct
 import sys
 
+from blob_layout import Layout
+
+_LAY = Layout.load()
+
+
 HERE = pathlib.Path(__file__).resolve().parent
 
 BANK = 0x7400
@@ -66,10 +71,10 @@ LOW_BITS, HIGH_BITS = 9, 10
 
 # The mode-word ladder in the tuning blob: an enable flag, then rows indexed by
 # the AEC trigger. Word 0 of a row is unused by these fields.
-ENABLE_FLAG = 0xD5484
-LADDER = 0xD5BD0
-ROW_STRIDE = 1348
-ROWS = 3
+ENABLE_FLAG = _LAY["af_stats_gate"].offset
+LADDER = _LAY["af_mode_ladder"].offset
+ROW_STRIDE = _LAY["af_mode_ladder"].stride
+ROWS = _LAY["af_mode_ladder"].count
 
 # Bit position to the row word that supplies it, for bank+0x08.
 MODE_FIELDS = ((8, 5, 2), (5, 6, 3), (4, 7, 1), (2, 8, 2), (1, 9, 1), (0, 10, 1))

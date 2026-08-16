@@ -53,10 +53,15 @@ import argparse
 import struct
 import sys
 
-BANDS = 0x8E1DC
-PAYLOAD = 0x8E25C
-STRIDE = 0x80C
-COUNT = 11
+from blob_layout import Layout
+
+_LAY = Layout.load()
+
+
+BANDS = _LAY["cnf_bands"].offset
+PAYLOAD = _LAY["cnf_payload"].offset
+STRIDE = _LAY["cnf_payload"].stride
+COUNT = _LAY["cnf_payload"].count
 INTERP = 1
 WORD_FLAG = 0x00
 WORD_STRENGTH = 0x04
@@ -100,13 +105,12 @@ MEASURED = 0x000A0D25
 # 0x8e1a8..0x8e1d4. The library's static register image is the oracle: the
 # packer is what produced it, so the blob must reproduce it word for word.
 STATIC_REG = 0x3C8C
+_S = _LAY["cnf_statics"]
 STATICS = [
-    (0x8E1A8, 0x8E1B4, 0x003FF800),
-    (0x8E1C0, 0x8E1CC, 0x000FF800),
-    (0x8E1AC, 0x8E1B8, 0x003FF800),
-    (0x8E1C4, 0x8E1D0, 0x000FF800),
-    (0x8E1B0, 0x8E1BC, 0x003FF800),
-    (0x8E1C8, 0x8E1D4, 0x000FF800),
+    (_S.field_offset(lo) + i * 4, _S.field_offset(hi) + i * 4, mask)
+    for i in range(3)
+    for lo, hi, mask in (("wide_lo", "wide_hi", 0x003FF800),
+                         ("narrow_lo", "narrow_hi", 0x000FF800))
 ]
 LIBRARY_STATIC = [0x00080100, 0x00000100, 0x0022CC01,
                   0x000401C5, 0x0025B966, 0x00040000]

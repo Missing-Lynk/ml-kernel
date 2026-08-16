@@ -16,6 +16,7 @@
 #ifndef AR_ISP_BLC_H
 #define AR_ISP_BLC_H
 
+#include "vendor-tables/ar-isp-blob.h"
 #include "ar-isp-bytes.h"
 
 /* The bank is on CVISP: ISP physical base + 0x200000, then + 0x4200. */
@@ -43,11 +44,6 @@
  * Bayer channel order. The ladder is five float32 pairs at an 8-byte stride,
  * one per entry, and selects and blends them.
  */
-#define AR_ISP_BLC_BLOB_LADDER		0x34
-#define AR_ISP_BLC_BLOB_TABLE		0xb4
-#define AR_ISP_BLC_ENTRIES		5
-#define AR_ISP_BLC_ENTRY_SIZE		0x20
-#define AR_ISP_BLC_GROUP_OFF		0x10
 
 struct ar_isp_blc_entry {
 	u32 scale[AR_ISP_BLC_LANE];
