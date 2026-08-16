@@ -16,10 +16,16 @@
 
 #include <linux/clk.h>
 #include <linux/io.h>
+#include <linux/spinlock.h>
 #include <linux/types.h>
 
 #include "vendor-tables/ar-isp-defaults.h"
 #include "vendor-tables/ar-isp-library.h"
+
+/* struct ar_isp embeds an ar_isp_tone_pick, so the definition must be complete
+ * here. The header carries static inlines only, so it adds no symbols.
+ */
+#include "ar-isp-tone.h"
 
 struct device;
 struct dentry;
@@ -55,6 +61,17 @@ struct ar_isp {
 
 	void *hdr_lsc;
 	dma_addr_t hdr_lsc_dma;
+
+	/*
+	 * The selection the gamma and DRC pages were last built from, so a
+	 * rebuild can be skipped when the scalar has not moved the choice.
+	 * Every path that fills either page records what it used, including the
+	 * one that fills both at configure time; a stage left unfilled records
+	 * the ~0u sentinel so the next apply rebuilds it rather than trusting a
+	 * page that was never written.
+	 */
+	struct ar_isp_tone_pick last_gamma;
+	struct ar_isp_tone_pick last_drc;
 
 	/*
 	 * Statistics targets. rro is the AE zone grid and both bank-0x6400
@@ -95,6 +112,13 @@ struct ar_isp {
 	unsigned int stats_done;
 	bool stats_valid;
 	u32 stats_flips;
+
+	/*
+	 * Held across the address writes and the index advance, so the interrupt
+	 * and a process-context republish cannot interleave them. Taken in hard
+	 * interrupt context, so every other holder disables interrupts.
+	 */
+	spinlock_t stats_lock;
 
 	/*
 	 * de3d's three working buffers. Hardware-written, armed once, and until

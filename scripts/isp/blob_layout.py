@@ -20,6 +20,8 @@ Section offsets are absolute. A `header` section also carries `fields`, the disp
 it that the C side adds; `field_offset` resolves the two.
 """
 
+from __future__ import annotations
+
 import struct
 import sys
 import tomllib

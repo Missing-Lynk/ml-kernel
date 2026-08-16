@@ -431,13 +431,21 @@ static irqreturn_t ar_isp_irq(int irq, void *data)
 		 * been sent elsewhere.
 		 */
 		if (pingpong) {
-			unsigned int next = isp->stats_cur ^ 1;
+			unsigned int next;
 
+			/*
+			 * Against a process-context ar_isp_stats_publish, which
+			 * arms the same registers and resets these indices.
+			 * Already in hard interrupt context, so the plain form.
+			 */
+			spin_lock(&isp->stats_lock);
+			next = isp->stats_cur ^ 1;
 			ar_isp_stats_arm(isp, next);
 			WRITE_ONCE(isp->stats_done, isp->stats_cur);
 			isp->stats_cur = next;
 			WRITE_ONCE(isp->stats_valid, true);
 			isp->stats_flips++;
+			spin_unlock(&isp->stats_lock);
 		}
 	}
 
@@ -647,7 +655,7 @@ static struct ar_isp *ar_isp_instance;
  */
 int ar_isp_pipeline_start(void)
 {
-	struct ar_isp *isp = ar_isp_instance;
+	struct ar_isp *isp = READ_ONCE(ar_isp_instance);
 
 	if (!isp)
 		return -ENODEV;
@@ -892,6 +900,7 @@ static int ar_isp_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	isp->dev = dev;
+	spin_lock_init(&isp->stats_lock);
 
 	isp->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(isp->base))
@@ -915,7 +924,7 @@ static int ar_isp_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, ret, "cannot enable isp clocks\n");
 
 	platform_set_drvdata(pdev, isp);
-	ar_isp_instance = isp;
+	WRITE_ONCE(ar_isp_instance, isp);
 
 	ar_isp_tables_prepare(isp);
 
@@ -974,7 +983,7 @@ static void ar_isp_remove(struct platform_device *pdev)
 	 * exported bring-up call reaches this instance from another module and
 	 * is cleared for the same reason.
 	 */
-	ar_isp_instance = NULL;
+	WRITE_ONCE(ar_isp_instance, NULL);
 
 	if (isp->irq_requested)
 		free_irq(isp->irq, isp);

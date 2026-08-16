@@ -61,9 +61,9 @@ static inline void ar_isp_tone_select(struct ar_isp_tone_pick *out,
 	 */
 	for (unsigned int i = 0; i < count; i++) {
 		u32 lo = ar_isp_f32_q16(ar_isp_get_le32(blob + bands_off +
-						        i * AR_ISP_TONE_BAND_STRIDE)) >> 8;
+							i * AR_ISP_TONE_BAND_STRIDE)) >> 8;
 		u32 hi = ar_isp_f32_q16(ar_isp_get_le32(blob + bands_off +
-						        i * AR_ISP_TONE_BAND_STRIDE + 4)) >> 8;
+							i * AR_ISP_TONE_BAND_STRIDE + 4)) >> 8;
 
 		if (scalar_q8 <= hi) {
 			/*

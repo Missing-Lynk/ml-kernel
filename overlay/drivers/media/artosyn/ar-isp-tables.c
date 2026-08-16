@@ -392,10 +392,21 @@ const void *ar_isp_stats_ready(struct ar_isp *isp, const void *buf,
 
 void ar_isp_stats_publish(struct ar_isp *isp)
 {
+	unsigned long flags;
+
+	/*
+	 * Against the interrupt, which arms the same three address registers and
+	 * advances the same indices on every frame. Reachable from configure and
+	 * from output arm, either of which can run with the line already live.
+	 * The LTM descriptors below are outside the lock: nothing else writes
+	 * them.
+	 */
+	spin_lock_irqsave(&isp->stats_lock, flags);
 	isp->stats_cur = 0;
 	isp->stats_done = 0;
 	isp->stats_valid = false;
 	ar_isp_stats_arm(isp, isp->stats_cur);
+	spin_unlock_irqrestore(&isp->stats_lock, flags);
 
 	if (isp->ltm_page)
 		writel(lower_32_bits(isp->ltm_page_dma),
@@ -953,6 +964,14 @@ static bool ar_isp_tone_drc_pick(const u8 *blob, struct ar_isp_tone_pick *pick)
 }
 
 /*
+ * No selection. A stage carrying this either has never been filled or was
+ * filled from something other than a band selection, and must be rebuilt before
+ * its page can be trusted. No real pick can collide with it: low and high are
+ * band indices and t_q12 is a 12-bit weight.
+ */
+static const struct ar_isp_tone_pick ar_isp_tone_none = { ~0u, ~0u, ~0u };
+
+/*
  * Whether a rebuild would change anything.
  *
  * The loop writes the scalar every decision but the selection only moves when
@@ -961,27 +980,24 @@ static bool ar_isp_tone_drc_pick(const u8 *blob, struct ar_isp_tone_pick *pick)
  * so the comparison lives here, where the selection is known, rather than in
  * userspace, which would need the blob's band tables to make the same call.
  *
- * Seeded impossible so the first apply always builds.
+ * Compares against what the pages hold rather than against the last call, so a
+ * configure that refilled them behind this path is seen. The recording is the
+ * caller's, next to the fill it describes.
  */
-static bool ar_isp_tone_changed(const struct ar_isp_tone_pick *gamma,
+static bool ar_isp_tone_changed(const struct ar_isp *isp,
+				const struct ar_isp_tone_pick *gamma,
 				const struct ar_isp_tone_pick *drc, bool force)
 {
-	static struct ar_isp_tone_pick last_gamma = { ~0u, ~0u, ~0u };
-	static struct ar_isp_tone_pick last_drc = { ~0u, ~0u, ~0u };
-	bool changed = force ||
-		       memcmp(&last_gamma, gamma, sizeof(*gamma)) ||
-		       memcmp(&last_drc, drc, sizeof(*drc));
-
-	last_gamma = *gamma;
-	last_drc = *drc;
-
-	return changed;
+	return force ||
+	       memcmp(&isp->last_gamma, gamma, sizeof(*gamma)) ||
+	       memcmp(&isp->last_drc, drc, sizeof(*drc));
 }
 
 void ar_isp_tone_apply(struct ar_isp *isp, bool force, bool verbose)
 {
 	const u8 *blob = isp->tuning ? isp->tuning->data : NULL;
-	struct ar_isp_tone_pick gamma = { 0, 0, 0 }, drc = { 0, 0, 0 };
+	struct ar_isp_tone_pick gamma = ar_isp_tone_none;
+	struct ar_isp_tone_pick drc = ar_isp_tone_none;
 	bool gamma_built = false, drc_built = false;
 	bool want_gamma, want_drc;
 
@@ -991,7 +1007,18 @@ void ar_isp_tone_apply(struct ar_isp *isp, bool force, bool verbose)
 	want_gamma = isp->gamma && ar_isp_tone_gamma_pick(blob, &gamma);
 	want_drc = isp->drc && ar_isp_tone_drc_pick(blob, &drc);
 
-	if (!ar_isp_tone_changed(&gamma, &drc, force)) {
+	/*
+	 * A stage that will not be filled carries the sentinel on both sides of
+	 * the comparison, so it neither reports a change nor hides one made to
+	 * the other stage.
+	 */
+	if (!want_gamma)
+		gamma = ar_isp_tone_none;
+
+	if (!want_drc)
+		drc = ar_isp_tone_none;
+
+	if (!ar_isp_tone_changed(isp, &gamma, &drc, force)) {
 		if (verbose)
 			dev_info(isp->dev, "tone: selection unchanged, pages left\n");
 
@@ -1023,6 +1050,14 @@ void ar_isp_tone_apply(struct ar_isp *isp, bool force, bool verbose)
 				 drc.low, drc.high, drc.t_q12);
 	}
 
+	isp->last_gamma = gamma;
+	isp->last_drc = drc;
+
+	/*
+	 * The buffers are coherent, so there is no cache to flush, but the page
+	 * fills above must be visible before the descriptor writes below expose
+	 * them to the block's fetch.
+	 */
 	wmb();
 
 	if (gamma_built) {
@@ -1049,110 +1084,124 @@ void ar_isp_tone_apply(struct ar_isp *isp, bool force, bool verbose)
 }
 
 /*
- * Fill the owned buffers and hand them to the block.
- *
- * Runs after the register replay, which arms the vendor's addresses and commits
- * them. Republishing ours and committing again is the same sequence the vendor
- * itself issues on every AE update.
- *
- * Compander has no generator to recover: the vendor installs its 0x7800 page
- * verbatim from a static template in the service library and never recomputes
- * it, so the page is carried and filled here like any other constant.
+ * Where each page's content came from, for the one line that reports it.
+ * "built" is generated from the tuning file, "seeded" is inherited from the
+ * vendor's residual DRAM, and a page that is neither is zero.
  */
-void ar_isp_tables_apply(struct ar_isp *isp)
+struct ar_isp_fill_status {
+	bool gamma_built;
+	bool gamma_seeded;
+	bool drc_built;
+	bool drc_seeded;
+	bool tone_built;
+	bool lsc_built;
+	bool lsc_seeded;
+	bool hdr_lsc_seeded;
+};
+
+/*
+ * The fill half. These write memory and never a register, so nothing here is
+ * visible to the block until the barrier and the publishes that follow them.
+ */
+static void ar_isp_fill_gamma(struct ar_isp *isp, const u8 *blob,
+			      struct ar_isp_fill_status *st)
 {
-	const u8 *blob = isp->tuning ? isp->tuning->data : NULL;
-	bool gamma_seeded = false, drc_seeded = false;
-	bool gamma_built = false, drc_built = false;
-	bool tone_built = false;
-	bool lsc_seeded = false, lsc_built = false;
-	bool hdr_lsc_seeded = false;
 	struct ar_isp_tone_pick pick;
 	u8 *page;
 
-	if (!tables)
+	if (!isp->gamma)
 		return;
 
-	if (isp->gamma) {
-		if (seed)
-			gamma_seeded = ar_isp_seed_from_vendor(isp, isp->gamma,
-							       AR_ISP_VENDOR_GAMMA_PHYS,
-							       AR_ISP_GAMMA_SIZE);
-		else
-			memset(isp->gamma, 0, AR_ISP_GAMMA_SIZE);
+	if (seed)
+		st->gamma_seeded = ar_isp_seed_from_vendor(isp, isp->gamma,
+							  AR_ISP_VENDOR_GAMMA_PHYS,
+							  AR_ISP_GAMMA_SIZE);
+	else
+		memset(isp->gamma, 0, AR_ISP_GAMMA_SIZE);
 
-		if (blob && ar_isp_tone_gamma_pick(blob, &pick)) {
-			page = isp->gamma;
-			ar_isp_gamma_from_blob(page, blob, pick.low, pick.high,
-					       pick.t_q12);
+	if (!blob || !ar_isp_tone_gamma_pick(blob, &pick))
+		return;
 
-			/*
-			 * Page 1 is not an AE selection and is not in the tuning
-			 * file: it is a carried constant. Both pages are written
-			 * here, so gamma no longer depends on anything inherited.
-			 *
-			 * The descriptor length at 0x0034/0x0044/0x0054 is in
-			 * 16-byte records. 0x80 records fetch one 0x800 page. The
-			 * allocation stays 0x4000 to match the vendor's arena.
-			 */
-			ar_isp_gamma_pack_page(page + AR_ISP_GAMMA_PAGE,
-					       ar_isp_gamma_page1,
-					       AR_ISP_GAMMA_PAGE1_TAIL);
-			gamma_built = true;
-		}
-	}
+	page = isp->gamma;
+	ar_isp_gamma_from_blob(page, blob, pick.low, pick.high, pick.t_q12);
 
-	if (isp->drc) {
-		if (seed)
-			drc_seeded = ar_isp_seed_from_vendor(isp, isp->drc,
-							     AR_ISP_VENDOR_DRC_PHYS,
-							     AR_ISP_DRC_SIZE);
-		else
-			memset(isp->drc, 0, AR_ISP_DRC_SIZE);
+	/*
+	 * Page 1 is not an AE selection and is not in the tuning file: it is a
+	 * carried constant. Both pages are written here, so gamma no longer
+	 * depends on anything inherited.
+	 *
+	 * The descriptor length at 0x0034/0x0044/0x0054 is in 16-byte records.
+	 * 0x80 records fetch one 0x800 page. The allocation stays 0x4000 to
+	 * match the vendor's arena.
+	 */
+	ar_isp_gamma_pack_page(page + AR_ISP_GAMMA_PAGE, ar_isp_gamma_page1,
+			       AR_ISP_GAMMA_PAGE1_TAIL);
+	st->gamma_built = true;
+	isp->last_gamma = pick;
+}
 
-		if (blob && ar_isp_tone_drc_pick(blob, &pick)) {
-			/*
-			 * The whole page, both halves: the first two banks from
-			 * the tuning file, the second two from the constant the
-			 * vendor never recomputes. Nothing here is inherited,
-			 * which is why the seed above is redundant when this
-			 * runs and is left in place only so the two can be
-			 * compared in one bring-up.
-			 */
-			page = isp->drc;
-			ar_isp_drc_from_blob(page, blob, pick.low, pick.high,
-					     pick.t_q12);
-			ar_isp_drc_pack_bank(page + 2 * AR_ISP_DRC_BANK,
-					     ar_isp_drc_tail_bank0);
-			ar_isp_drc_pack_bank(page + 3 * AR_ISP_DRC_BANK,
-					     ar_isp_drc_tail_bank1);
-			drc_built = true;
-		}
-	}
+static void ar_isp_fill_drc(struct ar_isp *isp, const u8 *blob,
+			    struct ar_isp_fill_status *st)
+{
+	struct ar_isp_tone_pick pick;
+	u8 *page;
 
-	if (isp->tone) {
-		/*
-		 * The compander has no seed path and no tuning file: the page is
-		 * the same bytes on every unit and in every scene, so there is
-		 * nothing to fall back to and nothing to select.
-		 *
-		 * The HDR page's own 0xa00 is left zero. Its first 0x800 is zero on the
-		 * vendor too; the 0x200 after that is scene-varying runtime state,
-		 * measured at 117 of 512 bytes differing between two captures, so
-		 * it has no stored source to reproduce. Zeroing it was measured on
-		 * hardware to move 6.3% of pixels by more than 8 levels, against a
-		 * 94.5% frame-to-frame floor from scene motion alone: no effect.
-		 */
-		memset(isp->tone, 0, AR_ISP_TONE_ALLOC);
-		ar_isp_compander_fill(isp->tone + AR_ISP_HDR_COMPANDER,
-				      ar_isp_compander_head,
-				      ar_isp_compander_mid);
-		tone_built = true;
-	}
+	if (!isp->drc)
+		return;
 
-	if (isp->ltm_page) {
-		__le16 *page = isp->ltm_page;
+	if (seed)
+		st->drc_seeded = ar_isp_seed_from_vendor(isp, isp->drc,
+							AR_ISP_VENDOR_DRC_PHYS,
+							AR_ISP_DRC_SIZE);
+	else
+		memset(isp->drc, 0, AR_ISP_DRC_SIZE);
 
+	if (!blob || !ar_isp_tone_drc_pick(blob, &pick))
+		return;
+
+	/*
+	 * The whole page, both halves: the first two banks from the tuning file,
+	 * the second two from the constant the vendor never recomputes. Nothing
+	 * here is inherited, which is why the seed above is redundant when this
+	 * runs and is left in place only so the two can be compared in one
+	 * bring-up.
+	 */
+	page = isp->drc;
+	ar_isp_drc_from_blob(page, blob, pick.low, pick.high, pick.t_q12);
+	ar_isp_drc_pack_bank(page + 2 * AR_ISP_DRC_BANK, ar_isp_drc_tail_bank0);
+	ar_isp_drc_pack_bank(page + 3 * AR_ISP_DRC_BANK, ar_isp_drc_tail_bank1);
+	st->drc_built = true;
+	isp->last_drc = pick;
+}
+
+static void ar_isp_fill_tone(struct ar_isp *isp, struct ar_isp_fill_status *st)
+{
+	if (!isp->tone)
+		return;
+
+	/*
+	 * The compander has no seed path and no tuning file: the page is the
+	 * same bytes on every unit and in every scene, so there is nothing to
+	 * fall back to and nothing to select.
+	 *
+	 * The HDR page's own 0xa00 is left zero. Its first 0x800 is zero on the
+	 * vendor too; the 0x200 after that is scene-varying runtime state,
+	 * measured at 117 of 512 bytes differing between two captures, so it has
+	 * no stored source to reproduce. Zeroing it was measured on hardware to
+	 * move 6.3% of pixels by more than 8 levels, against a 94.5%
+	 * frame-to-frame floor from scene motion alone: no effect.
+	 */
+	memset(isp->tone, 0, AR_ISP_TONE_ALLOC);
+	ar_isp_compander_fill(isp->tone + AR_ISP_HDR_COMPANDER,
+			      ar_isp_compander_head, ar_isp_compander_mid);
+	st->tone_built = true;
+}
+
+static void ar_isp_fill_ltm(struct ar_isp *isp)
+{
+	__le16 *page = isp->ltm_page;
+
+	if (page) {
 		/*
 		 * Every tile the same linear curve, monotonic from 0 to the
 		 * measured maximum, truncating as every quantisation in this
@@ -1170,111 +1219,191 @@ void ar_isp_tables_apply(struct ar_isp *isp)
 
 	if (isp->ltm_stats)
 		memset(isp->ltm_stats, 0, AR_ISP_LTM_STATS_SIZE);
+}
 
-	if (isp->lsc) {
-		/*
-		 * Only region A, the lens-shading grid, is generated. The
-		 * scene-adaptive 0x2c0 after it has no stored source anywhere and
-		 * is left to the seed, so with seeding off it is zero and the
-		 * block runs on shading alone.
-		 */
-		if (seed)
-			lsc_seeded = ar_isp_seed_from_vendor(isp, isp->lsc,
-							     AR_ISP_VENDOR_LSC_PHYS,
-							     AR_ISP_LSC_SIZE);
-		else
-			memset(isp->lsc, 0, AR_ISP_LSC_SIZE);
-
-		if (blob) {
-			ar_isp_lsc_from_blob(isp->lsc, blob);
-			lsc_built = true;
-		}
-	}
-
-	if (isp->hdr_lsc) {
-		/*
-		 * The page is owned but not built: filling it with the LSC grid
-		 * applies shading twice and was measured on hardware to blow out
-		 * the corners. The stage's real payload is unrecovered, so the
-		 * fill is zero until it is.
-		 */
-		if (seed)
-			hdr_lsc_seeded = ar_isp_seed_from_vendor(isp, isp->hdr_lsc,
-								 AR_ISP_VENDOR_HDR_LSC_PHYS,
-								 AR_ISP_LSC_SIZE);
-		else
-			memset(isp->hdr_lsc, 0, AR_ISP_LSC_SIZE);
-	}
+static void ar_isp_fill_lsc(struct ar_isp *isp, const u8 *blob,
+			    struct ar_isp_fill_status *st)
+{
+	if (!isp->lsc)
+		return;
 
 	/*
-	 * The buffers are coherent, so there is no cache to flush, but the writes
-	 * above must be visible before the address that makes the block fetch
+	 * Only region A, the lens-shading grid, is generated. The scene-adaptive
+	 * 0x2c0 after it has no stored source anywhere and is left to the seed,
+	 * so with seeding off it is zero and the block runs on shading alone.
+	 */
+	if (seed)
+		st->lsc_seeded = ar_isp_seed_from_vendor(isp, isp->lsc,
+							AR_ISP_VENDOR_LSC_PHYS,
+							AR_ISP_LSC_SIZE);
+	else
+		memset(isp->lsc, 0, AR_ISP_LSC_SIZE);
+
+	if (!blob)
+		return;
+
+	ar_isp_lsc_from_blob(isp->lsc, blob);
+	st->lsc_built = true;
+}
+
+static void ar_isp_fill_hdr_lsc(struct ar_isp *isp,
+				struct ar_isp_fill_status *st)
+{
+	if (!isp->hdr_lsc)
+		return;
+
+	/*
+	 * The page is owned but not built: filling it with the LSC grid applies
+	 * shading twice and was measured on hardware to blow out the corners.
+	 * The stage's real payload is unrecovered, so the fill is zero until it
+	 * is.
+	 */
+	if (seed)
+		st->hdr_lsc_seeded = ar_isp_seed_from_vendor(isp, isp->hdr_lsc,
+							     AR_ISP_VENDOR_HDR_LSC_PHYS,
+							     AR_ISP_LSC_SIZE);
+	else
+		memset(isp->hdr_lsc, 0, AR_ISP_LSC_SIZE);
+}
+
+/*
+ * The publish half. These write descriptor registers and never memory.
+ *
+ * The descriptors are 32-bit. dma_alloc_coherent is bounded by the mask set in
+ * ar_isp_tables_prepare, so this cannot truncate, but the cast is written out
+ * rather than left implicit.
+ */
+static void ar_isp_publish_gamma(struct ar_isp *isp)
+{
+	u32 addr;
+
+	if (!isp->gamma)
+		return;
+
+	addr = lower_32_bits(isp->gamma_dma);
+	writel(addr, isp->base + AR_ISP_TABLE_GAMMA0);
+	writel(addr, isp->base + AR_ISP_TABLE_GAMMA1);
+	writel(addr, isp->base + AR_ISP_TABLE_GAMMA2);
+	writel(AR_ISP_TABLE_COMMIT_ENABLE | AR_ISP_TABLE_GAMMA_BITS,
+	       isp->base + AR_ISP_TABLE_COMMIT);
+}
+
+static void ar_isp_publish_drc(struct ar_isp *isp)
+{
+	if (!isp->drc)
+		return;
+
+	writel(lower_32_bits(isp->drc_dma), isp->base + AR_ISP_TABLE_DRC);
+	writel(AR_ISP_TABLE_COMMIT_ENABLE | AR_ISP_TABLE_DRC_BIT,
+	       isp->base + AR_ISP_TABLE_COMMIT);
+}
+
+static void ar_isp_publish_tone(struct ar_isp *isp)
+{
+	if (!isp->tone)
+		return;
+
+	writel(lower_32_bits(isp->tone_dma + AR_ISP_HDR_COMPANDER),
+	       isp->base + AR_ISP_TABLE_COMPANDER);
+	writel(AR_ISP_TABLE_COMMIT_ENABLE | AR_ISP_TABLE_COMPANDER_BIT,
+	       isp->base + AR_ISP_TABLE_COMMIT);
+
+	if (!hdr)
+		return;
+
+	writel(lower_32_bits(isp->tone_dma), isp->base + AR_ISP_TABLE_HDR);
+	writel(1, isp->base + AR_ISP_TABLE_HDR_VALID);
+}
+
+static void ar_isp_publish_lsc(struct ar_isp *isp)
+{
+	if (!isp->lsc)
+		return;
+
+	writel(lower_32_bits(isp->lsc_dma), isp->base + AR_ISP_TABLE_LSC);
+	writel(1, isp->base + AR_ISP_TABLE_LSC_VALID);
+}
+
+static void ar_isp_publish_hdr_lsc(struct ar_isp *isp)
+{
+	if (!isp->hdr_lsc)
+		return;
+
+	writel(lower_32_bits(isp->hdr_lsc_dma), isp->base + AR_ISP_TABLE_HDR_LSC);
+	writel(1, isp->base + AR_ISP_TABLE_HDR_LSC_VALID);
+}
+
+static void ar_isp_tables_report(struct ar_isp *isp,
+				 const struct ar_isp_fill_status *st)
+{
+	dev_info(isp->dev,
+		 "tables: gamma %pad %s, drc %pad %s, compander %pad %s, lsc %pad %s\n",
+		 &isp->gamma_dma,
+		 st->gamma_built ? "built" : (st->gamma_seeded ? "seeded" : "zeroed"),
+		 &isp->drc_dma,
+		 st->drc_built ? "built" : (st->drc_seeded ? "seeded" : "zeroed"),
+		 &isp->tone_dma,
+		 st->tone_built ? "hdr+compander built" : "on the vendor's page",
+		 &isp->lsc_dma,
+		 st->lsc_built ? "shading built" : (st->lsc_seeded ? "seeded" : "zeroed"));
+
+	if (isp->hdr_lsc)
+		dev_info(isp->dev, "hdr_lsc: %pad %s\n", &isp->hdr_lsc_dma,
+			 st->hdr_lsc_seeded ? "seeded" : "zeroed");
+}
+
+/*
+ * Fill the owned buffers and hand them to the block.
+ *
+ * Runs after the register replay, which arms the vendor's addresses and commits
+ * them. Republishing ours and committing again is the same sequence the vendor
+ * itself issues on every AE update.
+ *
+ * Every fill runs before the barrier and every publish after it. That split is
+ * the reason the two halves are separate passes rather than one pass per
+ * buffer: a barrier per buffer would order each page only against its own
+ * descriptor, and the block fetches all of them.
+ */
+void ar_isp_tables_apply(struct ar_isp *isp)
+{
+	const u8 *blob = isp->tuning ? isp->tuning->data : NULL;
+	struct ar_isp_fill_status st = { };
+
+	if (!tables)
+		return;
+
+	/*
+	 * Both pages are about to be refilled from whatever the parameters
+	 * select now. Anything either of them held before is gone, so the
+	 * recorded selection starts at the sentinel and only the stages actually
+	 * filled below record a pick.
+	 */
+	isp->last_gamma = ar_isp_tone_none;
+	isp->last_drc = ar_isp_tone_none;
+
+	ar_isp_fill_gamma(isp, blob, &st);
+	ar_isp_fill_drc(isp, blob, &st);
+	ar_isp_fill_tone(isp, &st);
+	ar_isp_fill_ltm(isp);
+	ar_isp_fill_lsc(isp, blob, &st);
+	ar_isp_fill_hdr_lsc(isp, &st);
+
+	/*
+	 * The buffers are coherent, so there is no cache to flush, but the fills
+	 * above must be visible before the addresses below make the block fetch
 	 * them.
 	 */
 	wmb();
 
-	/*
-	 * The descriptors are 32-bit. dma_alloc_coherent is bounded by the mask
-	 * set in ar_isp_tables_prepare, so this cannot truncate, but the cast is
-	 * written out rather than left implicit.
-	 */
-	if (isp->gamma) {
-		u32 addr = lower_32_bits(isp->gamma_dma);
-
-		writel(addr, isp->base + AR_ISP_TABLE_GAMMA0);
-		writel(addr, isp->base + AR_ISP_TABLE_GAMMA1);
-		writel(addr, isp->base + AR_ISP_TABLE_GAMMA2);
-		writel(AR_ISP_TABLE_COMMIT_ENABLE | AR_ISP_TABLE_GAMMA_BITS,
-		       isp->base + AR_ISP_TABLE_COMMIT);
-	}
-
-	if (isp->drc) {
-		writel(lower_32_bits(isp->drc_dma), isp->base + AR_ISP_TABLE_DRC);
-		writel(AR_ISP_TABLE_COMMIT_ENABLE | AR_ISP_TABLE_DRC_BIT,
-		       isp->base + AR_ISP_TABLE_COMMIT);
-	}
-
-	if (isp->tone) {
-		writel(lower_32_bits(isp->tone_dma + AR_ISP_HDR_COMPANDER),
-		       isp->base + AR_ISP_TABLE_COMPANDER);
-		writel(AR_ISP_TABLE_COMMIT_ENABLE | AR_ISP_TABLE_COMPANDER_BIT,
-		       isp->base + AR_ISP_TABLE_COMMIT);
-
-		if (hdr) {
-			writel(lower_32_bits(isp->tone_dma),
-			       isp->base + AR_ISP_TABLE_HDR);
-			writel(1, isp->base + AR_ISP_TABLE_HDR_VALID);
-		}
-	}
-
-	if (isp->lsc) {
-		writel(lower_32_bits(isp->lsc_dma), isp->base + AR_ISP_TABLE_LSC);
-		writel(1, isp->base + AR_ISP_TABLE_LSC_VALID);
-	}
-
-	if (isp->hdr_lsc) {
-		writel(lower_32_bits(isp->hdr_lsc_dma),
-		       isp->base + AR_ISP_TABLE_HDR_LSC);
-		writel(1, isp->base + AR_ISP_TABLE_HDR_LSC_VALID);
-	}
-
+	ar_isp_publish_gamma(isp);
+	ar_isp_publish_drc(isp);
+	ar_isp_publish_tone(isp);
+	ar_isp_publish_lsc(isp);
+	ar_isp_publish_hdr_lsc(isp);
 	ar_isp_stats_publish(isp);
 	ar_isp_de3d_publish(isp);
 
-	dev_info(isp->dev,
-		 "tables: gamma %pad %s, drc %pad %s, compander %pad %s, lsc %pad %s\n",
-		 &isp->gamma_dma,
-		 gamma_built ? "built" : (gamma_seeded ? "seeded" : "zeroed"),
-		 &isp->drc_dma,
-		 drc_built ? "built" : (drc_seeded ? "seeded" : "zeroed"),
-		 &isp->tone_dma,
-		 tone_built ? "hdr+compander built" : "on the vendor's page",
-		 &isp->lsc_dma,
-		 lsc_built ? "shading built" : (lsc_seeded ? "seeded" : "zeroed"));
-
-	if (isp->hdr_lsc)
-		dev_info(isp->dev, "hdr_lsc: %pad %s\n", &isp->hdr_lsc_dma,
-			 hdr_lsc_seeded ? "seeded" : "zeroed");
+	ar_isp_tables_report(isp, &st);
 }
 
 /*
@@ -1285,11 +1414,41 @@ void ar_isp_tables_apply(struct ar_isp *isp)
  * comes up. The tuning file is not in the repository and has to be installed on
  * the device; without it the buffers are still ours but carry only seeded data.
  */
+/*
+ * One owned buffer, named if it cannot be had.
+ *
+ * A failure is not fatal and does not stop the others: the stage's descriptor
+ * keeps the replayed vendor address, so it runs on the vendor's memory rather
+ * than not at all. The name is the only thing that says which stage that
+ * happened to, which is why the warning is here and not a count at the end.
+ */
+static void *ar_isp_alloc(struct ar_isp *isp, const char *name, size_t size,
+			  dma_addr_t *dma)
+{
+	void *buf = dma_alloc_coherent(isp->dev, size, dma, GFP_KERNEL);
+
+	if (buf)
+		return buf;
+
+	dev_warn(isp->dev,
+		 "%s buffer (%zu bytes) unavailable, falling back to the vendor's\n",
+		 name, size);
+
+	return NULL;
+}
+
 void ar_isp_tables_prepare(struct ar_isp *isp)
 {
 	struct device *dev = isp->dev;
 	const char *fw;
 	int ret;
+
+	/* Above the early returns below, and not left to the zeroed allocation:
+	 * an all-zero pick is curve 0 with no blend, which is a selection a page
+	 * can legitimately hold.
+	 */
+	isp->last_gamma = ar_isp_tone_none;
+	isp->last_drc = ar_isp_tone_none;
 
 	/* Mask before the pool, matching vif and cvisp: the descriptor registers
 	 * carry a 32-bit address, so the DMA API is constrained before anything
@@ -1307,26 +1466,21 @@ void ar_isp_tables_prepare(struct ar_isp *isp)
 		return;
 	}
 
-	isp->gamma = dma_alloc_coherent(dev, AR_ISP_GAMMA_SIZE, &isp->gamma_dma,
-					GFP_KERNEL);
-	isp->drc = dma_alloc_coherent(dev, AR_ISP_DRC_SIZE, &isp->drc_dma,
-				      GFP_KERNEL);
+	isp->gamma = ar_isp_alloc(isp, "gamma", AR_ISP_GAMMA_SIZE,
+				  &isp->gamma_dma);
+	isp->drc = ar_isp_alloc(isp, "drc", AR_ISP_DRC_SIZE, &isp->drc_dma);
 
 	if (compander)
-		isp->tone = dma_alloc_coherent(dev, AR_ISP_TONE_ALLOC,
-					       &isp->tone_dma, GFP_KERNEL);
+		isp->tone = ar_isp_alloc(isp, "compander", AR_ISP_TONE_ALLOC,
+					 &isp->tone_dma);
 
 	if (lsc)
-		isp->lsc = dma_alloc_coherent(dev, AR_ISP_LSC_SIZE,
-					      &isp->lsc_dma, GFP_KERNEL);
+		isp->lsc = ar_isp_alloc(isp, "lsc", AR_ISP_LSC_SIZE,
+					&isp->lsc_dma);
 
 	if (hdr_lsc)
-		isp->hdr_lsc = dma_alloc_coherent(dev, AR_ISP_LSC_SIZE,
-						  &isp->hdr_lsc_dma, GFP_KERNEL);
-
-	if (!isp->gamma || !isp->drc || (compander && !isp->tone) ||
-	    (lsc && !isp->lsc) || (hdr_lsc && !isp->hdr_lsc))
-		dev_warn(dev, "coefficient buffers unavailable, falling back to the vendor's\n");
+		isp->hdr_lsc = ar_isp_alloc(isp, "hdr_lsc", AR_ISP_LSC_SIZE,
+					    &isp->hdr_lsc_dma);
 
 	if (stats) {
 		/*
@@ -1336,43 +1490,40 @@ void ar_isp_tables_prepare(struct ar_isp *isp)
 		 * 40 KiB and keeps the parameter a pure behaviour switch: the
 		 * A/B then differs only in whether the interrupt flips.
 		 */
-		isp->rro = dma_alloc_coherent(dev,
-					      AR_ISP_RRO_SIZE * AR_ISP_STATS_HALVES,
-					      &isp->rro_dma, GFP_KERNEL);
-		isp->rro_face = dma_alloc_coherent(dev,
-						   AR_ISP_RRO_SIZE * AR_ISP_STATS_HALVES,
-						   &isp->rro_face_dma, GFP_KERNEL);
-		isp->hist = dma_alloc_coherent(dev,
-					       AR_ISP_HIST_SIZE * AR_ISP_STATS_HALVES,
-					       &isp->hist_dma, GFP_KERNEL);
-		if (!isp->rro || !isp->rro_face || !isp->hist)
-			dev_warn(dev, "statistics buffers unavailable, falling back to the vendor's\n");
+		isp->rro = ar_isp_alloc(isp, "rro",
+					AR_ISP_RRO_SIZE * AR_ISP_STATS_HALVES,
+					&isp->rro_dma);
+		isp->rro_face = ar_isp_alloc(isp, "rro_face",
+					     AR_ISP_RRO_SIZE * AR_ISP_STATS_HALVES,
+					     &isp->rro_face_dma);
+		isp->hist = ar_isp_alloc(isp, "hist",
+					 AR_ISP_HIST_SIZE * AR_ISP_STATS_HALVES,
+					 &isp->hist_dma);
 	}
 
 	if (ltm) {
-		isp->ltm_page = dma_alloc_coherent(dev, AR_ISP_LTM_PAGE_SIZE,
-						   &isp->ltm_page_dma,
-						   GFP_KERNEL);
-		isp->ltm_stats = dma_alloc_coherent(dev, AR_ISP_LTM_STATS_SIZE,
-						    &isp->ltm_stats_dma,
-						    GFP_KERNEL);
-		if (!isp->ltm_page || !isp->ltm_stats)
-			dev_warn(dev, "ltm buffers unavailable, falling back to the vendor's\n");
+		isp->ltm_page = ar_isp_alloc(isp, "ltm_page",
+					     AR_ISP_LTM_PAGE_SIZE,
+					     &isp->ltm_page_dma);
+		isp->ltm_stats = ar_isp_alloc(isp, "ltm_stats",
+					      AR_ISP_LTM_STATS_SIZE,
+					      &isp->ltm_stats_dma);
 	}
 
 	if (de3d) {
-		static const size_t sz[3] = {
-			AR_ISP_DE3D_BUF0_SIZE, AR_ISP_DE3D_BUF1_SIZE,
-			AR_ISP_DE3D_BUF2_SIZE,
+		static const struct {
+			const char *name;
+			size_t size;
+		} buf[3] = {
+			{ "de3d0", AR_ISP_DE3D_BUF0_SIZE },
+			{ "de3d1", AR_ISP_DE3D_BUF1_SIZE },
+			{ "de3d2", AR_ISP_DE3D_BUF2_SIZE },
 		};
 
-		for (unsigned int i = 0; i < ARRAY_SIZE(sz); i++)
-			isp->de3d[i] = dma_alloc_coherent(dev, sz[i],
-							  &isp->de3d_dma[i],
-							  GFP_KERNEL);
-
-		if (!isp->de3d[0] || !isp->de3d[1] || !isp->de3d[2])
-			dev_warn(dev, "de3d buffers unavailable, falling back to the vendor's\n");
+		for (unsigned int i = 0; i < ARRAY_SIZE(buf); i++)
+			isp->de3d[i] = ar_isp_alloc(isp, buf[i].name,
+						    buf[i].size,
+						    &isp->de3d_dma[i]);
 	}
 
 	/* The layout is the same for all three sensors; the values are the board's. */
