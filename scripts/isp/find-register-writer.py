@@ -34,6 +34,7 @@ import re
 import shutil
 import subprocess
 import sys
+from types import ModuleType
 
 HERE = pathlib.Path(__file__).resolve().parent
 OBJDUMP = 'aarch64-linux-gnu-objdump'
@@ -59,7 +60,7 @@ CREAT_ALIASES = {
 }
 
 
-def load_audit():
+def load_audit() -> ModuleType:
     path = HERE / 'audit-provenance.py'
     spec = importlib.util.spec_from_file_location('ar_isp_audit', path)
     mod = importlib.util.module_from_spec(spec)
@@ -71,7 +72,7 @@ def load_audit():
     return mod
 
 
-def disassemble(library):
+def disassemble(library: pathlib.Path) -> list[str]:
     if not shutil.which(OBJDUMP):
         sys.exit(f'{OBJDUMP} not found. It reads the vendor library, which is '
                  f'the only source for where a register is written.')
@@ -84,10 +85,10 @@ def disassemble(library):
     return out.stdout.splitlines()
 
 
-def symbols(library):
+def symbols(library: pathlib.Path) -> dict[str, int]:
     out = subprocess.run([OBJDUMP, '-T', str(library)],
                          capture_output=True, text=True).stdout
-    found = {}
+    found: dict[str, int] = {}
     for line in out.splitlines():
         hit = re.match(r'^([0-9a-f]+)\s+\S+\s+DF\s+\.text\s+\S+\s+\S+\s+(\w+)',
                        line)
@@ -97,8 +98,8 @@ def symbols(library):
     return found
 
 
-def index_by_address(asm):
-    out = {}
+def index_by_address(asm: list[str]) -> dict[int, int]:
+    out: dict[int, int] = {}
     for i, line in enumerate(asm):
         hit = re.match(r'^\s*([0-9a-f]+):', line)
         if hit:
@@ -107,7 +108,7 @@ def index_by_address(asm):
     return out
 
 
-def handlers_of(asm, at, entry):
+def handlers_of(asm: list[str], at: dict[int, int], entry: int) -> list[int]:
     """
     The handler addresses a constructor stores into its module struct.
 
@@ -130,23 +131,24 @@ def handlers_of(asm, at, entry):
             continue
 
         hit = re.search(r'str\s+(x\d+), \[x19, #(\d+)\]', line)
-        if hit and hit.group(1) in pages:
-            if int(hit.group(2)) in HANDLER_SLOTS:
-                found.append(pages[hit.group(1)])
+        if hit and hit.group(1) in pages and int(hit.group(2)) in HANDLER_SLOTS:
+            found.append(pages[hit.group(1)])
 
     return found
 
 
-def stores_at(asm, at, entry, offset):
+def stores_at(asm: list[str], at: dict[int, int], entry: int,
+              offset: int) -> tuple[list[str], list[str]]:
     """Every store in one handler whose immediate is `offset`."""
     if entry not in at:
         return [], []
 
-    real, spills = [], []
+    real: list[str] = []
+    spills: list[str] = []
     pattern = re.compile(
         r'^\s*([0-9a-f]+):\s+(str|stp|strb|strh)\s+\S+(?:, \S+)?, '
-        r'\[(\w+)(?:, #%d)?\]' % offset)
-    exact = re.compile(r'\[(\w+), #%d\]' % offset)
+        rf'\[(\w+)(?:, #{offset})?\]')
+    exact = re.compile(rf'\[(\w+), #{offset}\]')
     for line in asm[at[entry]:at[entry] + HANDLER_WINDOW]:
         hit = pattern.match(line)
         if not hit:
@@ -185,7 +187,7 @@ def main() -> int:
     masks = audit.gate_masks()
     banks = audit.bank_lookup()
 
-    def classify(off):
+    def classify(off: int) -> str:
         value = final[off]
         if off in derived or library_image.get(off) == value:
             return 'accounted'
@@ -200,7 +202,7 @@ def main() -> int:
 
         return 'UNEXPLAINED'
 
-    def bank_of(off):
+    def bank_of(off: int) -> tuple[int, str]:
         for base, name in banks:
             if off >= base:
                 return base, name

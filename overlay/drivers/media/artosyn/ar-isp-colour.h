@@ -48,7 +48,7 @@
 #define AR_ISP_CCM_SIGN			0x8000
 
 /*
- * CCM source data in the tuning file. The gate enables the AWB-driven ccm1
+ * CCM source data in the tuning file. The gate enables the ccm1 runtime pack
  * path; the ladder is eight illuminants in kelvin and the matrix banks are
  * unpacked float32 3x3, row major. Eight slots are allocated and four hold
  * data, which matches the bank count in the selector block.

@@ -50,6 +50,7 @@ is 10. The 30 per cent is a hard-coded float quadruple in the library at
 import importlib.util
 import pathlib
 import sys
+from types import ModuleType
 
 HERE = pathlib.Path(__file__).resolve().parent
 
@@ -99,11 +100,12 @@ ZONE_RULES = {
 }
 
 
-def zone(frame_w, frame_h, columns, rows, fraction, round_up, guard):
+def zone(frame_w: int, frame_h: int, columns: int, rows: int,
+         fraction: float, round_up: bool, guard: int) -> tuple[int, int]:
     """The zone the vendor's configure routine computes, in pixels."""
     width, height = int(frame_w * fraction), int(frame_h * fraction)
 
-    def divide(extent, count):
+    def divide(extent: int, count: int) -> int:
         # fcvtps ceilings; the integer path truncates. Both then round up to
         # even, and the whole-frame path subtracts a guard.
         exact = -(-extent // count) if round_up else extent // count
@@ -113,7 +115,7 @@ def zone(frame_w, frame_h, columns, rows, fraction, round_up, guard):
     return divide(width, columns), divide(height, rows)
 
 
-def load_audit():
+def load_audit() -> ModuleType:
     """The driver's register tables, via audit-provenance.py."""
     path = HERE / 'audit-provenance.py'
     spec = importlib.util.spec_from_file_location('ar_isp_audit', path)
@@ -135,8 +137,8 @@ def main() -> int:
           f'{"threshold":>11}')
 
     for name, bank, shift in INSTANCES:
-        def reg(off):
-            return final.get(bank + shift + off)
+        def reg(off: int, base: int = bank, delta: int = shift) -> int | None:
+            return final.get(base + delta + off)
 
         fields = {off: reg(off) for off in
                   (COLUMNS, ROWS, ZONE_W, ZONE_H, FRAME_W, FRAME_H,

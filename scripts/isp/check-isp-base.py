@@ -46,10 +46,11 @@ import argparse
 import importlib.util
 import pathlib
 import re
-import struct
 import shutil
+import struct
 import subprocess
 import sys
+from types import ModuleType
 
 HERE = pathlib.Path(__file__).resolve().parent
 OBJDUMP = 'aarch64-linux-gnu-objdump'
@@ -123,7 +124,7 @@ READ_BACK_MASK = 0xFFFFBFFF
 READ_BACK_SITE = (0x1D3918, 0x1D3958)
 
 
-def load_audit():
+def load_audit() -> ModuleType:
     """The driver's register tables, via audit-provenance.py."""
     path = HERE / 'audit-provenance.py'
     spec = importlib.util.spec_from_file_location('ar_isp_audit', path)
@@ -136,7 +137,7 @@ def load_audit():
     return mod
 
 
-def window(library, start, stop):
+def window(library: pathlib.Path, start: int, stop: int) -> list[str]:
     """One span of disassembly."""
     if not shutil.which(OBJDUMP):
         sys.exit(f'{OBJDUMP} not found. It reads the vendor library, which is '
@@ -153,14 +154,15 @@ def window(library, start, stop):
     return out.stdout.splitlines()
 
 
-def constants(lines):
+def constants(lines: list[str]) -> set[int]:
     """
     Every 32-bit constant a mov/movk pair builds in a span.
 
     A `movk` folds into whatever `mov` last targeted that register, so the two
     halves have to be tracked per register rather than per instruction.
     """
-    built, seen = {}, set()
+    built: dict[str, int] = {}
+    seen: set[int] = set()
     for line in lines:
         hit = re.search(r'\bmov\s+(w\d+), #(0x[0-9a-f]+|-?\d+)', line)
         if hit:
@@ -177,13 +179,13 @@ def constants(lines):
     return seen
 
 
-def masks(lines):
+def masks(lines: list[str]) -> set[int]:
     """Every immediate an `and` applies in a span."""
     return {int(m, 0) & 0xFFFFFFFF for m in
             re.findall(r'\band\s+w\d+, w\d+, #(0x[0-9a-f]+)', '\n'.join(lines))}
 
 
-def decode(value):
+def decode(value: int) -> tuple[int, int, int]:
     return (value & FIELD, (value >> WIDTH_BITS) & FIELD,
             (value >> MODE_SHIFT) & ((1 << MODE_BITS) - 1))
 
@@ -285,7 +287,7 @@ def main() -> int:
           f'covering {IMAGE_FIRST_REG:#06x} to {last:#06x}, installed by the '
           f'isp_memcpy at 0x25aa4c\n')
 
-    def image(off):
+    def image(off: int) -> int:
         return struct.unpack_from('<I', raw, image_at + off - IMAGE_FIRST_REG)[0]
 
     for off in FROM_IMAGE:

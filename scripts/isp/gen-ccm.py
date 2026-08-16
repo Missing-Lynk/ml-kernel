@@ -5,15 +5,16 @@ Extract the Artosyn ISP's CCM init blocks and emit them as a kernel header.
 The two CCM register banks (ccm1 at ISP +0x3400, ccm2 at +0x3800) are 0x50-byte
 register files, not DMA pages. At init the vendor service copies entries 33 and
 34 of its ISP-init template array into them verbatim: an identity matrix pair
-for ccm1 and a fixed colour matrix pair for ccm2. At runtime only ccm1 moves,
-when the AWB path packs an interpolated tuning-file matrix into its first copy.
+for ccm1 and a fixed colour matrix pair for ccm2. The vendor code also has a
+ccm1 runtime pack path that can write an interpolated tuning-file matrix into
+its first copy.
 
 The emitted tables come from the library alone. Nothing the tuning file holds
 reaches the header.
 
 The tuning file is read to guard a different piece of code: the driver's runtime
-CCM path in ar-isp-colour.h, which is what actually consumes the blob when AWB
-repacks ccm1 on the live device. f32_q8sm() and pack_matrix() here are Python
+CCM path in ar-isp-colour.h, which is what actually consumes the blob when ccm1
+is repacked on the live device. f32_q8sm() and pack_matrix() here are Python
 mirrors of that packing.
 
 That packing is checked by computing it a second, independent way: f32_q8sm()
@@ -24,9 +25,8 @@ than round to nearest, which is the one place the two implementations can
 plausibly diverge and the one the hardware is sensitive to. The remaining checks
 pin the surrounding structure: both template blocks hold two identical matrix
 copies and nothing outside them, every populated matrix preserves white, the ccm1
-tuning gate reads 1 and the ccm2 gate reads 0 (so ccm1 is AWB-driven and ccm2
-static), the illuminant ladder is still ascending kelvin, and banks 4 to 7 are
-still empty.
+tuning gate reads 1 and the ccm2 gate reads 0, the illuminant ladder is still
+ascending kelvin, and banks 4 to 7 are still empty.
 
 Every expectation this script asserts is derived from --lib or --blob, so a
 checkout plus those two files reproduces all of them. Nothing is transcribed from

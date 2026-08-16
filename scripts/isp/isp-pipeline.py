@@ -25,6 +25,7 @@ import importlib.util
 import pathlib
 import re
 import sys
+from types import ModuleType
 
 HERE = pathlib.Path(__file__).resolve().parent
 DRIVERS = HERE.parent.parent / 'overlay' / 'drivers' / 'media' / 'artosyn'
@@ -115,7 +116,7 @@ ABSENT_FAMILIES = {
 }
 
 
-def load_audit():
+def load_audit() -> ModuleType:
     """audit-provenance.py's tables, reused rather than reimplemented."""
     path = HERE / 'audit-provenance.py'
     spec = importlib.util.spec_from_file_location('ar_isp_audit', path)
@@ -128,7 +129,7 @@ def load_audit():
     return mod
 
 
-def gate_table():
+def gate_table() -> dict[str, tuple[int, list[tuple], int]]:
     """
     Stage name to (bank, [(reg, set_mask, kind, polarity)]), from
     ar-isp-gates.h.
@@ -153,7 +154,7 @@ def gate_table():
                 r'\s*(0x[0-9a-f]{8}),\s*(AR_ISP_GATE_\w+)[^/]*/\*\s*(\w+)',
                 hit.group(2))]
 
-    stages = {}
+    stages: dict[str, tuple[int, list[tuple], int]] = {}
     for name, bank, blob, array, _n, _flags in re.findall(
             r'\{ "(\w+)", (0x[0-9a-f]+), (0x[0-9a-f]+), (\w+), (\d+), '
             r'([^}]*)\}', text):
@@ -162,7 +163,7 @@ def gate_table():
     return stages
 
 
-def blob_states(path):
+def blob_states(path: pathlib.Path) -> dict[str, str]:
     """
     Each stage's enable flag as the sensor tuning file stores it.
 
@@ -174,7 +175,7 @@ def blob_states(path):
     carrying AR_ISP_STAGE_NO_BLOB read no flag and are absent here.
     """
     blob = pathlib.Path(path).read_bytes()
-    out = {}
+    out: dict[str, str] = {}
     for name, (_bank, _gates, off) in gate_table().items():
         if off and off + 4 <= len(blob):
             out[name] = 'runs' if int.from_bytes(
@@ -183,7 +184,8 @@ def blob_states(path):
     return out
 
 
-def stage_state(gates, final):
+def stage_state(gates: list[tuple],
+                final: dict[int, int]) -> tuple[str, bool]:
     """
     Whether a stage runs, from its gates against the driver's final values.
 
@@ -198,11 +200,18 @@ def stage_state(gates, final):
     """
     verdicts = set()
     inferred = False
+    has_known_gate = False
+    has_written_known_gate = False
     for reg, mask, kind, polarity in gates:
         value = final.get(reg)
-        if value is None or kind == 'UNKNOWN':
+        if kind == 'UNKNOWN':
             continue
 
+        has_known_gate = True
+        if value is None:
+            continue
+
+        has_written_known_gate = True
         if kind == 'BIT_ENABLE':
             verdicts.add('runs' if value & mask else 'off')
         elif kind == 'BIT_BYPASS':
@@ -215,10 +224,13 @@ def stage_state(gates, final):
     if len(verdicts) == 1:
         return verdicts.pop(), inferred
 
+    if has_known_gate and not has_written_known_gate:
+        return 'gate unwritten', False
+
     return ('undecided' if verdicts else 'no gate recovered'), False
 
 
-def reconcile(verdict, inferred, blob_state):
+def reconcile(verdict: str, inferred: bool, blob_state: str | None) -> str:
     """
     One verdict out of the register gate and the tuning file's own flag.
 
@@ -244,7 +256,9 @@ def reconcile(verdict, inferred, blob_state):
     return verdict + (' (file agrees)' if inferred else '')
 
 
-def provenance(audit, library, final, derived, masks, bank, upper):
+def provenance(audit: ModuleType, library: dict[int, int],
+               final: dict[int, int], derived: set[int], masks: dict[int, int],
+               bank: int, upper: int) -> tuple[str, int, int]:
     """
     Where a stage's register values come from, as the audit classifies them.
 
@@ -309,7 +323,7 @@ def main() -> int:
     bases = sorted({base for base, _name in banks})
     by_name = {name: base for base, name in banks}
 
-    def span(bank):
+    def span(bank: int) -> tuple[int, int]:
         after = [b for b in bases if b > bank]
         return bank, after[0] if after else 0x10000
 
@@ -348,7 +362,7 @@ def main() -> int:
         print('| Stage | Runs | What it does | Where its values come from |')
         print('|---|---|---|---|')
         group = None
-        for name, grp, state, what, source, open_regs, total in rows:
+        for name, grp, state, what, source, open_regs, _total in rows:
             if grp != group:
                 group = grp
                 print(f'| **{grp}** | | | |')

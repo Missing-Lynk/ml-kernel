@@ -38,6 +38,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from types import ModuleType
 
 HERE = Path(__file__).resolve().parent
 NAMEMAP = HERE.parent.parent.parent / 'archive' / 're' / 'symbols' / 'namemap.py'
@@ -53,7 +54,7 @@ KEEP = ('awb', 'cct', 'cluster', 'white', 'grey', 'noon', 'lum_distance',
         'constrct', 'construct', 'filter_result')
 
 
-def load(path, name):
+def load(path: Path, name: str) -> ModuleType:
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
     sys.modules[name] = mod
@@ -62,7 +63,7 @@ def load(path, name):
     return mod
 
 
-def disassemble(lib, out, raw):
+def disassemble(lib: Path, out: Path, raw: bool) -> Path:
     """objdump the library; namemap needs the encoding column, the walker does not."""
     cmd = ['aarch64-linux-gnu-objdump', '-d']
     if raw:
@@ -74,7 +75,7 @@ def disassemble(lib, out, raw):
     return out
 
 
-def isp_writes(g, lib, func):
+def isp_writes(g: ModuleType, lib: object, func: int) -> set[int]:
     """
     ISP register offsets this function stores to through a mapped bank.
 
@@ -82,7 +83,8 @@ def isp_writes(g, lib, func):
     the displacement of the store. Offsets are reported undecoded, because
     which banks AWB drives is the question and a decode would assume it.
     """
-    base, out = {}, set()
+    base: dict[str, int] = {}
+    out: set[int] = set()
     for _addr, op, a in lib.body.get(func, []):
         if op == 'bl' and a and a[0] == lib.plt.get('ar_dev_pa2va'):
             base = {'x0': 0}
@@ -92,12 +94,14 @@ def isp_writes(g, lib, func):
             m = g.MEM.match(a[1])
             if m and m.group(1) in base:
                 out.add(base[m.group(1)] + int(m.group(2) or 0))
+
             continue
 
         if op in ('mov', 'add') and len(a) >= 2 and a[1] in base:
             delta = g.imm(a[2]) if len(a) > 2 else 0
             if delta is not None:
                 base[a[0]] = base[a[1]] + delta
+
             continue
 
         if op not in g.READS_ONLY and a:
@@ -106,7 +110,7 @@ def isp_writes(g, lib, func):
     return out
 
 
-def main():
+def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -147,7 +151,7 @@ def main():
     for name, addr in sorted(first.items(), key=lambda kv: kv[1]):
         func = lib.func_of(addr)
         regs = isp_writes(g, lib, func) if func else set()
-        offs = {o for o in g.tuning_offsets(lib, func)} if func else set()
+        offs = set(g.tuning_offsets(lib, func)) if func else set()
         regs_all |= regs
         offs_all |= offs
 

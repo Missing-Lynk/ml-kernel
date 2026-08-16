@@ -52,6 +52,7 @@ import re
 import shutil
 import subprocess
 import sys
+from types import ModuleType
 
 HERE = pathlib.Path(__file__).resolve().parent
 OBJDUMP = 'aarch64-linux-gnu-objdump'
@@ -81,7 +82,7 @@ CONSTANT_VALUE = 0x100
 CONSTANT_SITE = (0x197B14, 0x197B3C)
 
 
-def load_audit():
+def load_audit() -> ModuleType:
     """The driver's register tables, via audit-provenance.py."""
     path = HERE / 'audit-provenance.py'
     spec = importlib.util.spec_from_file_location('ar_isp_audit', path)
@@ -94,7 +95,7 @@ def load_audit():
     return mod
 
 
-def window(library, start, stop):
+def window(library: pathlib.Path, start: int, stop: int) -> str:
     if not shutil.which(OBJDUMP):
         sys.exit(f'{OBJDUMP} not found. It reads the vendor library, which is '
                  f'the only source for where these values are built.')
@@ -104,16 +105,17 @@ def window(library, start, stop):
          f'--start-address={start:#x}', f'--stop-address={stop:#x}',
          str(library)],
         capture_output=True, text=True)
+
     if out.returncode:
         sys.exit(f'{OBJDUMP} failed on {library}: {out.stderr.strip()}')
 
     return out.stdout
 
 
-def builds(text, value):
+def builds(text: str, value: int) -> bool:
     """Whether a span builds this constant with a mov, in x or w form."""
-    return bool(re.search(r'\bmov\s+[wx]\d+, #(0x0*%x|%d)\b'
-                          % (value, value), text))
+    return bool(re.search(rf'\bmov\s+[wx]\d+, #(0x0*{value:x}|{value:d})\b',
+                          text))
 
 
 def main() -> int:
@@ -152,7 +154,7 @@ def main() -> int:
                 f'sensor now delivers two this is right and this check is not')
 
     stride = -(-(FRAME_W * BIT_DEPTH // 8) // STRIDE_ALIGN) * STRIDE_ALIGN
-    print(f'\nline buffer:\n')
+    print('\nline buffer:\n')
     print(f'  stride  align({FRAME_W} * {BIT_DEPTH} / 8, {STRIDE_ALIGN}) = '
           f'align({FRAME_W * BIT_DEPTH // 8}, {STRIDE_ALIGN}) = {stride:#x}')
     for off in STRIDE_REGS:
@@ -202,8 +204,8 @@ def main() -> int:
 
         return 1
 
-    print(f'\nall seven follow from the frame, the sensor exposure count and '
-          f'the vendor\'s reserved region\n')
+    print('\nall seven follow from the frame, the sensor exposure count and '
+          'the vendor\'s reserved region\n')
     print(f'note: {BANK + ADDRESS_REGS[0]:#06x} and '
           f'{BANK + ADDRESS_REGS[1]:#06x} carry a physical address the vendor '
           f'reserves, not one this driver allocates. The stage does not run on '

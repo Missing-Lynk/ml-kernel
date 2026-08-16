@@ -26,10 +26,13 @@ a match on a single earlier data point.
 """
 
 import argparse
+import contextlib
 import importlib.util
 import pathlib
 import re
 import sys
+from collections.abc import Callable
+from types import ModuleType
 
 HERE = pathlib.Path(__file__).resolve().parent
 
@@ -41,12 +44,20 @@ HERE = pathlib.Path(__file__).resolve().parent
 # Each adapter returns [(offset, mask, value)] for one abscissa.
 
 
-def de3d_regs(mod, blob, live, q16):
+# What the three per-stage adapters below all look like: one abscissa in,
+# the (register, mask, value) triples the stage would write out.
+Adapter = Callable[[ModuleType, bytes, dict[int, int], int],
+                   list[tuple[int, int, int]]]
+
+
+def de3d_regs(mod: ModuleType, blob: bytes, live: dict[int, int],
+              q16: int) -> list[tuple[int, int, int]]:
     got = mod.de3d_from_blob(blob, q16)
-    return [(r, m, v) for (r, m), v in zip(mod.REGS, got)]
+    return [(r, m, v) for (r, m), v in zip(mod.REGS, got, strict=True)]
 
 
-def rnr_regs(mod, blob, live, q16):
+def rnr_regs(mod: ModuleType, blob: bytes, live: dict[int, int],
+             q16: int) -> list[tuple[int, int, int]]:
     out = [(0x1808 + 4 * i, 0xFFFFFFFF, v)
            for i, v in enumerate(mod.rnr_from_blob(blob, q16))]
     out += [(mod.TAIL_BASE + 4 * i, 0xFFFFFFFF, v)
@@ -55,7 +66,8 @@ def rnr_regs(mod, blob, live, q16):
     return out
 
 
-def lnr_regs(mod, blob, live, q16):
+def lnr_regs(mod: ModuleType, blob: bytes, live: dict[int, int],
+             q16: int) -> list[tuple[int, int, int]]:
     # lnr packs into a seed of bits it does not own, which the check script
     # takes from the captured image. Seeding from the same capture means those
     # bits match by construction, so only the ladder-owned bits discriminate
@@ -79,7 +91,7 @@ STAGES = (
 LO, HI, STEP = 1 << 16, 64 << 16, 16
 
 
-def load(name):
+def load(name: str) -> ModuleType | None:
     path = HERE / name
     if not path.exists():
         return None
@@ -88,44 +100,45 @@ def load(name):
                                                   path)
     mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = mod
-    try:
+    with contextlib.suppress(SystemExit):
         spec.loader.exec_module(mod)
-    except SystemExit:
-        pass
 
     return mod
 
 
-def capture(path):
+def capture(path: pathlib.Path) -> dict[int, int]:
     """Every ISP register in an au-chain capture, by absolute offset."""
-    out, page = {}, None
-    for line in open(path):
-        hit = re.match(r'SECTION isp-([0-9a-f]{2})', line)
-        if hit:
-            page = int(hit.group(1), 16) << 8
-            continue
+    out: dict[int, int] = {}
+    page = None
+    with open(path) as handle:
+        for line in handle:
+            hit = re.match(r'SECTION isp-([0-9a-f]{2})', line)
+            if hit:
+                page = int(hit.group(1), 16) << 8
+                continue
 
-        if line.startswith('SECTION'):
-            page = None
-            continue
+            if line.startswith('SECTION'):
+                page = None
+                continue
 
-        hit = re.match(r'\+0x([0-9a-f]{4}):\s+(.*)', line)
-        if hit and page is not None:
-            base = page + int(hit.group(1), 16)
-            for i, word in enumerate(hit.group(2).split()):
-                out[base + 4 * i] = int(word, 16)
+            hit = re.match(r'\+0x([0-9a-f]{4}):\s+(.*)', line)
+            if hit and page is not None:
+                base = page + int(hit.group(1), 16)
+                for i, word in enumerate(hit.group(2).split()):
+                    out[base + 4 * i] = int(word, 16)
 
     return out
 
 
-def solve(mod, adapter, blob, live):
+def solve(mod: ModuleType, adapter: Adapter, blob: bytes,
+          live: dict[int, int]) -> tuple[tuple[int, int] | None, int]:
     """The widest zero-error abscissa interval, and the register count."""
     probe = adapter(mod, blob, live, LO)
     covered = [(r, m) for r, m, _ in probe if r in live]
     if not covered:
         return None, 0
 
-    def exact(q16):
+    def exact(q16: int) -> bool:
         for r, m, v in adapter(mod, blob, live, q16):
             if r in live and (v & m) != (live[r] & m):
                 return False
@@ -143,7 +156,7 @@ def solve(mod, adapter, blob, live):
     return (lo, hi), len(covered)
 
 
-def main():
+def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
