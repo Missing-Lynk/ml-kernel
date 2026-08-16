@@ -49,6 +49,7 @@ import importlib.util
 import pathlib
 import struct
 import sys
+from types import ModuleType
 
 HERE = pathlib.Path(__file__).resolve().parent
 
@@ -66,15 +67,136 @@ NUMERATOR = 1024
 # packer's caller interpolates between rows or copies one verbatim.
 INTERPOLATE_GATE = 0xA1308
 AEC_COUNT, CT_COUNT = 0xA130C, 0xA1310
+AEC_AXIS = 0xA1318
 TABLE = 0xA1378
 ROW_STRIDE, RECORD_STRIDE = 168, 24
 
 # Byte offsets of the four bounds inside a 24-byte record. The two floats
 # ahead of them are a gain and a rotation angle, which reach other registers.
 RECORD_BOUNDS = 8
+Q24_ONE = 1 << 24
 
 
-def load_audit():
+def f32_q16(bits: int) -> int:
+    """Mirror ar_isp_f32_q16."""
+    mant = (bits & 0x7FFFFF) | 0x800000
+    exp = ((bits >> 23) & 0xFF) - 127
+    shift = 7 - exp
+
+    if bits & 0x80000000:
+        return 0
+
+    if shift >= 32:
+        return 0
+
+    if shift < -8:
+        return 0xFFFFFFFF
+
+    if shift <= 0:
+        return mant << -shift
+
+    return mant >> shift
+
+
+def f32_q8(bits: int) -> int:
+    """Mirror ar_isp_cm_f32_q8."""
+    mant = (bits & 0x7FFFFF) | 0x800000
+    exp = ((bits >> 23) & 0xFF) - 127
+    shift = 15 - exp
+
+    if bits & 0x80000000:
+        return 0
+
+    if shift >= 32:
+        return 0
+
+    if shift < -16:
+        return 0xFFFFFFFF
+
+    if shift <= 0:
+        return mant << -shift
+
+    return mant >> shift
+
+
+def blend_u32(a: int, b: int, t_q24: int) -> int:
+    """Mirror ar_isp_ladder_blend."""
+    return (a * (Q24_ONE - t_q24) + b * t_q24) >> 24
+
+
+def blend_s32(a: int, b: int, t_q24: int) -> int:
+    """Mirror ar_isp_ladder_blend_s32."""
+    acc = a * (Q24_ONE - t_q24) + b * t_q24
+    return acc // Q24_ONE if acc >= 0 else -((-acc) // Q24_ONE)
+
+
+def select_row(blob: bytes, gain_q8: int) -> tuple[int, int]:
+    """Mirror ar_isp_cm2_select."""
+    count = struct.unpack_from('<I', blob, AEC_COUNT)[0]
+    interp = struct.unpack_from('<I', blob, INTERPOLATE_GATE)[0]
+    if count < 1 or count > 5:
+        count = 5
+
+    row = count - 1
+    for i in range(count - 1):
+        hi = f32_q8(struct.unpack_from('<I', blob, AEC_AXIS + i * 8 + 4)[0])
+        if gain_q8 <= hi:
+            row = i
+            break
+
+    t_q24 = 0
+    if interp and row > 0:
+        lo = f32_q8(struct.unpack_from('<I', blob, AEC_AXIS + row * 8)[0])
+        prev_hi = f32_q8(struct.unpack_from('<I', blob,
+                                            AEC_AXIS + row * 8 - 4)[0])
+        if gain_q8 < lo and lo > prev_hi:
+            t_q24 = ((gain_q8 - prev_hi) << 24) // (lo - prev_hi)
+
+    return row, t_q24
+
+
+def gain_q16(blob: bytes, row: int, ct: int = 0) -> int:
+    """The gain field source as unsigned Q16."""
+    at = TABLE + ROW_STRIDE * row + RECORD_STRIDE * ct
+    return f32_q16(struct.unpack_from('<I', blob, at)[0])
+
+
+def bound(blob: bytes, row: int, slot: int, ct: int = 0) -> int:
+    """One signed clamp bound from a record."""
+    at = TABLE + ROW_STRIDE * row + RECORD_STRIDE * ct + RECORD_BOUNDS + slot * 4
+    return struct.unpack_from('<i', blob, at)[0]
+
+
+def row_from_blob(blob: bytes, gain_q8: int, ct: int = 0) -> list[int]:
+    """Mirror ar_isp_cm2_from_blob."""
+    ct_count = struct.unpack_from('<I', blob, CT_COUNT)[0]
+    if ct_count < 1 or ct_count > 1:
+        ct_count = 1
+
+    if ct >= ct_count:
+        ct = 0
+
+    row, t_q24 = select_row(blob, gain_q8)
+    gain = gain_q16(blob, row, ct)
+    if t_q24:
+        gain = blend_u32(gain_q16(blob, row - 1, ct), gain, t_q24)
+
+    bounds = [bound(blob, row, slot, ct) for slot in range(4)]
+    if t_q24:
+        bounds = [
+            blend_s32(bound(blob, row - 1, slot, ct), bounds[slot], t_q24)
+            for slot in range(4)
+        ]
+
+    return [
+        (gain >> 11) & 0x7f,
+        *bounds,
+        NUMERATOR // (bounds[1] - bounds[0]),
+        NUMERATOR // (bounds[3] - bounds[2]),
+    ]
+
+
+def load_audit() -> ModuleType:
     """The driver's register tables, via audit-provenance.py."""
     path = HERE / 'audit-provenance.py'
     spec = importlib.util.spec_from_file_location('ar_isp_audit', path)
@@ -87,11 +209,11 @@ def load_audit():
     return mod
 
 
-def ladder(blob):
+def ladder(blob: bytes) -> tuple[dict[tuple[int, int], tuple[int, ...]], int, int]:
     """The four bounds of every live record, by (aec, ct) index."""
     aec = struct.unpack_from('<I', blob, AEC_COUNT)[0]
     ct = struct.unpack_from('<I', blob, CT_COUNT)[0]
-    rows = {}
+    rows: dict[tuple[int, int], tuple[int, ...]] = {}
     for i in range(aec):
         for j in range(ct):
             at = TABLE + ROW_STRIDE * i + RECORD_STRIDE * j + RECORD_BOUNDS

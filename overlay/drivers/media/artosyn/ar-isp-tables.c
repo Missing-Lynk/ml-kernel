@@ -15,7 +15,7 @@
  *
  * The register stages that read a ladder out of the tuning blob live here too,
  * because they are recomputed from the same blob on the same gain moves as the
- * pages are: rnr, lnr, de3d, cfa, cnf, ccm and dpc.
+ * pages are: rnr, lnr, de3d, cfa, cnf, cm, cm2, ccm and dpc.
  *
  * ar-isp-main.c owns probe, configure, the interrupt, debugfs and remove, and
  * calls into this file through the declarations in ar-isp-priv.h.
@@ -45,6 +45,9 @@
 #include "ar-isp-de3d-geom.h"
 #include "ar-isp-cfa.h"
 #include "ar-isp-cnf.h"
+#include "ar-isp-cm.h"
+#include "ar-isp-cm2.h"
+#include "ar-isp-tone.h"
 
 /*
  * Only reachable now when the tuning file is missing or a table is switched off:
@@ -59,21 +62,44 @@ MODULE_PARM_DESC(seed,
 		 "fall back to the vendor's inherited pages when a table cannot be generated (default on)");
 
 /*
- * Which curve to select out of the tuning file. The vendor derives this from AE
- * and interpolates between adjacent curves; we have no AE, so it is pinned.
+ * The tone pages. The vendor derives both from one AE scalar, which selects a
+ * low and a high entry out of the stage's band table and a weight to blend
+ * them by; a scalar inside a band selects that entry alone. Neither page is
+ * therefore always one of the tuning file's entries, and a driver that can only
+ * pin an index cannot reach the ones between.
  *
- * Curve 3 reproduces one of our captures to within 5 counts of 4095 and curve 2
- * reproduces another, which is the AE selection visible directly in our own
- * data. AE selects the curve at runtime, so any pinned value records one
- * operating point.
+ * `tone_scalar` is the vendor's path: give it the AEC trigger scalar in Q8 and
+ * both stages select and blend as the vendor does. It is off by default because
+ * the scalar's producer is not recovered yet; `plans/isp-tone-selector.md` has
+ * the measurements and the standing candidate.
+ *
+ * With it off, `gamma_curve` and `drc_profile` pin one entry each with no
+ * blend, which is what a forced sweep needs.
+ *
+ * The four defaults below are one operating point expressed two ways, and they
+ * have to stay that way. AR_ISP_TRIGGER_DEFAULT is the scalar the vendor's own
+ * traced cm and cm2 state measures; gamma curve 3 spans [280, 330] and DRC
+ * profile 4 spans [290, 380], so that scalar selects both verbatim with no
+ * blend, and the pinned pair is the same picture the scalar path would build.
+ *
+ * A pinned pair that no scalar can select is not a conservative default, it is
+ * an unreachable one: curve 3 against profile 3 was such a pair, because
+ * profile 3 ends at 270 and curve 3 does not start until 280.
  */
+#define AR_ISP_TRIGGER_DEFAULT		(291 * 256)
+
 static int gamma_curve = 3;
 module_param(gamma_curve, int, 0644);
-MODULE_PARM_DESC(gamma_curve, "tuning-file gamma curve, 0-4, or -1 to leave the page alone");
+MODULE_PARM_DESC(gamma_curve, "tuning-file gamma curve, 0-4, or -1 to leave the page alone; ignored when tone_scalar is set");
 
-static int drc_profile = 3;
+static int drc_profile = 4;
 module_param(drc_profile, int, 0644);
-MODULE_PARM_DESC(drc_profile, "tuning-file DRC profile, or -1 to leave the page alone");
+MODULE_PARM_DESC(drc_profile, "tuning-file DRC profile, 0-5, or -1 to leave the page alone; ignored when tone_scalar is set");
+
+static int tone_scalar = -1;
+module_param(tone_scalar, int, 0644);
+MODULE_PARM_DESC(tone_scalar,
+		 "AEC trigger scalar in Q8, driving gamma and DRC selection and blending as the vendor does; -1 pins gamma_curve and drc_profile instead");
 
 static bool compander = true;
 module_param(compander, bool, 0644);
@@ -164,6 +190,37 @@ static int cnf_gain = 256;
 module_param(cnf_gain, int, 0644);
 MODULE_PARM_DESC(cnf_gain,
 		 "cnf ladder abscissa as a Q8 linear gain (default 256 = 1.0, the cold band; -1 leaves the replayed bank alone)");
+
+/*
+ * cm and cm2 are NOT keyed on the gain the five stages above use. The vendor's
+ * trigger payload carries two scalars and each stage picks one from a flag in
+ * its own tuning header, so the axes say plainly which is which: rnr, lnr,
+ * de3d, cfa and cnf all key on a powers-of-two ladder over 1 to 2048, a linear
+ * gain, while cm and cm2 key on 0 to 550, the same axis the gamma curve and DRC
+ * profile bands use. That is the AEC trigger scalar of plans/isp-tone-selector.md,
+ * whose producer is not recovered yet.
+ *
+ * Driving them off the gain reproduces neither: at the two captured operating
+ * points the gain selects row 0 where the vendor sat on row 1, which would
+ * install cm 0x483c = 36 against the vendor's 33.
+ *
+ * Both default to AR_ISP_TRIGGER_DEFAULT rather than to -1. -1 leaves the
+ * replayed bank, and that bank is NOT the vendor's running state: the setup
+ * replay applies a 1475-entry prefix and these stages' runtime values sit past
+ * the cut, the same way ccm1's matrix does. Measured on the air unit, the
+ * replayed bank holds cm 0x483c = 41 where the streaming vendor holds 33, and
+ * cm2's bounds read 16/32/512/768 against the vendor's 1/2/1006/1023. Deriving
+ * at the default scalar installs the vendor's values on all of them.
+ */
+static int cm_trigger = AR_ISP_TRIGGER_DEFAULT;
+module_param(cm_trigger, int, 0644);
+MODULE_PARM_DESC(cm_trigger,
+		 "cm ladder abscissa as a Q8 AEC trigger scalar, NOT a gain (0 to 550 axis); -1 leaves the replayed bank alone");
+
+static int cm2_trigger = AR_ISP_TRIGGER_DEFAULT;
+module_param(cm2_trigger, int, 0644);
+MODULE_PARM_DESC(cm2_trigger,
+		 "cm2 ladder abscissa as a Q8 AEC trigger scalar, NOT a gain (0 to 550 axis); -1 leaves the replayed bank alone");
 
 /*
  * Copy the page the vendor left at a fixed physical address into one of our
@@ -703,6 +760,94 @@ void ar_isp_cnf_apply(struct ar_isp *isp, bool verbose)
 }
 
 /*
+ * Colour manipulation. The vendor recomputes cm and cm2 on the AE trigger from
+ * their own two-dimensional tables in the tuning file. cm currently uses the
+ * known CT column 0, which is one of the two columns that encode the measured
+ * live row; cm2 has one live CT column in this blob. Both stages pack their
+ * gain into a low-seven-bit field and preserve the surrounding static image.
+ *
+ * The abscissa is the AEC trigger scalar, not the gain the noise ladders use;
+ * see the cm_trigger comment above. The captured registers measure it: cm2's
+ * installed lo2 of 1006 is an interpolation between the blob's 1022 and 1000,
+ * and reproducing it together with cm's row-1 field needs a scalar in
+ * [290.47, 291.81]. Both of those come from the same capture as the gamma
+ * curve 3 and DRC profile 4 pages, whose bands allow [290, 330], so the four
+ * stages agree on one scalar and the colour pair measures it 40 times more
+ * tightly than the tone pages do.
+ */
+void ar_isp_cm_apply(struct ar_isp *isp, bool verbose)
+{
+	u32 field;
+	const u8 *blob;
+
+	if (cm_trigger < 0)
+		return;
+
+	if (!isp->tuning) {
+		if (verbose)
+			dev_info(isp->dev, "cm: replayed bank only, no tuning file\n");
+
+		return;
+	}
+
+	blob = isp->tuning->data;
+	if (ar_isp_get_le32(blob + AR_ISP_CM_HEADER) != 1) {
+		if (verbose)
+			dev_info(isp->dev, "cm: tuning gate clear, bank left replayed\n");
+
+		return;
+	}
+
+	field = ar_isp_cm_gain_field_from_blob(blob, (u32)cm_trigger, 0);
+	ar_isp_rmw(isp, AR_ISP_CM_GAIN_REG, AR_ISP_CM_GAIN_MASK, field);
+
+	if (verbose)
+		dev_info(isp->dev, "cm: ladder at trigger %d.%03u, field %u\n",
+			 cm_trigger >> 8, (cm_trigger & 0xff) * 1000 / 256, field);
+}
+
+void ar_isp_cm2_apply(struct ar_isp *isp, bool verbose)
+{
+	struct ar_isp_cm2_row row;
+	const u8 *blob;
+
+	if (cm2_trigger < 0)
+		return;
+
+	if (!isp->tuning) {
+		if (verbose)
+			dev_info(isp->dev, "cm2: replayed bank only, no tuning file\n");
+
+		return;
+	}
+
+	blob = isp->tuning->data;
+	if (ar_isp_get_le32(blob + AR_ISP_CM2_HEADER) != 1) {
+		if (verbose)
+			dev_info(isp->dev, "cm2: tuning gate clear, bank left replayed\n");
+
+		return;
+	}
+
+	ar_isp_cm2_from_blob(&row, blob, (u32)cm2_trigger, 0);
+
+	ar_isp_rmw(isp, AR_ISP_CM2_GAIN_REG, AR_ISP_CM2_GAIN_MASK,
+		   row.gain_field);
+	writel(row.lo1, isp->base + AR_ISP_CM2_LO1_REG);
+	writel(row.hi1, isp->base + AR_ISP_CM2_HI1_REG);
+	writel(row.lo2, isp->base + AR_ISP_CM2_LO2_REG);
+	writel(row.hi2, isp->base + AR_ISP_CM2_HI2_REG);
+	writel(row.recip1, isp->base + AR_ISP_CM2_RECIP1_REG);
+	writel(row.recip2, isp->base + AR_ISP_CM2_RECIP2_REG);
+
+	if (verbose)
+		dev_info(isp->dev,
+			 "cm2: ladder at trigger %d.%03u, field %u, lo2 %u, recip2 %u\n",
+			 cm2_trigger >> 8, (cm2_trigger & 0xff) * 1000 / 256,
+			 row.gain_field, row.lo2, row.recip2);
+}
+
+/*
  * The colour-space matrix, from the four the vendor library carries.
  *
  * Not gain-keyed and not 3A-driven: the vendor picks one matrix at set_csc time
@@ -736,10 +881,10 @@ void ar_isp_rgb2yuv_apply(struct ar_isp *isp)
 }
 
 /*
- * Recompute the five gain-keyed banks from the tuning file.
+ * Recompute the gain-keyed banks from the tuning file.
  *
  * Must run after every register replay, not only at output arm. The measured
- * correction pass carries 60 of its 101 entries on registers these five stages
+ * correction pass carries 60 of its 101 entries on registers these stages
  * derive: rnr's whole ladder, 22 of lnr's bank, 24 of de3d's and 2 of cnf's,
  * each frozen at the abscissa its capture was taken at. A configure that stops
  * after the replay leaves those banks holding the recording, which is the state
@@ -756,6 +901,150 @@ void ar_isp_ladders_apply(struct ar_isp *isp, bool verbose)
 	ar_isp_de3d_apply(isp, verbose);
 	ar_isp_cfa_apply(isp, verbose);
 	ar_isp_cnf_apply(isp, verbose);
+	ar_isp_cm_apply(isp, verbose);
+	ar_isp_cm2_apply(isp, verbose);
+}
+
+/*
+ * Which entries each tone stage builds from, and how they blend.
+ *
+ * One helper for both the scalar path and the pinned one, so a forced sweep
+ * exercises the same builder the vendor path uses. A pinned index is the
+ * degenerate blend: low equals high and the weight is zero.
+ *
+ * Returns false when the stage should be left alone, which is what a pinned
+ * index of -1 asks for.
+ */
+static bool ar_isp_tone_gamma_pick(const u8 *blob, struct ar_isp_tone_pick *pick)
+{
+	if (tone_scalar >= 0) {
+		ar_isp_tone_pick_gamma(pick, blob, (u32)tone_scalar);
+
+		return true;
+	}
+
+	if (gamma_curve < 0 || gamma_curve >= AR_ISP_GAMMA_BLOB_CURVES)
+		return false;
+
+	pick->low = gamma_curve;
+	pick->high = gamma_curve;
+	pick->t_q12 = 0;
+
+	return true;
+}
+
+static bool ar_isp_tone_drc_pick(const u8 *blob, struct ar_isp_tone_pick *pick)
+{
+	if (tone_scalar >= 0) {
+		ar_isp_tone_pick_drc(pick, blob, (u32)tone_scalar);
+
+		return true;
+	}
+
+	if (drc_profile < 0 || drc_profile >= AR_ISP_DRC_BLOB_PROFILES)
+		return false;
+
+	pick->low = drc_profile;
+	pick->high = drc_profile;
+	pick->t_q12 = 0;
+
+	return true;
+}
+
+/*
+ * Whether a rebuild would change anything.
+ *
+ * The loop writes the scalar every decision but the selection only moves when
+ * it crosses a band edge, which on the vendor's own cadence is a small minority
+ * of frames. Rebuilding a page the block is fetching has a cost and a hazard,
+ * so the comparison lives here, where the selection is known, rather than in
+ * userspace, which would need the blob's band tables to make the same call.
+ *
+ * Seeded impossible so the first apply always builds.
+ */
+static bool ar_isp_tone_changed(const struct ar_isp_tone_pick *gamma,
+				const struct ar_isp_tone_pick *drc, bool force)
+{
+	static struct ar_isp_tone_pick last_gamma = { ~0u, ~0u, ~0u };
+	static struct ar_isp_tone_pick last_drc = { ~0u, ~0u, ~0u };
+	bool changed = force ||
+		       memcmp(&last_gamma, gamma, sizeof(*gamma)) ||
+		       memcmp(&last_drc, drc, sizeof(*drc));
+
+	last_gamma = *gamma;
+	last_drc = *drc;
+
+	return changed;
+}
+
+void ar_isp_tone_apply(struct ar_isp *isp, bool force, bool verbose)
+{
+	const u8 *blob = isp->tuning ? isp->tuning->data : NULL;
+	struct ar_isp_tone_pick gamma = { 0, 0, 0 }, drc = { 0, 0, 0 };
+	bool gamma_built = false, drc_built = false;
+	bool want_gamma, want_drc;
+
+	if (!tables || !blob)
+		return;
+
+	want_gamma = isp->gamma && ar_isp_tone_gamma_pick(blob, &gamma);
+	want_drc = isp->drc && ar_isp_tone_drc_pick(blob, &drc);
+
+	if (!ar_isp_tone_changed(&gamma, &drc, force)) {
+		if (verbose)
+			dev_info(isp->dev, "tone: selection unchanged, pages left\n");
+
+		return;
+	}
+
+	if (want_gamma) {
+		ar_isp_gamma_from_blob(isp->gamma, blob, gamma.low, gamma.high,
+				       gamma.t_q12);
+		ar_isp_gamma_pack_page(isp->gamma + AR_ISP_GAMMA_PAGE,
+				       ar_isp_gamma_page1,
+				       AR_ISP_GAMMA_PAGE1_TAIL);
+		gamma_built = true;
+		if (verbose)
+			dev_info(isp->dev, "tone: gamma %u to %u, weight %u/4096\n",
+				 gamma.low, gamma.high, gamma.t_q12);
+	}
+
+	if (want_drc) {
+		ar_isp_drc_from_blob(isp->drc, blob, drc.low, drc.high,
+				     drc.t_q12);
+		ar_isp_drc_pack_bank(isp->drc + 2 * AR_ISP_DRC_BANK,
+				     ar_isp_drc_tail_bank0);
+		ar_isp_drc_pack_bank(isp->drc + 3 * AR_ISP_DRC_BANK,
+				     ar_isp_drc_tail_bank1);
+		drc_built = true;
+		if (verbose)
+			dev_info(isp->dev, "tone: DRC %u to %u, weight %u/4096\n",
+				 drc.low, drc.high, drc.t_q12);
+	}
+
+	wmb();
+
+	if (gamma_built) {
+		u32 addr = lower_32_bits(isp->gamma_dma);
+
+		writel(addr, isp->base + AR_ISP_TABLE_GAMMA0);
+		writel(addr, isp->base + AR_ISP_TABLE_GAMMA1);
+		writel(addr, isp->base + AR_ISP_TABLE_GAMMA2);
+		writel(AR_ISP_TABLE_COMMIT_ENABLE | AR_ISP_TABLE_GAMMA_BITS,
+		       isp->base + AR_ISP_TABLE_COMMIT);
+	}
+
+	if (drc_built) {
+		writel(lower_32_bits(isp->drc_dma), isp->base + AR_ISP_TABLE_DRC);
+		writel(AR_ISP_TABLE_COMMIT_ENABLE | AR_ISP_TABLE_DRC_BIT,
+		       isp->base + AR_ISP_TABLE_COMMIT);
+	}
+
+	if (verbose)
+		dev_info(isp->dev, "tone: gamma %s, DRC %s, from %s\n",
+			 gamma_built ? "built" : "left",
+			 drc_built ? "built" : "left",
+			 tone_scalar >= 0 ? "the trigger scalar" : "pinned indices");
 }
 
 /*
@@ -777,6 +1066,7 @@ void ar_isp_tables_apply(struct ar_isp *isp)
 	bool tone_built = false;
 	bool lsc_seeded = false, lsc_built = false;
 	bool hdr_lsc_seeded = false;
+	struct ar_isp_tone_pick pick;
 	u8 *page;
 
 	if (!tables)
@@ -790,21 +1080,19 @@ void ar_isp_tables_apply(struct ar_isp *isp)
 		else
 			memset(isp->gamma, 0, AR_ISP_GAMMA_SIZE);
 
-		if (blob && gamma_curve >= 0 &&
-		    gamma_curve < AR_ISP_GAMMA_BLOB_CURVES) {
+		if (blob && ar_isp_tone_gamma_pick(blob, &pick)) {
 			page = isp->gamma;
-			ar_isp_gamma_from_blob(page, blob, gamma_curve);
+			ar_isp_gamma_from_blob(page, blob, pick.low, pick.high,
+					       pick.t_q12);
 
 			/*
 			 * Page 1 is not an AE selection and is not in the tuning
 			 * file: it is a carried constant. Both pages are written
 			 * here, so gamma no longer depends on anything inherited.
 			 *
-			 * Nothing fills the rest of the allocation because nothing
-			 * reads it. The descriptor length at 0x0034/0x0044/0x0054
-			 * is in units of 32 bytes and the replay leaves it at 0x80,
-			 * so the fetch is 0x1000. The allocation stays 0x4000 to
-			 * match the vendor's, not because the block needs it.
+			 * The descriptor length at 0x0034/0x0044/0x0054 is in
+			 * 16-byte records. 0x80 records fetch one 0x800 page. The
+			 * allocation stays 0x4000 to match the vendor's arena.
 			 */
 			ar_isp_gamma_pack_page(page + AR_ISP_GAMMA_PAGE,
 					       ar_isp_gamma_page1,
@@ -821,7 +1109,7 @@ void ar_isp_tables_apply(struct ar_isp *isp)
 		else
 			memset(isp->drc, 0, AR_ISP_DRC_SIZE);
 
-		if (blob && drc_profile >= 0) {
+		if (blob && ar_isp_tone_drc_pick(blob, &pick)) {
 			/*
 			 * The whole page, both halves: the first two banks from
 			 * the tuning file, the second two from the constant the
@@ -831,7 +1119,8 @@ void ar_isp_tables_apply(struct ar_isp *isp)
 			 * compared in one bring-up.
 			 */
 			page = isp->drc;
-			ar_isp_drc_from_blob(page, blob, drc_profile);
+			ar_isp_drc_from_blob(page, blob, pick.low, pick.high,
+					     pick.t_q12);
 			ar_isp_drc_pack_bank(page + 2 * AR_ISP_DRC_BANK,
 					     ar_isp_drc_tail_bank0);
 			ar_isp_drc_pack_bank(page + 3 * AR_ISP_DRC_BANK,

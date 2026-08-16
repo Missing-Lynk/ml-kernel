@@ -4,9 +4,9 @@
  *
  * The five gain-keyed stage headers are written as pure data transforms so the
  * kernel source itself can be compiled on the host; this is the program that
- * does it. It includes ar-isp-rnr.h, ar-isp-lnr.h, ar-isp-de3d.h, ar-isp-cfa.h
- * and ar-isp-cnf.h unmodified out of the driver directory, runs each stage's
- * from_blob at one abscissa and prints what the applier would write.
+ * does it. It includes the gain-keyed stage headers unmodified out of the
+ * driver directory, runs each stage's from_blob at one abscissa and prints what
+ * the applier would write.
  *
  * The check scripts beside it each restate a stage's arithmetic in Python and
  * prove that restatement against captured register state. That proves the
@@ -45,6 +45,8 @@ typedef int64_t s64;
 #include "ar-isp-de3d.h"
 #include "ar-isp-cfa.h"
 #include "ar-isp-cnf.h"
+#include "ar-isp-cm.h"
+#include "ar-isp-cm2.h"
 
 /* Large enough for every sensor's tuning file; the shipped one is 859 KiB. */
 #define BLOB_MAX (2 * 1024 * 1024)
@@ -75,8 +77,9 @@ int main(int argc, char **argv)
 	u32 rnr[AR_ISP_RNR_REGS], tail[AR_ISP_RNR_TAIL_REGS];
 	u32 lnr[AR_ISP_LNR_REGS], de3d[AR_ISP_DE3D_REGS];
 	u32 cfa[AR_ISP_CFA_REGS];
+	struct ar_isp_cm2_row cm2;
 	unsigned int i, run, k;
-	u32 gain_q16, strength;
+	u32 gain_q8, gain_q16, strength;
 	size_t len;
 	u8 *blob;
 
@@ -89,7 +92,8 @@ int main(int argc, char **argv)
 	if (!blob)
 		return 1;
 
-	gain_q16 = (u32)strtoul(argv[2], NULL, 0) << 8;
+	gain_q8 = (u32)strtoul(argv[2], NULL, 0);
+	gain_q16 = gain_q8 << 8;
 
 	ar_isp_rnr_from_blob(rnr, blob, gain_q16);
 	ar_isp_rnr_tail_from_blob(tail, blob, gain_q16);
@@ -135,6 +139,17 @@ int main(int argc, char **argv)
 
 		emit("cnf_static", i, v & mask);
 	}
+
+	emit("cm", 0, ar_isp_cm_gain_field_from_blob(blob, gain_q8, 0));
+
+	ar_isp_cm2_from_blob(&cm2, blob, gain_q8, 0);
+	emit("cm2", 0, cm2.gain_field);
+	emit("cm2", 1, cm2.lo1);
+	emit("cm2", 2, cm2.hi1);
+	emit("cm2", 3, cm2.lo2);
+	emit("cm2", 4, cm2.hi2);
+	emit("cm2", 5, cm2.recip1);
+	emit("cm2", 6, cm2.recip2);
 
 	free(blob);
 

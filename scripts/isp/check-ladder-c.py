@@ -8,7 +8,7 @@ It does not prove the driver: the kernel runs the C in
 overlay/drivers/media/artosyn/ar-isp-*.h, and a divergence between the two is
 invisible to a check that only ever runs the Python.
 
-This closes that gap. ladder-dump.c includes the five stage headers unmodified,
+This closes that gap. ladder-dump.c includes the stage headers unmodified,
 runs each stage's from_blob at one abscissa and prints what the applier would
 write; this script builds it with the host compiler, runs it beside the Python
 models at a spread of abscissae, and refuses to pass on any disagreement.
@@ -96,7 +96,7 @@ def compare(gain, stage, c_values, py_values, failures):
                         f"registers, Python {len(py_values)}")
         return
 
-    for i, (c, py) in enumerate(zip(c_values, py_values)):
+    for i, (c, py) in enumerate(zip(c_values, py_values, strict=True)):
         if c != py & 0xFFFFFFFF:
             failures.append(f"gain {gain} {stage}[{i}]: C {c:#010x} != "
                             f"Python {py & 0xFFFFFFFF:#010x}")
@@ -116,6 +116,8 @@ def main() -> int:
     de3d = load("check-de3d-ladder.py")
     cfa = load("check-cfa-ladder.py")
     cnf = load("check-cnf-ladder.py")
+    cm = load("check-cm-ladder.py")
+    cm2 = load("check-cm2-ladder.py")
 
     failures = []
     compared = 0
@@ -138,7 +140,7 @@ def main() -> int:
 
             compare(gain, "de3d", got["de3d"],
                     [v & m for v, m in zip(de3d.de3d_from_blob(blob, q16),
-                                           de3d_masks(de3d))],
+                                           de3d_masks(de3d), strict=True)],
                     failures)
 
             compare(gain, "cfa", got["cfa"],
@@ -151,6 +153,11 @@ def main() -> int:
                     [cnf.pack(strength),
                      cnf.norm_pack(strength) | cnf.NORM_A_BIT,
                      cnf.norm_pack(cnf.NORM_CONST_B)], failures)
+
+            compare(gain, "cm", got["cm"],
+                    [cm.gain_field_from_blob(blob, gain)], failures)
+            compare(gain, "cm2", got["cm2"],
+                    cm2.row_from_blob(blob, gain), failures)
 
             compared = sum(len(v) for v in got.values())
 

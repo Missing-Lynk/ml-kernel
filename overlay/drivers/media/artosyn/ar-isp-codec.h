@@ -52,6 +52,45 @@
 #define AR_ISP_DRC_BLOB_OFFSET		0x17b1c
 #define AR_ISP_DRC_BLOB_STRIDE		0xc8c
 #define AR_ISP_DRC_BLOB_BANK1		0x404
+#define AR_ISP_DRC_BLOB_PROFILES	6
+
+/*
+ * The tone selector picks a low and a high entry and blends them, so neither
+ * page is always one of the tuning file's entries. Both stages use the same
+ * arithmetic on their raw source words, from isp_sub_drc at 0x1a50d8 and
+ * isp_sub_gamma at 0x195a80:
+ *
+ *	out = (low * (0x1000 - t) + high * t) >> 12
+ *
+ * t is the position inside the gap between the two entries' selector bands,
+ * as an unsigned Q12 fraction truncated by fcvtzu (0x1a534c, 0x1957d0):
+ *
+ *	t = (scalar - band[low].hi) / (band[high].lo - band[low].hi) * 0x1000
+ *
+ * A scalar that lands inside a band selects that entry with low == high, and
+ * both modules then copy their entry verbatim rather than running the blend.
+ *
+ * Gamma blends the 4096-entry curves and decimates afterwards; the order is
+ * the vendor's and it is not interchangeable, because the decimation drops
+ * seven of every eight entries.
+ */
+#define AR_ISP_TONE_BLEND_BITS		12
+#define AR_ISP_TONE_BLEND_ONE		(1u << AR_ISP_TONE_BLEND_BITS)
+
+/*
+ * 32-bit throughout, because the vendor's is: mul, madd and lsr on w
+ * registers. Widening to 64 would differ on overflow, and neither source can
+ * overflow anyway. DRC samples are 20-bit and 0xfffff * 0x1000 is 0xfffff000,
+ * and every word of all five gamma curves is at most 0xffd.
+ */
+static inline u32 ar_isp_tone_blend(u32 low, u32 high, u32 t_q12)
+{
+	if (!t_q12)
+		return low;
+
+	return (low * (AR_ISP_TONE_BLEND_ONE - t_q12) + high * t_q12) >>
+	       AR_ISP_TONE_BLEND_BITS;
+}
 
 /*
  * LSC: a 0x680 fetch in three parts. The first 0x340 is a 10x10 lens-shading
@@ -144,14 +183,27 @@ static inline void ar_isp_gamma_pack_page(u8 *dst, const u16 *samples, u16 tail)
  * non-monotonic entry inverts the response over that interval.
  */
 static inline void ar_isp_gamma_from_blob(u8 *dst, const u8 *blob,
-					  unsigned int index)
+					  unsigned int low, unsigned int high,
+					  u32 t_q12)
 {
-	const u8 *curve = blob + AR_ISP_GAMMA_BLOB_OFFSET + index * AR_ISP_GAMMA_BLOB_STRIDE;
+	const u8 *curve = blob + AR_ISP_GAMMA_BLOB_OFFSET + low * AR_ISP_GAMMA_BLOB_STRIDE;
+	const u8 *other = blob + AR_ISP_GAMMA_BLOB_OFFSET + high * AR_ISP_GAMMA_BLOB_STRIDE;
 	u16 samples[AR_ISP_GAMMA_SAMPLES];
 	unsigned int i;
 
-	for (i = 0; i < AR_ISP_GAMMA_SAMPLES; i++)
-		samples[i] = ar_isp_get_le32(curve + i * AR_ISP_GAMMA_DECIMATE * 4) & 0xfff;
+	/*
+	 * The blend runs over the stored curve, before the decimation, because
+	 * that is the order the vendor uses: it blends 4096 entries into a
+	 * staging buffer and builds the page from that. Decimating first would
+	 * blend one entry in eight and drop the rest of each curve's shape.
+	 */
+	for (i = 0; i < AR_ISP_GAMMA_SAMPLES; i++) {
+		unsigned int at = i * AR_ISP_GAMMA_DECIMATE * 4;
+
+		samples[i] = ar_isp_tone_blend(ar_isp_get_le32(curve + at),
+					       ar_isp_get_le32(other + at),
+					       t_q12) & 0xfff;
+	}
 
 	for (i = 1; i < AR_ISP_GAMMA_SAMPLES; i++)
 		if (samples[i] < samples[i - 1])
@@ -164,7 +216,10 @@ static inline void ar_isp_gamma_from_blob(u8 *dst, const u8 *blob,
 	 * captured curves. Clamped after the loop above, so it cannot sit below
 	 * the last sample the clamp raised.
 	 */
-	u16 tail = ar_isp_get_le32(curve + (AR_ISP_GAMMA_BLOB_ENTRIES - 1) * 4) & 0xfff;
+	u16 tail = ar_isp_tone_blend(
+			ar_isp_get_le32(curve + (AR_ISP_GAMMA_BLOB_ENTRIES - 1) * 4),
+			ar_isp_get_le32(other + (AR_ISP_GAMMA_BLOB_ENTRIES - 1) * 4),
+			t_q12) & 0xfff;
 
 	if (tail < samples[AR_ISP_GAMMA_SAMPLES - 1])
 		tail = samples[AR_ISP_GAMMA_SAMPLES - 1];
@@ -215,17 +270,23 @@ static inline void ar_isp_drc_pack_bank(u8 *dst, const u32 *samples)
  * service tables once the user DRC strength moves off 50.
  */
 static inline void ar_isp_drc_from_blob(u8 *dst, const u8 *blob,
-					unsigned int profile)
+					unsigned int low, unsigned int high,
+					u32 t_q12)
 {
 	u32 samples[AR_ISP_DRC_SAMPLES];
 
 	for (unsigned int b = 0; b < 2; b++) {
 		const u8 *bank = blob + AR_ISP_DRC_BLOB_OFFSET +
-				 profile * AR_ISP_DRC_BLOB_STRIDE +
+				 low * AR_ISP_DRC_BLOB_STRIDE +
 				 b * AR_ISP_DRC_BLOB_BANK1;
+		const u8 *other = blob + AR_ISP_DRC_BLOB_OFFSET +
+				  high * AR_ISP_DRC_BLOB_STRIDE +
+				  b * AR_ISP_DRC_BLOB_BANK1;
 
 		for (unsigned int i = 0; i < AR_ISP_DRC_SAMPLES; i++)
-			samples[i] = ar_isp_get_le32(bank + i * 4);
+			samples[i] = ar_isp_tone_blend(ar_isp_get_le32(bank + i * 4),
+						       ar_isp_get_le32(other + i * 4),
+						       t_q12);
 
 		ar_isp_drc_pack_bank(dst + b * AR_ISP_DRC_BANK, samples);
 	}
