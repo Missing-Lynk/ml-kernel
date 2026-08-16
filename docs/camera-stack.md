@@ -94,7 +94,7 @@ The verdict is cross-checked against a second, independent source: the enable fl
 | `rgb_max_stats` | gate unwritten | per-channel maxima | no ISP register written |
 The `hdr` and `ir` families have banks in the register map and are absent from the pipeline: `hdr` needs a second sensor exposure and `ir` an infrared channel, and this camera module produces neither.
 
-Seven stages recompute continuously as the scene changes rather than sitting at a configured value: `rnr`, `lee_lnr` and `de3d` all interpolate between gain bands in the tuning file. `cfa`, `cnf`, `cm` and `cm2` do the same through their own record layouts. All seven take one abscissa, and current `ml-3a` drives it; the shared gain-keyed gate boot is the remaining hardware proof.
+Seven stages recompute continuously as the scene changes rather than sitting at a configured value: `rnr`, `lee_lnr` and `de3d` all interpolate between gain bands in the tuning file. `cfa`, `cnf`, `cm` and `cm2` do the same through their own record layouts. All seven take one abscissa, and current `ml-aed` drives it; the shared gain-keyed gate boot is the remaining hardware proof.
 
 ## The open drivers
 
@@ -128,7 +128,7 @@ Two earlier readings of this were wrong and are recorded here so they are not re
 
 One register is hardware-owned rather than a difference: `0x8205` is written `0x03` by the mode table and reads back `0x02` on **both** slots.
 
-**Exposure and gain are set outside the mode table.** The vendor drives them from its 3A layer at runtime; the mode table does not touch them. The open driver commits explicit defaults before stream-on (integration 1123 lines, gain code `0x3c`, the vendor's own operating point) through the writable `exposure` and `gain` module parameters, and `ml-3a` updates them live (see "Scene-adaptive state"). Brightness therefore reflects AE state, not pipeline health; judge a capture by the marker count (see "Judging a capture").
+**Exposure and gain are set outside the mode table.** The vendor drives them from its 3A layer at runtime; the mode table does not touch them. The open driver commits explicit defaults before stream-on (integration 1123 lines, gain code `0x3c`, the vendor's own operating point) through the writable `exposure` and `gain` module parameters, and `ml-aed` updates them live (see "Scene-adaptive state"). Brightness therefore reflects AE state, not pipeline health; judge a capture by the marker count (see "Judging a capture").
 
 Method: `glue/camera/au-chain-capture.sh` with `SLOT=a` then `SLOT=b`, diffed with `glue/camera/au-chain-diff.py`. Capture slot A first: it is the reference, and both captures are only meaningful if the front-end gate reads `0x0784043c`.
 
@@ -252,7 +252,7 @@ The cold-boot dark frame is clean (`camera-isp-recovery.md`, "The cold-boot dark
 
 ### Scene-adaptive state: AE closed, the rest still frozen
 
-Parity above is at a fixed operating point. The AE loop is implemented and hardware-validated: `native/ml-3a.c` meters from the `rro_stats` zone grid and drives sensor exposure, sensor gain and the gain-keyed ISP ladder abscissa from one exposure-table index, through `/sys/module/nt99235/parameters/{exposure,gain}`, the ISP `*_gain` Q8 parameters and the debugfs `ladders` re-arm. The validated runs covered the AE law and the original RNR/LNR/DE3D ladder actuation; the current seven-ladder hook adds CFA/CNF/CM/CM2 and still needs its gate-validation boot.
+Parity above is at a fixed operating point. The AE loop is implemented and hardware-validated: `userspace/ml-aed/ml-aed.c` meters from the `rro_stats` zone grid and drives sensor exposure, sensor gain and the gain-keyed ISP ladder abscissa from one exposure-table index, through `/sys/module/nt99235/parameters/{exposure,gain}`, the ISP `*_gain` Q8 parameters and the debugfs `ladders` re-arm. The validated runs covered the AE law and the original RNR/LNR/DE3D ladder actuation; the current seven-ladder hook adds CFA/CNF/CM/CM2 and still needs its gate-validation boot.
 
 Still frozen, held constant where the vendor's 3A moves them: the vendor AE's anti-flicker snap of the integration time to the mains half-period, the gamma table (regenerated continuously from 3A; ours is generated once), the AE-selected tone-table index over the gamma and DRC profiles, and the LTM tile curves (recomputed per frame; ours ships an identity page). The shipped tuning gates AWB off, so `wb` and the traced `ccm1` matrix are static vendor state on this unit. These are loops or selectors to implement, not registers to fix.
 

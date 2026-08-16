@@ -41,7 +41,7 @@ into the AE exposure-table index for comparison.
         --drc-page out/au-tone-tables/pre-drc.bin \\
         --capture out/au-snapshot/registers.txt \\
         --capture out/au-chain/slotA.txt \\
-        --exp-table native/ml-3a-exptable.h
+        --exp-table userspace/ml-aed/ml-aed-exptable.h
 
 Add --gamma-curve/--drc-profile to intersect a capture whose tone pages were
 also identified; the script then reports whether the two agree, which is the
@@ -419,9 +419,9 @@ def invert_gain(binary: pathlib.Path, tuning: pathlib.Path,
 
 
 def read_exp_table(path: pathlib.Path) -> list[int]:
-    """The vendor exposure table, as {gain Q8} per index, from ml-3a's header."""
+    """The vendor exposure table, as {gain Q8} per index, from ml-aed's header."""
     text = pathlib.Path(path).read_text()
-    body = text[text.index('ml3a_exp_table'):]
+    body = text[text.index('mlaed_exp_table'):]
 
     return [int(g) for g, _ in re.findall(r'\{(\d+),\s*(\d+)\}', body)]
 
@@ -516,7 +516,7 @@ def main() -> int:
                          'through the shipped selector and builders and '
                          'compared back; repeatable')
     ap.add_argument('--exp-table',
-                    help='native/ml-3a-exptable.h, to report the gain a capture '
+                    help='userspace/ml-aed/ml-aed-exptable.h, to report the gain a capture '
                          'inverts to as an AE exposure-table index')
     args = ap.parse_args()
 

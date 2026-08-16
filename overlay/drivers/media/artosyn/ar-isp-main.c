@@ -22,7 +22,7 @@
  *
  *  - The VIF frame-start interrupt republishes the driver-owned statistics
  *    buffers when pingpong is enabled.
- *  - ml-3a consumes the AE statistics and drives sensor exposure, gain and the
+ *  - ml-aed consumes the AE statistics and drives sensor exposure, gain and the
  *    ISP ladder abscissas from userspace.
  *  - Geometry is fixed at the vendor's 1920x1080 mode, and CVISP owns the V4L2
  *    capture interface.
