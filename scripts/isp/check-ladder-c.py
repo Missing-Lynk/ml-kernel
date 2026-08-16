@@ -33,6 +33,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from types import ModuleType
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DRIVERS = os.path.normpath(os.path.join(HERE, "..", "..", "overlay",
@@ -43,7 +44,7 @@ DRIVERS = os.path.normpath(os.path.join(HERE, "..", "..", "overlay",
 ABSCISSAE = (1, 256, 512, 700, 1024, 2048, 3200, 4096, 8192, 65535)
 
 
-def load(name):
+def load(name: str) -> ModuleType:
     """Import a check script by file name; the hyphens rule out a plain import."""
     path = os.path.join(HERE, name)
     spec = importlib.util.spec_from_file_location(name.replace("-", "_")[:-3],
@@ -54,7 +55,7 @@ def load(name):
     return module
 
 
-def build(out):
+def build(out: str) -> str:
     """Compile ladder-dump.c against the driver headers with the host compiler."""
     cc = os.environ.get("CC", "cc")
     cmd = [cc, "-O2", "-Wall", "-Wextra", "-I", DRIVERS, "-o", out,
@@ -68,11 +69,12 @@ def build(out):
     return out
 
 
-def run(binary, tuning, gain):
+def run(binary: str, tuning: str,
+        gain: int) -> dict[str, list[int]]:
     """The C output for one abscissa, as {stage: [value, ...]} in emit order."""
     proc = subprocess.run([binary, tuning, str(gain)], check=True,
                           capture_output=True, text=True)
-    out = {}
+    out: dict[str, list[int]] = {}
 
     for line in proc.stdout.splitlines():
         stage, index, value = line.split()
@@ -84,12 +86,13 @@ def run(binary, tuning, gain):
     return out
 
 
-def de3d_masks(module):
+def de3d_masks(module: ModuleType) -> list[int]:
     """The per-register masks the de3d applier writes under."""
     return [m for _, m in module.REGS]
 
 
-def compare(gain, stage, c_values, py_values, failures):
+def compare(gain: int, stage: str, c_values: list[int],
+            py_values: list[int], failures: list[str]) -> None:
     """Record every position where the C and the Python disagree."""
     if len(c_values) != len(py_values):
         failures.append(f"gain {gain} {stage}: C emitted {len(c_values)} "

@@ -65,6 +65,7 @@ The library, tuning file and capture are not in the repository.
 
 import argparse
 import bisect
+import contextlib
 import importlib.util
 import re
 import struct
@@ -103,9 +104,10 @@ ALIAS = {
 }
 
 
-def split_args(text):
+def split_args(text: str) -> list[str]:
     """Split an operand list on commas that are not inside [] brackets."""
-    out, depth, cur = [], 0, ''
+    out: list[str] = []
+    depth, cur = 0, ''
     for ch in text:
         if ch == '[':
             depth += 1
@@ -121,7 +123,7 @@ def split_args(text):
     return out
 
 
-def imm(tok):
+def imm(tok: str) -> int | None:
     """The value of a `#0x...` or `#123` operand, masked to 32 bits."""
     tok = tok.strip()
     if not tok.startswith('#'):
@@ -137,7 +139,7 @@ def imm(tok):
 class Library:
     """A disassembled libmpp_service.so, indexed by function."""
 
-    def __init__(self, path):
+    def __init__(self, path: str) -> None:
         self.path = path
         self.data = Path(path).read_bytes()
         self._load_segments()
@@ -147,7 +149,7 @@ class Library:
 
     # -- ELF ------------------------------------------------------------
 
-    def _load_segments(self):
+    def _load_segments(self) -> None:
         """VMA to file-offset ranges, from the program headers."""
         self.segments = []
         out = subprocess.run(['readelf', '-lW', self.path],
@@ -158,7 +160,7 @@ class Library:
             off, vma, size = (int(m.group(i), 16) for i in (1, 2, 3))
             self.segments.append((vma, vma + size, off - vma))
 
-    def cstr(self, vma, maxlen=300):
+    def cstr(self, vma: int, maxlen: int = 300) -> str:
         """The NUL-terminated string at `vma`, or '' if it is not one."""
         for lo, hi, delta in self.segments:
             if lo <= vma < hi:
@@ -169,7 +171,7 @@ class Library:
                 return self.data[off:end].decode('ascii', 'replace')
         return ''
 
-    def _load_functions(self):
+    def _load_functions(self) -> None:
         """Exact function bounds from the FDEs in .eh_frame."""
         self.fdes = []
         out = subprocess.run(['readelf', '--debug-dump=frames', self.path],
@@ -179,7 +181,7 @@ class Library:
         self.fdes.sort()
         self.starts = [f[0] for f in self.fdes]
 
-    def func_of(self, addr):
+    def func_of(self, addr: int) -> int | None:
         i = bisect.bisect_right(self.starts, addr) - 1
         if i >= 0 and self.fdes[i][0] <= addr < self.fdes[i][1]:
             return self.fdes[i][0]
@@ -187,7 +189,7 @@ class Library:
 
     # -- disassembly ----------------------------------------------------
 
-    def _disassemble(self):
+    def _disassemble(self) -> None:
         """objdump the whole image once, bucketed by containing function."""
         for tool in ('aarch64-linux-gnu-objdump', 'objdump'):
             try:
@@ -218,12 +220,12 @@ class Library:
             args = rest.split('//')[0].split('<')[0].strip()
             self.body[func].append((addr, m.group(2), split_args(args)))
 
-    def _attribute(self):
+    def _attribute(self) -> None:
         """Function to source file, via the adrp/add pairs it materialises."""
         pending, self.file_of = {}, {}
         for func, insns in self.body.items():
             pending.clear()
-            for addr, op, a in insns:
+            for _addr, op, a in insns:
                 if op == 'adrp' and len(a) == 2:
                     try:
                         pending[a[0]] = int(a[1], 16)
@@ -246,7 +248,7 @@ class Library:
                 self.by_module[next(iter(files))].add(func)
 
 
-def init_map(lib, func):
+def init_map(lib: Library, func: int) -> dict[int, int]:
     """
     {private-struct slot: ISP register offset} for one module's init.
 
@@ -337,7 +339,7 @@ def init_map(lib, func):
     return slots
 
 
-def name_of(slots, slot):
+def name_of(slots: dict[int, int], slot: int) -> str:
     """A label for a slot: the top bank, its +4 companion, or the own bank."""
     base = slots[slot]
     if base == 0:
@@ -347,7 +349,7 @@ def name_of(slots, slot):
     return 'bank'
 
 
-def module_slots(lib, mod):
+def module_slots(lib: Library, mod: str) -> dict[int, int]:
     """The slot map for a module, from whichever of its functions is the init."""
     best = {}
     for func in sorted(lib.by_module[mod]):
@@ -359,7 +361,7 @@ def module_slots(lib, mod):
     return best
 
 
-def gates(lib, func, slots):
+def gates(lib: Library, func: int, slots: dict[int, int]) -> list[tuple]:
     """
     (slot, displacement, mask, set|clear) for each RMW through a slot pointer.
 
@@ -371,7 +373,7 @@ def gates(lib, func, slots):
     out = []
     priv, ptr, val, konst = set(), {}, {}, {}
 
-    def kill(reg):
+    def kill(reg: str) -> None:
         ptr.pop(reg, None)
         konst.pop(reg, None)
         for alias in (reg, 'w' + reg[1:], 'x' + reg[1:]):
@@ -430,7 +432,7 @@ def gates(lib, func, slots):
     return out
 
 
-def word_gates(lib, func, slots):
+def word_gates(lib: Library, func: int, slots: dict[int, int]) -> list[tuple]:
     """
     (slot, displacement, zero|value) for whole-word writes through a slot.
 
@@ -469,7 +471,7 @@ def word_gates(lib, func, slots):
     return out
 
 
-def tuning_tests(lib, func):
+def tuning_tests(lib: Library, func: int) -> list[tuple]:
     """
     File offsets of the tuning-image fields this function TESTS.
 
@@ -545,7 +547,7 @@ def tuning_tests(lib, func):
     return out
 
 
-def tuning_offsets(lib, func):
+def tuning_offsets(lib: Library, func: int) -> list[int]:
     """Just the file offsets, for callers that do not need the test site."""
     return [off for off, _addr, _op in tuning_tests(lib, func)]
 
@@ -557,7 +559,7 @@ NO_FALLTHROUGH = {'b', 'br', 'ret'}
 ZERO_ON_TAKEN = {'cbz', 'tbz'}
 
 
-def successors(lib, func):
+def successors(lib: Library, func: int) -> dict[int, list[int]]:
     """{address: [addresses that can follow it]} for one function."""
     out = {}
     insns = lib.body.get(func, [])
@@ -565,10 +567,8 @@ def successors(lib, func):
         nxt = insns[i + 1][0] if i + 1 < len(insns) else None
         targets = []
         if op in COND_BRANCH or op.startswith('b.') or op == 'b':
-            try:
+            with contextlib.suppress(ValueError, IndexError):
                 targets.append(int(a[-1], 16))
-            except (ValueError, IndexError):
-                pass
 
         if op not in NO_FALLTHROUGH and nxt is not None:
             targets.append(nxt)
@@ -577,7 +577,7 @@ def successors(lib, func):
     return out
 
 
-def reachable(succ, start):
+def reachable(succ: dict[int, list[int]], start: int) -> set[int]:
     """Every address reachable from `start`, following the successor map."""
     seen, stack = set(), [start]
     while stack:
@@ -591,7 +591,8 @@ def reachable(succ, start):
     return seen
 
 
-def flag_paths(lib, func, branch_addr, branch_op):
+def flag_paths(lib: Library, func: int, branch_addr: int,
+               branch_op: str) -> tuple[set[int], set[int]]:
     """
     (addresses reached only when the flag is zero, only when it is non-zero).
 
@@ -638,7 +639,7 @@ def flag_paths(lib, func, branch_addr, branch_op):
     return zero - nonzero, nonzero - zero
 
 
-def cached_flags(lib, func):
+def cached_flags(lib: Library, func: int) -> dict[int, int]:
     """
     {private-struct offset: tuning offset} for flags this function caches.
 
@@ -720,7 +721,8 @@ def cached_flags(lib, func):
     return out
 
 
-def cached_tests(lib, func, fields):
+def cached_tests(lib: Library, func: int,
+                 fields: dict[int, int]) -> list[tuple]:
     """(branch address, op) for branches on a cached flag field."""
     out, held, priv = [], {}, set()
     for addr, op, a in lib.body.get(func, []):
@@ -752,7 +754,8 @@ def cached_tests(lib, func, fields):
     return out
 
 
-def derive_polarity(lib, mod, slots):
+def derive_polarity(lib: Library, mod: str,
+                    slots: dict[int, int]) -> dict[tuple[int, int], str]:
     """
     {(register, mask): 'enable' | 'bypass'} for the gates this module writes.
 
@@ -791,7 +794,7 @@ def derive_polarity(lib, mod, slots):
     return out
 
 
-def load_banks():
+def load_banks() -> dict[str, int]:
     """Module to bank, from the validated map in gen-isp-library.py."""
     path = Path(__file__).with_name('gen-isp-library.py')
     spec = importlib.util.spec_from_file_location('gen_isp_library', path)
@@ -807,7 +810,7 @@ def load_banks():
     return banks
 
 
-def read_capture(path):
+def read_capture(path: str) -> dict[int, int]:
     """ISP offset to word, from a `SECTION isp-XX` register dump."""
     regs, section = {}, None
     for line in Path(path).read_text().splitlines():
@@ -826,7 +829,9 @@ def read_capture(path):
     return regs
 
 
-def collect(lib, banks, blob, live, show_all=False):
+def collect(lib: Library, banks: dict[str, int], blob: bytes | None,
+            live: dict[int, int],
+            show_all: bool = False) -> tuple[list[dict], list[str], list[str]]:
     """
     Every module's gates, as records the report and the header both read.
 
@@ -956,7 +961,7 @@ def collect(lib, banks, blob, live, show_all=False):
     return stages, missing, drift
 
 
-def report(stages, missing, drift):
+def report(stages: list[dict], missing: list[str], drift: list[str]) -> None:
     """The human table: one line per gate, three readings and a verdict."""
     print(f'{"stage":16s} {"gate":8s} {"bit":4s} {"live":11s} {"="} '
           f'{"tuning":12s} {"gate":5s} verdict')
@@ -1024,6 +1029,23 @@ FETCH = ('lsc', 'ltm', 'gtm2', 'gamma', 'drc')
 # written sequence 0x01, 0x03, 0x02 is what a small mode field looks like, and
 # the set-and-cleared test cannot tell a mode field from independent gates.
 HW_READBACK = ('dpc',)
+
+# Stage-specific corrections for fields that need evidence beyond bit traffic.
+#
+# af_stats:
+#   * 0x7400 bit 0 is enable-high. The final enable path branches on
+#     is_af_supported at private+820; this fixed-focus sensor leaves it clear,
+#     so the library clears the bit even though the tuning flag is set.
+#   * 0x7558 is the per-frame phase/control word at private+824. It selects
+#     which AF descriptor pair would be used while AF runs.
+# Keyed by stage, then by the (register, mask) the generic walk recovered.
+GATE_DROP: dict[str, set[tuple[int, int]]] = {
+    'af_stats': {(0x7558, 0x00000040)},
+}
+
+GATE_POLARITY: dict[str, dict[tuple[int, int], str]] = {
+    'af_stats': {(0x7400, 0x00000001): 'enable'},
+}
 
 KINDS = {
     None: 'AR_ISP_GATE_UNKNOWN',
@@ -1099,7 +1121,7 @@ struct ar_isp_stage {
 '''
 
 
-def emit_header(stages, out):
+def emit_header(stages: list[dict], out: str) -> None:
     """The generated table, in the same envelope as the other vendor tables."""
     lines = [HEADER_DOC.replace('\\t', '\t')]
 
@@ -1145,7 +1167,31 @@ def emit_header(stages, out):
     print(f'{out}: {len(kept)} stages, {n} gates', file=sys.stderr)
 
 
-def main():
+def apply_corrections(stages: list[dict]) -> None:
+    """Apply reviewed stage-specific fixes to the generic gate recovery."""
+    for st in stages:
+        drop = GATE_DROP.get(st['stage'], set())
+        polarity = GATE_POLARITY.get(st['stage'], {})
+        if not drop and not polarity:
+            continue
+
+        kept = []
+        for gate in st['gates']:
+            key = (gate['reg'], gate['mask'])
+            if key in drop:
+                continue
+
+            if key in polarity:
+                gate = dict(gate)
+                gate['code'] = polarity[key]
+                gate['paired'] = None
+
+            kept.append(gate)
+
+        st['gates'] = kept
+
+
+def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1165,6 +1211,7 @@ def main():
     live = read_capture(args.capture) if args.capture else {}
 
     stages, missing, drift = collect(lib, banks, blob, live, args.all)
+    apply_corrections(stages)
 
     if args.header:
         emit_header(stages, args.header)
