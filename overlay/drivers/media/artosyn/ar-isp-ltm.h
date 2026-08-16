@@ -62,8 +62,8 @@
  * buffered and both strides are 0x80000, the size the vendor allocates; the
  * data it writes occupies less.
  *
- * af_stats is included because a driver still has to publish an address for it
- * even though the module is disabled and nothing writes there.
+ * af_stats' vendor allocation is known, but the module is disabled on this
+ * sensor and no address is published for it.
  */
 #define AR_ISP_LTM_PAGE_ALLOC		0x80000
 #define AR_ISP_LTM_STATS_ALLOC		0x80000

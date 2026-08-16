@@ -62,9 +62,8 @@ struct ar_isp {
 	 * one buffer to both. rro_face is the second, smaller-window grid and
 	 * hist is the Bayer histogram.
 	 *
-	 * af_stats is deliberately absent: it is disabled on this sensor so
-	 * nothing writes its buffer, and its module keeps the vendor's address
-	 * rather than being given a guessed allocation.
+	 * af_stats is deliberately absent: it is disabled on this sensor, so
+	 * nothing writes its buffer and no address is published for it.
 	 */
 	void *rro;
 	dma_addr_t rro_dma;
@@ -139,6 +138,9 @@ void ar_isp_lnr_apply(struct ar_isp *isp, bool verbose);
 void ar_isp_de3d_apply(struct ar_isp *isp, bool verbose);
 void ar_isp_cfa_apply(struct ar_isp *isp, bool verbose);
 void ar_isp_cnf_apply(struct ar_isp *isp, bool verbose);
+void ar_isp_cm_apply(struct ar_isp *isp, bool verbose);
+void ar_isp_cm2_apply(struct ar_isp *isp, bool verbose);
+void ar_isp_tone_apply(struct ar_isp *isp, bool force, bool verbose);
 void ar_isp_rgb2yuv_apply(struct ar_isp *isp);
 void ar_isp_ladders_apply(struct ar_isp *isp, bool verbose);
 void ar_isp_tables_apply(struct ar_isp *isp);

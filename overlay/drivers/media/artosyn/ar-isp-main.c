@@ -206,8 +206,6 @@ static const struct ar_isp_reg ar_isp_output_arm[] = {
 	{ 0x2e74, 0x00000c00 },
 	{ 0x2e00, 0x1f070002 },
 	{ 0x2e90, 0x03000100 },
-	{ 0x75a0, 0x2a660400 },
-	{ 0x75bc, 0x2a660400 },
 	{ 0x6440, 0x2a66a200 },
 	{ 0x6474, 0x2a66a200 },
 	{ 0x600c, 0x2a6a1200 },
@@ -590,7 +588,7 @@ static int ar_isp_arm_set(void *data, u64 val)
 DEFINE_DEBUGFS_ATTRIBUTE(ar_isp_arm_fops, NULL, ar_isp_arm_set, "%llu\n");
 
 /*
- * Ladder-only re-latch for the userspace AE loop: recompute the three
+ * Ladder-only re-latch for the userspace AE loop: recompute the
  * gain-keyed banks from the current Q8 parameters without the full output
  * re-arm, in the vendor's apply order. The vendor issues the equivalent
  * register traffic on every AE gain move at frame rate, so this is safe
@@ -600,13 +598,36 @@ static int ar_isp_ladders_set(void *data, u64 val)
 {
 	struct ar_isp *isp = data;
 
-	if (val)
+	if (val) {
 		ar_isp_ladders_apply(isp, false);
 		ar_isp_de3d_geom_apply(isp, false);
+	}
 
 	return 0;
 }
 DEFINE_DEBUGFS_ATTRIBUTE(ar_isp_ladders_fops, NULL, ar_isp_ladders_set, "%llu\n");
+
+/*
+ * Tone-table re-latch. This rebuilds the gamma and DRC pages from the tuning
+ * blob and republishes the descriptors without replaying the whole ISP register
+ * table.
+ *
+ * Write 1 for the loop's cadence: the pages are rebuilt only when the scalar
+ * has moved the selection, which is the minority of frames and the reason the
+ * comparison is made in the driver rather than in userspace. Write 2 to force a
+ * rebuild, which is what a forced sweep over gamma_curve and drc_profile needs,
+ * because those parameters change the selection without changing the scalar.
+ */
+static int ar_isp_tone_set(void *data, u64 val)
+{
+	struct ar_isp *isp = data;
+
+	if (val)
+		ar_isp_tone_apply(isp, val > 1, false);
+
+	return 0;
+}
+DEFINE_DEBUGFS_ATTRIBUTE(ar_isp_tone_fops, NULL, ar_isp_tone_set, "%llu\n");
 
 /*
  * The one ISP, for the exported bring-up call. Single block, single node.
@@ -917,6 +938,8 @@ static int ar_isp_probe(struct platform_device *pdev)
 				   &ar_isp_arm_fops);
 	debugfs_create_file_unsafe("ladders", 0600, isp->debugfs, isp,
 				   &ar_isp_ladders_fops);
+	debugfs_create_file_unsafe("tone", 0600, isp->debugfs, isp,
+				   &ar_isp_tone_fops);
 	debugfs_create_u32("irq_events", 0400, isp->debugfs, &isp->irq_events);
 	debugfs_create_u32("irq_stats_events", 0400, isp->debugfs,
 			   &isp->irq_stats_events);

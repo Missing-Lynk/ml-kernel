@@ -55,6 +55,7 @@ ratchets downward and a regression is a failure rather than a footnote.
     kernel/scripts/isp/audit-provenance.py
 """
 
+import importlib.util
 import pathlib
 import re
 import sys
@@ -75,7 +76,7 @@ BASELINE = 0
 # The count of registers that still need a register read off a running unit.
 # This is the stricter bar: a value can have a known provenance and still be a
 # recording. Ratchets the same way.
-DEVICE_BASELINE = 23
+DEVICE_BASELINE = 2
 
 # The frame and statistics-grid dimensions the driver configures. A register
 # whose value is one of these, or a pair of them packed into halfwords, is
@@ -87,81 +88,14 @@ GEOMETRY = {1920, 1080, 960, 540, 36, 16, 1088, 1092, 1928, 241, 135}
 
 # The vendor's MMZ physical range.
 #
-# The class name says the driver replaces these with its own allocation at arm
-# time. **That is true of 20 of the 34 and false of the other 14**, which have
-# no reference anywhere in the driver outside the generated table: 0x1d68,
-# 0x1dc0, 0x1e5c, 0x1f88, 0x5810, 0x5828, 0x5840, 0x5858, 0x6c90, 0x6d38,
-# 0x7574, 0x758c, 0x75a0, 0x75bc. The driver publishes the vendor's carveout
-# address and leaves it. For the four lut3d ones it also sets the descriptor
-# valid bit over them, so the block is pointed at vendor memory and armed.
-# Inert today because lut3d is disabled, and worth fixing before it is not.
-#
-# The fourteen the driver publishes and never replaces. None has a driver-owned
-# buffer: thirteen appear only in the generated table, and 0x75a0 and 0x75bc
-# appear once more in ar_isp_output_arm carrying the same vendor address.
-#
-# Twelve belong to stages that do not run here: the HDR statistics at 0x1d68,
-# 0x1dc0, 0x1e5c and 0x1f88 need a second sensor exposure, lut3d at 0x5810 to
-# 0x5858 is disabled, and awbs_stats at 0x6c90 and 0x6d38 is gated off. Those
-# are inert while that holds.
-#
-# The four af_stats ones are inert too, and settling that took real work
-# because two sources appeared to disagree. ar-isp-priv.h says af_stats is
-# disabled on this sensor; the tuning flag at blob+0xd5484 reads 1.
-#
-# **ar-isp-priv.h is right.** The flag gates only the tuning-driven half.
-# isp_sub_enable at 0x1f4e28 has the final word and branches on
-# is_af_supported at priv+820, an external algorithm registration set only by
-# a 0xb0d ctl that nothing in this driver sends. With it clear the routine
-# clears bit 0 of 0x7400 and zeroes 0x75ac and 0x75b0, which is exactly what
-# this driver installs and what the vendor capture reads back.
-#
-# Two corrections follow. ar-isp-gates.h has the polarity inverted for 0x7400
-# bit 0, 0x75ac and 0x75b0: they are enable-high, not bypass-high, which is
-# why isp-pipeline.py calls the stage undecided. And 0x7558 is not a gate at
-# all; it is a per-frame A/B phase select on priv+824 that this driver freezes,
-# harmless only while the block is off.
-# **Three of these are enabled accumulators pointing at vendor memory.**
-# 0x1d68, 0x1dc0 and 0x1f88 are engine+0x40, the buffer address, of the three
-# HDR rro instances, and each instance's accumulator enable at engine+0x48
-# reads 1. ar_isp_stats_arm in ar-isp-tables.c re-arms rro, rro_face and hist
-# from driver-owned allocations and does not touch these, so they keep the
-# vendor's MMZ address.
-#
-# They are believed inert only because the HDR path never receives a second
-# exposure on this sensor module, so nothing clocks the accumulators. That is
-# a weaker guarantee than the af_stats one, where the enable itself is provably
-# clear. If anything ever triggers them they DMA into memory this driver has
-# not reserved. Worth settling on the device, and worth not writing them
-# meanwhile: the enable and the address are both ours to withhold.
-#
-# 0x6c90 and 0x6d38 are one pointer written twice, `ldr x0,[x23,#40]` then
-# stored at 0x1f7818 and 0x1f781c, which is why they are equal.
-#
-# The layout is computable even though the base is not, which is the route to
-# making these device-independent without waiting on anything.
-#
-# In the 0x2b arena five consecutive buffers sit at an exact constant stride of
-# 0x2a00, running from the four lut3d descriptors straight into af_stats
-# 0x7574, with 0x758c 0x800 further on. That stride is the lut3d flush size
-# 0x2800 plus 0x200, and it holds across two different modules, so this is one
-# arena allocator with a fixed record size rather than per-module mallocs. In
-# the 0x2a arena the stride between hdr_rro instances is 0x11000, which is the
-# 0x8000 buffer extent double-buffered plus 0x1000.
-#
-# So the offsets within an arena follow from buffer extents this tree already
-# records. Only the arena base depends on what the vendor allocated first, and
-# a driver that allocates its own arena computes every one of these addresses
-# rather than replaying them. That is the fix, and it needs no device.
+# Values in this range are physical addresses. The driver replaces active
+# coefficient and statistics descriptors with its own allocations. The list below
+# is a regression watch list for disabled-stage descriptors that used to survive
+# the setup replay: HDR statistics, LUT3D, AWB statistics and AF statistics.
+# They should be absent from the final register set. If one of those stages is
+# enabled later, its driver path must allocate and publish a buffer it owns.
 DMA_NOT_OVERWRITTEN = (0x1D68, 0x1DC0, 0x1E5C, 0x1F88, 0x5810, 0x5828, 0x5840,
                        0x5858, 0x6C90, 0x6D38, 0x7574, 0x758C, 0x75A0, 0x75BC)
-
-# Two further gaps this rule does not see. ar_isp_output_arm in ar-isp-main.c
-# is not one of the tables load_tables() reads, so the eight vendor addresses
-# it writes are invisible here, as are the different values it installs at
-# 0x2e00 and 0x2e90. And there is no alignment test: any value in the 32 MB
-# window passes, which happens to be safe today since all 34 are 256-byte
-# aligned.
 DMA_LO, DMA_HI = 0x2A000000, 0x2C000000
 
 # What a bank does to the shipped image, from the enable states in
@@ -169,7 +103,7 @@ DMA_LO, DMA_HI = 0x2A000000, 0x2C000000
 # an enabled stage changes the picture, one on a quiescent stage cannot, and a
 # statistics bank configures an accumulator the driver already owns.
 IMAGE_PATH = {'cfa', 'dpc', 'rnr', 'ltm', 'de3d', 'drc', 'ccm1', 'rgb2yuv',
-              'cnf', 'lnr', 'cm', 'cm2', 'lsc', 'wb', 'qgg', 'acm', 'blc'}
+              'cnf', 'lnr', 'cm', 'cm2', 'lsc', 'wb', 'qgg', 'blc'}
 STATISTICS = {'rro_stats', 'rro_face_stats', 'raw_hist_stats', 'rgb_hist_stats',
               'rgb_max_stats', 'awbs_stats', 'af_stats', 'derolling_stats',
               'hdr_rro_0_stats', 'hdr_rro_1_stats', 'hdr_rro_face_stats',
@@ -209,9 +143,15 @@ EXPLAINED = {
             'is a constant in the same function all give 16, compander 0x780 '
             'against a 0x7800 flush, lut3d 0x280 against 0x2800, HDR 0x80 '
             'against 0x800. ar-isp-colour.h already states it for lut3d',
+    0x0038: 'gamma descriptor 0 valid/apply word, set beside the page 0 '
+            'descriptor after the generated page is published',
     0x0044: 'gamma descriptor 1 length, the same 0x800 page; the three gamma '
             'slots are channel aliases on one buffer',
+    0x0048: 'gamma descriptor 1 valid/apply word, set beside the page 1 '
+            'descriptor after the generated page is published',
     0x0054: 'gamma descriptor 2 length, the same 0x800 page',
+    0x0058: 'gamma descriptor 2 valid/apply word, set beside the page 2 '
+            'descriptor after the generated page is published',
     0x0064: 'DRC descriptor length: 0x100 records of 16 bytes is 0x1000. The '
             'DRC flush covers the whole 0x2000 allocation rather than the '
             'content, which is what made 32 look right',
@@ -349,6 +289,9 @@ EXPLAINED.update({
             'debug one enabling everything',
     0x00D0: 'ISP top level: the second interrupt-enable mask, stored by the '
             'same branch at 0x1d3e0c',
+    0x00D4: 'ISP top level: the second status/command word. The output-arm '
+            'sequence writes the same 0x100 event the vendor repeats in its '
+            'per-frame cycle',
 })
 
 # af_stats. The metering window is a region of interest, a four-float constant
@@ -366,6 +309,8 @@ EXPLAINED.update({
             '9-bit fields',
     0x7414: 'af_stats: the block size, the metering region over 17 and 10, in '
             'two 10-bit fields',
+    0x7558: 'af_stats: the per-frame A/B phase selector on priv+824. The '
+            'fixed-focus sensor leaves the AF engine disabled',
     0x7570: 'af_stats: a constant stored by the per-frame re-arm at 0x1f55bc, '
             'one phase of an A/B toggle on priv+824 whose other phase stores '
             'zero here',
@@ -510,11 +455,11 @@ EXPLAINED[0x7058] += ('. Bits 14 and 19 are hardware state the vendor preserves 
                       'by reading before writing; this driver installs them as '
                       'a flat captured constant instead')
 
-# The colour and noise stages. wb, cm and cm2 all pack a gain into a field of
-# their first words, each from its own ladder in the tuning file, and the three
-# agree on one AE operating point: cm2's interpolation fraction is pinned by
-# the lo2 bound check-cm2-ladder.py already proves, and the abscissa that
-# implies lands cm on the row its own value needs.
+# The colour and noise stages. wb is fixed by the AWB-off branch. cm and cm2
+# both pack a gain into a field of their first words, each from its own ladder
+# in the tuning file, and agree on one AE operating point: cm2's interpolation
+# fraction is pinned by the lo2 bound check-cm2-ladder.py already proves, and
+# the abscissa that implies lands cm on the row its own value needs.
 EXPLAINED.update({
     0x5004: 'wb: a red gain in Q8 masked to 12 bits, stored at 0x1adf74. The '
             'AWB gate at blob+0xbbe98 reads 0, the same flag awbs_stats is '
@@ -607,6 +552,8 @@ EXPLAINED.update({
             'bank+0x24 and bank+0x28. The alternate branch at 0x1b6608 writes '
             'zero here instead, selected by the toggle at priv+1560, so the '
             'register alternates across table re-arms',
+    0x4C3C: 'lsc descriptor valid/apply bit, set after the driver-owned LSC '
+            'page is published',
 })
 
 EXPLAINED.update({
@@ -625,8 +572,8 @@ EXPLAINED.update({
 #
 # This is weaker than a derivation and is deliberately its own class rather
 # than folded into EXPLAINED. **The moment a stage here is enabled its
-# registers become recordings again**, and for awbs_stats that is a live
-# prospect: it feeds AWB, which is still to be implemented.
+# registers become recordings again**. On this unit awbs_stats feeds an AWB
+# path the vendor configured off, so enabling it would be beyond-vendor work.
 #
 # **The two readings are not independent, and the earlier wording here claiming
 # they were was wrong.** The library derives the register bit from the blob
@@ -659,28 +606,28 @@ DISABLED_STAGES = {
 # **This class is not parity, and it is the one place where reproducing the
 # vendor is probably the wrong thing to do.** Writing a recorded value into a
 # register the block owns is a defect waiting to happen; the right fix is
-# usually to stop writing it. **Nothing in the driver acts on this yet: none of
-# these offsets is in ar_isp_hw_owned in ar-isp-main.c, so the driver still
-# writes every one.** Each entry says what the evidence is, because
-# "read but never written" is much stronger than "never referenced at all",
-# and neither has been confirmed against the device yet.
+# usually to stop writing it. Each entry says what the evidence is, because
+# "read but never written" is much stronger than "never referenced at all".
+#
+# **Seven of these are no longer written.** The trim A/B in out/au-trim-ab/,
+# read by check-trim-effect.py, settled them, and gen-isp-defaults.py's
+# TRIM_EXCLUDED carries the verdict for each. They stay listed here because the
+# class is what they are, not what the driver does with them; 0x6518 and 0x651c
+# are the two the driver still writes, and they are the two the audit reports as
+# needing a device.
 HARDWARE_OWNED = {
     # Comparing the installed values against five device captures, 0x6060,
     # 0x6478, 0x647c and 0x6514 never read back what this driver writes, while
     # 0x6518, 0x651c and 0x705c always do, which is why ar_isp_kept holds the
     # first two.
     #
-    # **That comparison is weaker than the test ar-isp-main.c already records
-    # and must not override it.** That one toggled the trim parameter and
-    # re-read, which separates "the write did nothing" from "a later applier
-    # overwrote it"; a snapshot cannot. It found 0x7054 lands in its high half
-    # and deliberately left it in place rather than skip it on half a result,
-    # and the captures agree: the high half matches in three of five. It also
-    # records 0x6514 as unmeasured, on a page that capture did not dump.
-    #
-    # So the only safe reading here is that these registers are hardware-owned,
-    # which is what this class says. Deciding which writes to drop needs the
-    # A/B rerun, not this comparison.
+    # **That comparison is weaker than the A/B, which has since been run.** The
+    # A/B toggles the trim parameter and re-reads, which separates "the write
+    # did nothing" from "a later applier overwrote it"; a snapshot cannot. It
+    # confirms the four counters and 0x00ec never take effect, shows 0x7054's
+    # low half never taking the written value while its high half agrees only
+    # with the pass on, and shows 0x705c's write genuinely landing. 0x6514 stays
+    # unmeasured: no sweep layout has dumped its page yet.
     #
     # These four are counters, and the evidence is now positive rather than an
     # absence. Each sits exactly one word past the end of its own module's
@@ -752,9 +699,41 @@ def reg_arrays(path: pathlib.Path) -> dict[str, list[tuple[int, int]]]:
     return arrays
 
 
+def check_generator_exclusions(arrays: dict[str, list[tuple[int, int]]]) -> None:
+    """
+    The generated header must agree with the generator's own exclusion lists.
+
+    ar-isp-defaults.h says "do not edit" and is not regenerated on every change,
+    so an exclusion that lives only in the emitted file is a hand edit that the
+    next regeneration silently undoes. Every one of them is a decision with a
+    reason recorded in gen-isp-defaults.py; this asserts that the file in the
+    tree is the file that generator would emit, for those decisions at least.
+    """
+    spec = importlib.util.spec_from_file_location(
+        'ar_isp_gen', HERE / 'gen-isp-defaults.py')
+    gen = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = gen
+    spec.loader.exec_module(gen)
+
+    setup = arrays['ar_isp_setup_1080p60']
+    bad = [(off, val) for off, val in setup
+           if off in gen.SETUP_EXCLUDED_DISABLED_WRITES]
+    bad += [(off, val) for off, val in setup
+            if off in gen.SETUP_DISABLED_ENABLES and val]
+    bad += [(off, val) for off, val in arrays['ar_isp_vendor_trim']
+            if off in gen.TRIM_EXCLUDED]
+    if bad:
+        listed = ', '.join(f'{off:#06x}={val:#x}' for off, val in sorted(bad))
+        sys.exit(f'{DEFAULTS.name} carries writes gen-isp-defaults.py excludes: '
+                 f'{listed}. Either the header predates the exclusion or the '
+                 f'exclusion was never encoded, and a regeneration would '
+                 f'disagree with the tree either way.')
+
+
 def load_tables() -> tuple[dict[int, int], dict[int, int], dict[int, str]]:
     """The library images, the driver's final value, and which table won."""
     arrays = reg_arrays(DEFAULTS) | reg_arrays(MAIN)
+    check_generator_exclusions(arrays)
     library = dict(reg_arrays(LIBRARY)['ar_isp_library'])
 
     final: dict[int, int] = {}
@@ -1055,40 +1034,35 @@ def main() -> int:
 
     regs = {o for o in DMA_NOT_OVERWRITTEN if o in final} - counted
     counted |= regs
-    print(f'         {len(regs):5}  vendor DMA the driver never overwrites: we '
-          f'publish the vendor\'s carveout address')
-    # For most of the device-sourced set, "derive the value" is the wrong
-    # goal and always was. A register the block owns has no software source to
-    # find, and one on a stage that does not run has no correct value at all.
-    # The device-independent answer is to stop writing it. Recorded per group
-    # so the remaining work is a decision list rather than a search.
-    print('\n  what would make each device-sourced group independent:')
-    for group, fix in (
-            ('hardware-owned',
-             'rerun the trim A/B in ar-isp-main.c over the pages it missed, '
-             'then skip the writes it shows do nothing. Do not decide this '
-             'from snapshot comparison: that cannot tell a dead write from '
-             'one a later applier overwrites, and it already disagrees with '
-             'the A/B on 0x7054'),
-            ('stage switched off',
-             'stop writing them while the stage is off, and derive them from '
-             'its packer on the day it is enabled'),
-            ('vendor DMA, inert stages',
-             'stop writing the twelve on HDR, lut3d and awbs_stats, which the '
-             'pipeline table reports as absent, off and off. All fourteen are '
-             'in ar_isp_setup_1080p60, which ar_isp_is_hw_owned does not '
-             'guard, so this means dropping them from the generated setup '
-             'table rather than adding them to a list'),
-            ('vendor DMA, af_stats',
-             'give af_stats a driver-owned buffer, after settling whether the '
-             'stage runs: ar-isp-priv.h says it is disabled, the tuning flag '
-             'at blob+0xd5484 says it is not'),
-            ('device capture 0x0c10',
-             'recover the vendor write; ar_isp_output_arm carries the same '
-             'register as a 3-then-2 sequence, so the source is in that path'),
-            ('device capture 0x0d08',
-             'recover the vendor write; no image covers the offset')):
-        print(f'    {group}: {fix}')
+    if regs:
+        print(f'         {len(regs):5}  vendor DMA the driver never overwrites: '
+              f'we publish the vendor\'s carveout address')
+
+    actions = []
+    if any(classify(off) == 'hardware-owned' for off in sourced):
+        actions.append((
+            'hardware-owned',
+            'widen the sweep to the pages the A/B missed, then rerun '
+            'check-trim-effect.py. 0x6518 and 0x651c read a stable 1 on every '
+            'capture, so a sweep that dumps page 0x65 with the trim pass off '
+            'settles whether that 1 is theirs or ours. Do not decide this from '
+            'snapshot comparison: it cannot tell a dead write from one a later '
+            'applier overwrites'))
+    if any(classify(off) == 'stage switched off' for off in sourced):
+        actions.append((
+            'stage switched off',
+            'stop writing them while the stage is off, and derive them from '
+            'its packer on the day it is enabled'))
+    if regs:
+        actions.append((
+            'vendor DMA',
+            'drop disabled-stage vendor addresses from ar_isp_setup_1080p60 '
+            'or publish driver-owned allocations before enabling the stage'))
+
+    if actions:
+        print('\n  what would make each device-sourced group independent:')
+        for group, fix in actions:
+            print(f'    {group}: {fix}')
 
     unexplained = tally['UNEXPLAINED']
     backed = len(final) - unexplained

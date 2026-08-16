@@ -42,6 +42,7 @@ import importlib.util
 import pathlib
 import re
 import sys
+from types import ModuleType
 
 HERE = pathlib.Path(__file__).resolve().parent
 
@@ -53,7 +54,7 @@ WANTED = (0x00EC, 0x6060, 0x6478, 0x647C, 0x6514, 0x6518, 0x651C, 0x7054,
           0x5858, 0x6C90, 0x6D38, 0x7574, 0x758C, 0x75A0, 0x75BC)
 
 
-def load_audit():
+def load_audit() -> ModuleType:
     path = HERE / 'audit-provenance.py'
     spec = importlib.util.spec_from_file_location('ar_isp_audit', path)
     mod = importlib.util.module_from_spec(spec)
@@ -66,7 +67,15 @@ def load_audit():
 
 
 def read_sweep(path: pathlib.Path) -> dict[int, int]:
-    """Every register a capture dumps, by absolute offset."""
+    """
+    Every register a capture dumps, by absolute offset.
+
+    Two capture layouts are in the tree and both are read here. The snapshot
+    scripts emit "--- isp +0x1800 (64 words) ---" with offsets relative to that
+    base; au-chain-capture.sh emits "SECTION isp-18" with offsets relative to the
+    page. The A/B sweeps in out/au-trim-ab/ are the second kind, so reading only
+    the first made the one measurement this script exists for unrunnable.
+    """
     out: dict[int, int] = {}
     base = None
     for line in path.read_text().splitlines():
@@ -75,17 +84,40 @@ def read_sweep(path: pathlib.Path) -> dict[int, int]:
             base = int(hit.group(1), 16)
             continue
 
+        hit = re.match(r'SECTION isp-([0-9a-f]{2})\b', line)
+        if hit:
+            base = int(hit.group(1), 16) << 8
+            continue
+
+        # Any other section is a different block; its offsets are not ours.
+        if line.startswith('SECTION'):
+            base = None
+            continue
+
         hit = re.match(r'\s*\+(0x[0-9a-f]+):\s*(.*)', line)
         if hit and base is not None:
             off = base + int(hit.group(1), 16)
             for i, word in enumerate(hit.group(2).split()):
-                out[off + 4 * i] = int(word, 16)
+                if re.fullmatch(r'[0-9a-f]{8}', word):
+                    out[off + 4 * i] = int(word, 16)
 
     if not out:
-        sys.exit(f'{path}: no "--- isp +0x...." blocks found, so this is not a '
-                 f'register sweep in the format this script reads')
+        sys.exit(f'{path}: no "--- isp +0x...." or "SECTION isp-.." blocks '
+                 f'found, so this is not a register sweep in either format '
+                 f'this script reads')
 
     return out
+
+
+def load_generator() -> ModuleType:
+    """gen-isp-defaults.py, for the exclusion list and its reasons."""
+    path = HERE / 'gen-isp-defaults.py'
+    spec = importlib.util.spec_from_file_location('ar_isp_gen', path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+
+    return mod
 
 
 def main() -> int:
@@ -96,12 +128,18 @@ def main() -> int:
                     help='a sweep taken with the trim pass enabled')
     ap.add_argument('--off', required=True, type=pathlib.Path,
                     help='a sweep taken with it disabled, same boot')
+    ap.add_argument('--control', nargs=2, type=pathlib.Path,
+                    metavar=('ONE', 'TWO'),
+                    help='two sweeps taken at the SAME trim setting. Any '
+                         'register that moves between them is free-running, '
+                         'and the A/B verdict for it is withheld rather than '
+                         'reported as a response to the trim pass')
     ap.add_argument('--all', action='store_true',
                     help='report every trim entry, not just the ones that '
                          'block the provenance audit')
     args = ap.parse_args()
 
-    for path in (args.on, args.off):
+    for path in (args.on, args.off, *(args.control or ())):
         if not path.exists():
             sys.exit(f'{path}: not found')
 
@@ -126,11 +164,40 @@ def main() -> int:
                  'is no trim pass to measure')
 
     written = dict(trim)
+    excluded = load_generator().TRIM_EXCLUDED
     look = sorted(written) if args.all else [r for r in WANTED if r in written]
-    absent = [f'{r:#06x}' for r in WANTED if r not in written and not args.all]
+
+    # A register that was measured and then dropped leaves the trim table, and
+    # reporting nothing about it would make the exclusion untestable from the
+    # moment it lands. The sweeps still cover it, so its current state is shown
+    # against the reason it was excluded for.
+    gone = [r for r in WANTED if r not in written and r in excluded]
+    if gone and not args.all:
+        print('excluded from the trim table by gen-isp-defaults.py. The A/B no '
+              'longer has a written value to compare, so this is the state the '
+              'exclusion leaves behind:\n')
+        for reg in gone:
+            a, b = on.get(reg), off.get(reg)
+            state = ('not in the sweep' if a is None or b is None
+                     else f'on {a:#010x}, off {b:#010x}')
+            print(f'  {reg:#06x}  {state}\n          {excluded[reg]}')
+
+        print()
+
+    absent = [f'{r:#06x}' for r in WANTED
+              if r not in written and r not in excluded and not args.all]
     if absent:
-        print(f'not in the trim table, so this A/B says nothing about them: '
-              f'{", ".join(absent)}\n')
+        print(f'not in the trim table and not excluded, so this A/B says '
+              f'nothing about them: {", ".join(absent)}\n')
+
+    control: set[int] = set()
+    if args.control:
+        c1, c2 = (read_sweep(p) for p in args.control)
+        shared = c1.keys() & c2.keys()
+        control = {r for r in shared if c1[r] != c2[r]}
+        print(f'control pair: {len(shared)} shared registers, {len(control)} '
+              f'move between two captures at the same trim setting. Those are '
+              f'free-running and this A/B cannot judge them.\n')
 
     verdicts: dict[str, list[int]] = {}
     print(f'{"reg":>8} {"trim writes":>12} {"on":>11} {"off":>11}  verdict')
@@ -138,6 +205,9 @@ def main() -> int:
         a, b = on.get(reg), off.get(reg)
         if a is None or b is None:
             verdict = 'not in the sweep'
+        elif reg in control:
+            verdict = ('FREE-RUNNING: it moves across the control pair too, so '
+                       'this A/B cannot judge it')
         elif a != b:
             verdict = ('the write reaches it' if a == written[reg]
                        else f'changes, but settles on {a:#x} not the written '
@@ -148,7 +218,9 @@ def main() -> int:
             verdict = 'THE WRITE NEVER TAKES EFFECT: safe to skip'
 
         verdicts.setdefault(verdict.split(':')[0], []).append(reg)
-        show = lambda v: '--' if v is None else f'{v:#010x}'
+        def show(v: int | None) -> str:
+            return '--' if v is None else f'{v:#010x}'
+
         print(f'{reg:#08x} {written[reg]:>#12x} {show(a):>11} {show(b):>11}  '
               f'{verdict}')
 
@@ -157,11 +229,15 @@ def main() -> int:
           f'table with no observable change')
     if skippable:
         print('  ' + ', '.join(f'{r:#06x}' for r in skippable))
-        print('\nAdd exactly these to ar_isp_hw_owned in ar-isp-main.c. Do not '
-              'add any register this run reports differently, and do not add '
-              'one the sweep did not cover.')
+        print('\nAdd exactly these to TRIM_EXCLUDED in gen-isp-defaults.py, '
+              'each with the verdict this run produced, and drop the same rows '
+              'from the generated header. The exclusion has to live in the '
+              'generator: an edit to the header alone is undone by the next '
+              'regeneration, and audit-provenance.py fails when the two '
+              'disagree. Do not add any register this run reports differently, '
+              'and do not add one the sweep did not cover.')
 
-    partial = [r for r in look if on.get(r) is not None
+    partial = [r for r in look if on.get(r) is not None and r not in control
                and on[r] != off.get(r) and on[r] != written[r]]
     if partial:
         print(f'\n{len(partial)} differ between the two runs without settling '

@@ -58,6 +58,36 @@ BLOCKS = {
 # these two registers is a hardware bisect, recorded in the emitted comment.
 OUTPUT_FIX_REGS = (0x2E2C, 0x2E30)
 
+# Descriptor writes for stages absent or disabled in the NT99235 FPV
+# configuration: the buffer address and, where the descriptor has one, the valid
+# bit written beside it. The stage's static configuration stays useful; only the
+# descriptor is omitted. Publishing an address the driver did not allocate points
+# the block at memory nothing reserved, which is inert only while the stage stays
+# quiescent. If one of these stages is enabled later, its driver path must
+# allocate and publish a buffer it owns.
+SETUP_EXCLUDED_DISABLED_WRITES = {
+    0x1D68, 0x1DC0, 0x1E5C, 0x1F88,  # HDR RRO statistics, buffer address
+    0x5810, 0x5828, 0x5840, 0x5858,  # LUT3D coefficient banks
+    0x6C90, 0x6D38,                  # AWB statistics
+    0x7574, 0x757C, 0x758C, 0x75A0, 0x75BC,  # AF statistics, address + valid
+}
+
+# The other half of the same decision, and it has to be value-sensitive rather
+# than a plain offset drop. Each of these is an accumulator enable one word past
+# a buffer address in the set above: the vendor writes zero, configures the
+# instance, then writes one. Withholding the address while leaving the enable set
+# is the worst of both, an armed accumulator aimed at whatever the register
+# happened to hold, so the enabling write is dropped and the zero that precedes
+# it is kept. The register therefore ends explicitly cleared rather than at reset.
+#
+# The vendor does set these, so this is a rule-4 deviation, recorded in
+# plans/beyond-vendor-backlog.md. It is bounded by the stage never clocking on
+# this sensor module: the HDR path needs a second exposure the NT99235 does not
+# deliver.
+SETUP_DISABLED_ENABLES = {
+    0x1D70, 0x1DC8, 0x1F90,  # HDR RRO statistics, accumulator enable
+}
+
 # sha256 of the air-unit libmpp_service.so the block map was derived from.
 LIB_SHA256 = '4cfc8e6cfb42d8c821137993b95b152f1aaad7c53ce425e6a0493c4dd453936c'
 
@@ -174,6 +204,39 @@ TRIM_EXCLUDED: dict[int, str] = {
     0x3d14: 'derived from the lnr ladder in ar-isp-lnr.h',
     0x3c64: 'derived from the cnf ladder in ar-isp-cnf.h',
     0x3c84: 'derived from the cnf strength normalisation in ar-isp-cnf.h',
+
+    # Registers the block owns. The vendor never writes any of them: none appears
+    # in 115554 traced writes. Replaying a value we recorded off its hardware is
+    # therefore not what the vendor does, it is a recording, and rule 1 of
+    # plans/isp-vendor-parity.md excludes it. Each verdict below is from the trim
+    # A/B in out/au-trim-ab/, measured with check-trim-effect.py.
+    0x00ec: 'hardware-owned: the A/B reads 0x56008600 with the pass on and off '
+            'alike, never the 0x6008400 the trim wrote, so the write provably '
+            'never took effect',
+    0x6060: 'raw_hist_stats hardware counter: the A/B reads 0x0d on and off '
+            'alike, never the 0x0a the trim wrote',
+    0x6478: 'rro_stats hardware counter: same A/B result, 0x0d against a '
+            'written 0x0a',
+    0x647c: 'rro_stats hardware counter: same A/B result, 0x0d against a '
+            'written 0x0a',
+    0x6514: 'rro_face_stats hardware counter: INFERRED, not measured. The A/B '
+            'sweep does not dump this page. It is read and multiplied by a '
+            'queue-node field at 0x1f8f80 exactly as its three measured '
+            'siblings are, and five captures read five values, so it is '
+            'excluded with them. Widen the sweep to settle it',
+    0x7054: 'isp_input vsync monitor, a live counter: the A/B low half reads '
+            '0x003f on and off alike against a written 0x083d, so the write '
+            'does not land there. The high half read 0x000b with the pass on '
+            'and 0x000c with it off, which is the half the earlier run called '
+            'a partial hit; a counter that reads five values over five '
+            'captures produces that agreement by chance, and the vendor never '
+            'writes the register at all',
+    0x705c: 'isp_input status: the A/B says this write DOES reach it, on '
+            '0x02a1003c against off 0x02a2003c. Excluded anyway, because the '
+            'vendor never writes it: the value is a blanking measurement its '
+            'hardware produced, and replaying ours over it is a recording. '
+            'The one-count difference this leaves against the vendor is '
+            'recorded in plans/beyond-vendor-backlog.md',
 }
 
 
@@ -250,6 +313,9 @@ def main() -> None:
     first_write = load_trace(args.trace, int(args.stop, 16))
     trim = load_trim(args.vendor_window, args.our_window)
     setup = load_setup_writes(args.trace, int(args.stop, 16))
+    setup = [(off, val) for off, val in setup
+             if off not in SETUP_EXCLUDED_DISABLED_WRITES
+             and not (off in SETUP_DISABLED_ENABLES and val)]
 
     output_fix = []
     for reg in OUTPUT_FIX_REGS:

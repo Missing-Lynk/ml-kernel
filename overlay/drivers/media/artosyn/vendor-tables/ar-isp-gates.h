@@ -69,8 +69,7 @@ static const struct ar_isp_gate ar_isp_gates_acm[] = {
 };
 
 static const struct ar_isp_gate ar_isp_gates_af_stats[] = {
-	{ 0x7400, 0x00000001, 0x00000001, AR_ISP_GATE_BIT_BYPASS },	/* paired */
-	{ 0x7558, 0x00000040, 0x0000007f, AR_ISP_GATE_BIT_ENABLE },	/* paired */
+	{ 0x7400, 0x00000001, 0x00000001, AR_ISP_GATE_BIT_ENABLE },	/* code */
 	{ 0x75ac, 0x00000000, 0x00000000, AR_ISP_GATE_WORD },	/* word */
 	{ 0x75b0, 0x00000000, 0x00000000, AR_ISP_GATE_WORD },	/* word */
 };
@@ -274,7 +273,7 @@ static const struct ar_isp_gate ar_isp_gates_wb[] = {
 
 static const struct ar_isp_stage ar_isp_stages[] = {
 	{ "acm", 0x7600, 0x0b00b8, ar_isp_gates_acm, 1, 0 },
-	{ "af_stats", 0x7400, 0x0d5484, ar_isp_gates_af_stats, 4, 0 },
+	{ "af_stats", 0x7400, 0x0d5484, ar_isp_gates_af_stats, 3, 0 },
 	{ "awbs_stats", 0x6c00, 0x0bbe98, ar_isp_gates_awbs_stats, 1, 0 },
 	{ "binning_filter", 0x3c40, 0x0b6348, ar_isp_gates_binning_filter, 1, 0 },
 	{ "birnr", 0x1800, 0x0b3550, ar_isp_gates_birnr, 1, 0 },
