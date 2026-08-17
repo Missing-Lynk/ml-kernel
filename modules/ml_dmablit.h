@@ -47,4 +47,27 @@ struct ml_dmablit_req {
  */
 #define ML_DMABLIT_FLUSH _IOW(ML_DMABLIT_IOC_MAGIC, 0x02, __s32)
 
+/* Cache maintenance over a RANGE of a dmabuf, rather than ML_DMABLIT_FLUSH's whole buffer.
+ *
+ * A compositor that CPU-touches a few rows of a 3 MB composite pays the whole buffer twice with
+ * the dma-buf DMA_BUF_IOCTL_SYNC ABI, which carries no range: measured at about 1 ms per frame
+ * to reach 90 KB. This scopes it to what was actually touched.
+ *
+ * ML_DMABLIT_INVALIDATE discards the range so a CPU read sees what a device wrote. It is
+ * DESTRUCTIVE to any dirty line in the range, so off and len must be cache-line aligned and the
+ * caller must not have unflushed writes there. ML_DMABLIT_CLEAN writes dirty lines back to DDR
+ * and has neither constraint.
+ */
+#define ML_DMABLIT_CLEAN	0
+#define ML_DMABLIT_INVALIDATE	1
+
+struct ml_dmablit_cache {
+	__s32 fd;		/* dmabuf fd */
+	__u32 off;		/* byte offset of the range within it */
+	__u32 len;		/* byte length of the range (> 0) */
+	__u32 op;		/* ML_DMABLIT_CLEAN or ML_DMABLIT_INVALIDATE */
+};
+
+#define ML_DMABLIT_CACHE _IOW(ML_DMABLIT_IOC_MAGIC, 0x03, struct ml_dmablit_cache)
+
 #endif /* _ML_DMABLIT_H */

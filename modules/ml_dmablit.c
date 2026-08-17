@@ -32,6 +32,7 @@
 #include <linux/dma-buf.h>
 #include <linux/dma-mapping.h>
 #include <linux/scatterlist.h>
+#include <linux/cache.h>
 
 #include "ml_dmablit.h"
 #include "ml_dmabuf_map.h"
@@ -231,6 +232,46 @@ static long ml_dmablit_flush(int fd)
 	return 0;
 }
 
+/* Cache maintenance over one range of a dmabuf. Uses the cached mapping the copies already
+ * hold, so it costs no attach and no remap: DMA_BIDIRECTIONAL is the direction the destination
+ * is mapped with, and asking for a different one would force ml_bufcache_map_fd to remap.
+ *
+ * An invalidate discards whatever is in the range, so it is rejected unless both ends are
+ * cache-line aligned - a partial line would take a neighbouring dirty byte with it.
+ */
+static long ml_dmablit_cache_range(struct ml_bufcache *cl,
+				   const struct ml_dmablit_cache *rq)
+{
+	struct device *dev = g_chans[0]->device->dev;
+	struct ml_bufmap *bm;
+
+	if (!rq->len)
+		return -EINVAL;
+
+	if (rq->op != ML_DMABLIT_CLEAN && rq->op != ML_DMABLIT_INVALIDATE)
+		return -EINVAL;
+
+	if (rq->op == ML_DMABLIT_INVALIDATE &&
+	    ((rq->off | rq->len) & (cache_line_size() - 1)))
+		return -EINVAL;
+
+	bm = map_fd_cached(cl, rq->fd, DMA_BIDIRECTIONAL);
+	if (IS_ERR(bm))
+		return PTR_ERR(bm);
+
+	if (rq->off > bm->size || rq->len > bm->size - rq->off)
+		return -EINVAL;
+
+	if (rq->op == ML_DMABLIT_INVALIDATE)
+		dma_sync_single_for_cpu(dev, bm->base + rq->off, rq->len,
+					DMA_FROM_DEVICE);
+	else
+		dma_sync_single_for_device(dev, bm->base + rq->off, rq->len,
+					   DMA_TO_DEVICE);
+
+	return 0;
+}
+
 static int ml_dmablit_open(struct inode *inode, struct file *f)
 {
 	struct ml_bufcache *cl = kzalloc(sizeof(*cl), GFP_KERNEL);
@@ -268,6 +309,19 @@ static long ml_dmablit_ioctl(struct file *f, unsigned int cmd, unsigned long arg
 		mutex_lock(&g_lock);
 		ret = ml_dmablit_flush(fd);
 		mutex_unlock(&g_lock);
+		return ret;
+	}
+
+	if (cmd == ML_DMABLIT_CACHE) {
+		struct ml_dmablit_cache rq;
+
+		if (copy_from_user(&rq, (void __user *)arg, sizeof(rq)))
+			return -EFAULT;
+
+		mutex_lock(&g_lock);
+		ret = ml_dmablit_cache_range(f->private_data, &rq);
+		mutex_unlock(&g_lock);
+
 		return ret;
 	}
 
