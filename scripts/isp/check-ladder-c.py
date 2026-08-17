@@ -147,7 +147,7 @@ def main() -> int:
                     failures)
 
             compare(gain, "cfa", got["cfa"],
-                    [v for _, v in cfa.cfa_from_blob(blob, q16)], failures)
+                    [v for _, v in cfa.vendor_bank(blob, q16)], failures)
 
             strength = cnf.strength(blob, q16)
             compare(gain, "cnf_strength", got["cnf_strength"], [strength],

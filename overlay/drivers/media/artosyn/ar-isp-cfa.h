@@ -31,6 +31,7 @@
 
 #include "vendor-tables/ar-isp-blob.h"
 #include "ar-isp-ladder.h"
+#include "ar-isp-softfloat.h"
 
 /*
  * Register bank. The packer owns 54 registers, 0x0800 to 0x08d4, and the whole
@@ -59,14 +60,25 @@
  * count, abscissa selector. Five bands are active; the sixth payload slot at
  * 0x2490c is zero padding and the header's count of 5 excludes it.
  *
- * The payload record is 41 words, all of which feed registers. Between bands
- * every word blends linearly and truncates toward zero. The packer's own
- * schedule takes working offsets 0x78, 0x7c, 0x88 and 0x94 verbatim from the
- * upper record instead; across this file the two agree at every fraction in
- * every band gap, because those four words only ever step from 1 to 0 and the
- * blend of 1 into 0 truncates to 0 for any nonzero fraction. The blend is used
- * for all 41, and check-cfa-ladder.py asserts that equivalence so a future
- * tuning file that breaks it fails rather than diverging silently.
+ * The payload record is 41 words, all of which feed registers, and the driver
+ * has two paths:
+ *
+ *   in a band  the whole 0xa4-byte record is memcpy'd into the module's config
+ *              block and the packer copies it out, so the record reaches the
+ *              bank verbatim
+ *
+ *   in a gap   each word is blended in float and truncated
+ *
+ * The gap path is binary32, not an integer blend: scvtf on each word, fmul for
+ * the upper term, a fused fmadd, then fcvtzs. See ar-isp-softfloat.h.
+ *
+ * Two words take their operands from a different record index than the one they
+ * feed:
+ *
+ *   word 6   (register 0x0844) takes its low operand from word 4
+ *   word 28  (register 0x08a0) takes both operands from word 26
+ *
+ * So word 28's own record value never reaches the bank.
  */
 
 _Static_assert(AR_ISP_CFA_REGS * 4 == AR_ISP_CFA_BLOB_STRIDE,
@@ -99,6 +111,54 @@ static const struct ar_isp_cfa_run ar_isp_cfa_runs[AR_ISP_CFA_RUNS] = {
 	{ 0xac, 0x78, 11 },
 };
 
+/* The two source-index substitutions, on the blend path only. */
+#define AR_ISP_CFA_QUIRK_LOW_WORD	6
+#define AR_ISP_CFA_QUIRK_LOW_SOURCE	4
+#define AR_ISP_CFA_QUIRK_BOTH_WORD	28
+#define AR_ISP_CFA_QUIRK_BOTH_SOURCE	26
+
+static inline unsigned int ar_isp_cfa_low_source(unsigned int word)
+{
+	if (word == AR_ISP_CFA_QUIRK_LOW_WORD)
+		return AR_ISP_CFA_QUIRK_LOW_SOURCE;
+
+	if (word == AR_ISP_CFA_QUIRK_BOTH_WORD)
+		return AR_ISP_CFA_QUIRK_BOTH_SOURCE;
+
+	return word;
+}
+
+static inline unsigned int ar_isp_cfa_high_source(unsigned int word)
+{
+	if (word == AR_ISP_CFA_QUIRK_BOTH_WORD)
+		return AR_ISP_CFA_QUIRK_BOTH_SOURCE;
+
+	return word;
+}
+
+/*
+ * One payload word. Verbatim inside a band; on the gap path the vendor's fused
+ * float blend, with the two source quirks applied.
+ */
+static inline u32 ar_isp_cfa_word(const u8 *payload, unsigned int band,
+				  unsigned int word,
+				  struct ar_isp_ladder_frac frac)
+{
+	u32 stride = AR_ISP_CFA_BLOB_STRIDE;
+	ar_f32 lo, hi;
+
+	if (!frac.t)
+		return ar_isp_get_le32(payload + band * stride + word * 4);
+
+	lo = ar_f32_from_s32((s32)ar_isp_get_le32(payload + (band - 1) * stride +
+					     ar_isp_cfa_low_source(word) * 4));
+	hi = ar_f32_from_s32((s32)ar_isp_get_le32(payload + band * stride +
+					     ar_isp_cfa_high_source(word) * 4));
+
+	return (u32)ar_f32_to_s32_trunc(ar_f32_fma(frac.omt, lo,
+						   ar_f32_mul(frac.t, hi)));
+}
+
 /*
  * Build the 41 cfa ladder registers from the tuning file at the abscissa, in
  * run order, which is the order ar_isp_cfa_runs walks the bank.
@@ -106,17 +166,17 @@ static const struct ar_isp_cfa_run ar_isp_cfa_runs[AR_ISP_CFA_RUNS] = {
 static inline void ar_isp_cfa_from_blob(u32 *dst, const u8 *blob, u32 gain_q16)
 {
 	const u8 *payload = blob + AR_ISP_CFA_BLOB_PAYLOAD;
+	struct ar_isp_ladder_frac frac;
 	unsigned int band, i = 0;
-	u32 t_q24;
 
-	ar_isp_ladder_select(&ar_isp_cfa_ladder, blob, gain_q16, &band, &t_q24);
+	ar_isp_ladder_select_f32(&ar_isp_cfa_ladder, blob, gain_q16, &band,
+				 &frac);
 
 	for (unsigned int run = 0; run < AR_ISP_CFA_RUNS; run++)
 		for (unsigned int k = 0; k < ar_isp_cfa_runs[run].count; k++)
-			dst[i++] = ar_isp_ladder_read_word(&ar_isp_cfa_ladder,
-							   payload, band,
-							   ar_isp_cfa_runs[run].word + k * 4,
-							   t_q24);
+			dst[i++] = ar_isp_cfa_word(payload, band,
+						   ar_isp_cfa_runs[run].word / 4 + k,
+						   frac);
 }
 
 #endif /* AR_ISP_CFA_H */

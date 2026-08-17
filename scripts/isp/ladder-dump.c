@@ -30,8 +30,9 @@
 #include <string.h>
 
 /*
- * The headers use the kernel's fixed-width names and nothing else, so the
- * whole compatibility layer is these typedefs.
+ * The headers use the kernel's fixed-width names, plus the three helpers
+ * ar-isp-softfloat.h needs to do binary32 in integers. That is the whole
+ * compatibility layer.
  */
 typedef uint8_t u8;
 typedef uint16_t u16;
@@ -39,6 +40,21 @@ typedef uint32_t u32;
 typedef uint64_t u64;
 typedef int32_t s32;
 typedef int64_t s64;
+
+#define U32_MAX 0xffffffffu
+#define S32_MAX 0x7fffffff
+#define S32_MIN (-0x7fffffff - 1)
+
+static inline int fls64(u64 v)
+{
+	return v ? 64 - __builtin_clzll(v) : 0;
+}
+
+static inline u64 div64_u64_rem(u64 a, u64 b, u64 *rem)
+{
+	*rem = a % b;
+	return a / b;
+}
 
 #include "ar-isp-rnr.h"
 #include "ar-isp-lnr.h"

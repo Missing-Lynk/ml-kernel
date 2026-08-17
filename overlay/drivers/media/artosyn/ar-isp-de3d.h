@@ -64,6 +64,9 @@ _Static_assert(AR_ISP_DE3D_SCALAR_REGS + AR_ISP_DE3D_CURVE_REGS ==
  * input, measured at both capture points).
  */
 
+/* A zero fraction: the V() macro's "take it from this band's own record". */
+static const struct ar_isp_ladder_frac ar_isp_de3d_verbatim = { 0, 0 };
+
 /* The asymmetric blend: the lower record's 0x8c against the upper's 0x90. */
 #define AR_ISP_DE3D_ASYM_LO		0x8c
 #define AR_ISP_DE3D_ASYM_HI		0x90
@@ -144,24 +147,24 @@ static const struct ar_isp_de3d_reg ar_isp_de3d_regs[AR_ISP_DE3D_REGS] = {
 
 /* One payload word, masked to the register field it feeds. */
 static inline u32 ar_isp_de3d_field(const u8 *payload, unsigned int band,
-				    u32 t_q24, unsigned int off,
-				    unsigned int width)
+				    struct ar_isp_ladder_frac frac,
+				    unsigned int off, unsigned int width)
 {
-	u32 word = ar_isp_ladder_read_word(&ar_isp_de3d_ladder, payload, band,
-					   off, t_q24);
+	u32 word = ar_isp_ladder_read_word_f32(&ar_isp_de3d_ladder, payload,
+					       band, off, frac);
 
 	return word & ((1u << width) - 1);
 }
 
 /* A knee slope: the numerator over the span between two payload fields. */
 static inline u32 ar_isp_de3d_slope(const u8 *payload, unsigned int band,
-				    u32 t_q24, unsigned int hi_off,
-				    unsigned int lo_off)
+				    struct ar_isp_ladder_frac frac,
+				    unsigned int hi_off, unsigned int lo_off)
 {
-	s32 span = (s32)ar_isp_ladder_read_word(&ar_isp_de3d_ladder, payload,
-						band, hi_off, t_q24) -
-		   (s32)ar_isp_ladder_read_word(&ar_isp_de3d_ladder, payload,
-						band, lo_off, t_q24);
+	s32 span = (s32)ar_isp_ladder_read_word_f32(&ar_isp_de3d_ladder, payload,
+						    band, hi_off, frac) -
+		   (s32)ar_isp_ladder_read_word_f32(&ar_isp_de3d_ladder, payload,
+						    band, lo_off, frac);
 
 	if (!span)
 		return 0;
@@ -173,29 +176,31 @@ static inline u32 ar_isp_de3d_slope(const u8 *payload, unsigned int band,
 static inline void ar_isp_de3d_from_blob(u32 *dst, const u8 *blob, u32 gain_q16)
 {
 	const u8 *payload = blob + AR_ISP_DE3D_BLOB_PAYLOAD;
+	struct ar_isp_ladder_frac frac;
 	unsigned int band, i;
-	u32 t_q24;
 
-	ar_isp_ladder_select(&ar_isp_de3d_ladder, blob, gain_q16, &band, &t_q24);
+	ar_isp_ladder_select_f32(&ar_isp_de3d_ladder, blob, gain_q16, &band,
+				 &frac);
 
 	/* Verbatim inside a band, like every other field. */
 	u32 asym = ar_isp_get_le32(payload + band * AR_ISP_DE3D_BLOB_STRIDE +
 				   AR_ISP_DE3D_ASYM_HI);
-	if (t_q24)
-		asym = (u32)ar_isp_ladder_blend_s32(
+	if (frac.t)
+		asym = (u32)ar_isp_ladder_blend_f32(
 			(s32)ar_isp_get_le32(payload + (band - 1) *
 					     AR_ISP_DE3D_BLOB_STRIDE +
 					     AR_ISP_DE3D_ASYM_LO),
-			(s32)asym, t_q24);
+			(s32)asym, frac);
 	asym &= 0xff;
 
 	/*
 	 * F blends a field between bands, V takes it verbatim from the band's
 	 * own record, S is a knee slope. Undefined again below the pack.
 	 */
-#define F(off, w)	ar_isp_de3d_field(payload, band, t_q24, (off), (w))
-#define V(off, w)	ar_isp_de3d_field(payload, band, 0, (off), (w))
-#define S(hi, lo)	ar_isp_de3d_slope(payload, band, t_q24, (hi), (lo))
+#define F(off, w)	ar_isp_de3d_field(payload, band, frac, (off), (w))
+#define V(off, w)	ar_isp_de3d_field(payload, band, ar_isp_de3d_verbatim, \
+					  (off), (w))
+#define S(hi, lo)	ar_isp_de3d_slope(payload, band, frac, (hi), (lo))
 
 	/*
 	 * Register per line, in ar_isp_de3d_regs order. The trailing address is

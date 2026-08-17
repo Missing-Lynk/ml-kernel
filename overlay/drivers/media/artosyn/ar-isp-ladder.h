@@ -34,11 +34,13 @@
 
 #include "vendor-tables/ar-isp-blob.h"
 #include "ar-isp-bytes.h"
+#include "ar-isp-softfloat.h"
 
 /* Header words at the same offset in all three stages. */
 
 /* One band-edge record: a [low, high] float32 pair. */
 #define AR_ISP_LADDER_BAND_STRIDE	8
+#define AR_ISP_LADDER_BAND_LO		0
 #define AR_ISP_LADDER_BAND_HI		4
 
 /* Band edges and the gain abscissa are unsigned Q16. */
@@ -128,10 +130,23 @@ static inline s32 ar_isp_ladder_blend_s32(s32 from, s32 to, u32 t_q24)
  * vendor's own behaviour outside the ladder is unmeasured, and the clamp is
  * the interpolation's natural limit.
  *
- * The Q16/Q24 arithmetic differs from the vendor's float32 by less than one
- * part in 2^16 of a band width, which moves a truncated payload word only if
- * the exact blend lands within that distance of an integer; every measured
- * register state reproduces exactly.
+ * The Q16/Q24 arithmetic here is NOT the vendor's. isp_sub_cfa blends in float
+ * and truncates, so an exact integer blend is wrong by one wherever the true
+ * value lands just under an integer, including where both records are equal:
+ * blending 75 into 75 gives 74 on hardware. cfa carries the faithful version in
+ * ar-isp-cfa.h on top of ar-isp-softfloat.h, measured against two gap captures.
+ *
+ * rnr, lnr, de3d and cfa use these. Their drivers issue the same five
+ * instructions per word:
+ *
+ *     scvtf s3, w4            the upper record's word
+ *     scvtf s2, w3            the lower record's word
+ *     fmul  s3, s3, s0        s0 is t
+ *     fmadd s2, s1, s2, s3    s1 is 1 - t, and the add is fused
+ *     fcvtzs w3, s2           truncate toward zero
+ *
+ * The integer forms above serve cm and cm2, whose drivers at 0x19fe28 and
+ * 0x1a14ec carry no float instruction.
  */
 static inline void ar_isp_ladder_walk(const u8 *bands, u32 count, u32 interp,
 				      u32 gain_q16, unsigned int *band_out,
@@ -182,6 +197,108 @@ static inline void ar_isp_ladder_select(const struct ar_isp_ladder *ladder,
 	ar_isp_ladder_walk(blob + ladder->bands, count,
 			   ar_isp_get_le32(hdr + AR_ISP_LADDER_HDR_INTERP),
 			   gain_q16, band_out, t_q24_out);
+}
+
+/*
+ * The vendor's arithmetic: band selection and the gap fraction in binary32,
+ * then a fused blend truncated toward zero. See ar-isp-softfloat.h for why the
+ * integer forms above are not interchangeable with these.
+ *
+ * A zero t means the record is used verbatim, which is the memcpy path the
+ * vendor takes inside a band.
+ */
+struct ar_isp_ladder_frac {
+	ar_f32 t;
+	ar_f32 omt;
+};
+
+/* A band edge as its raw binary32, which is how the tuning file stores it. */
+static inline ar_f32 ar_isp_ladder_edge(const u8 *bands, unsigned int band,
+					unsigned int half)
+{
+	return ar_isp_get_le32(bands + band * AR_ISP_LADDER_BAND_STRIDE + half);
+}
+
+/*
+ * IEEE binary32 orders exactly as its unsigned bit pattern over non-negative
+ * values, and both the abscissa and every band edge are non-negative, so the
+ * edge comparisons need no unpacking.
+ */
+static inline void ar_isp_ladder_walk_f32(const u8 *bands, u32 count,
+					  u32 interp, u32 gain_q16,
+					  unsigned int *band_out,
+					  struct ar_isp_ladder_frac *frac)
+{
+	ar_f32 gain = ar_f32_scale_down(ar_f32_from_s32((s32)gain_q16), 16);
+	unsigned int band;
+
+	for (band = 0; band + 1 < count; band++)
+		if (gain <= ar_isp_ladder_edge(bands, band,
+					       AR_ISP_LADDER_BAND_HI))
+			break;
+
+	frac->t = 0;
+	frac->omt = 0;
+
+	if (interp && band > 0) {
+		ar_f32 lo = ar_isp_ladder_edge(bands, band,
+					       AR_ISP_LADDER_BAND_LO);
+		ar_f32 prev_hi = ar_isp_ladder_edge(bands, band - 1,
+						    AR_ISP_LADDER_BAND_HI);
+
+		if (gain < lo && lo > prev_hi) {
+			frac->t = ar_f32_div(ar_f32_sub(gain, prev_hi),
+					     ar_f32_sub(lo, prev_hi));
+			frac->omt = ar_f32_sub(ar_f32_from_s32(1), frac->t);
+		}
+	}
+
+	*band_out = band;
+}
+
+static inline void ar_isp_ladder_select_f32(const struct ar_isp_ladder *ladder,
+					    const u8 *blob, u32 gain_q16,
+					    unsigned int *band_out,
+					    struct ar_isp_ladder_frac *frac)
+{
+	const u8 *hdr = blob + ladder->hdr;
+	u32 count = ar_isp_get_le32(hdr + ladder->count_off);
+
+	if (count < 1 || count > ladder->max_bands)
+		count = ladder->max_bands;
+
+	ar_isp_ladder_walk_f32(blob + ladder->bands, count,
+			       ar_isp_get_le32(hdr + AR_ISP_LADDER_HDR_INTERP),
+			       gain_q16, band_out, frac);
+}
+
+/* One fused blend, as the vendor's fmul-then-fmadd pair computes it. */
+static inline s32 ar_isp_ladder_blend_f32(s32 from, s32 to,
+					  struct ar_isp_ladder_frac frac)
+{
+	return ar_f32_to_s32_trunc(ar_f32_fma(frac.omt, ar_f32_from_s32(from),
+					      ar_f32_mul(frac.t,
+							 ar_f32_from_s32(to))));
+}
+
+/* One payload word at the selected band, blended into the band above it. */
+static inline u32 ar_isp_ladder_read_word_f32(const struct ar_isp_ladder *ladder,
+					      const u8 *payload,
+					      unsigned int band,
+					      unsigned int off,
+					      struct ar_isp_ladder_frac frac)
+{
+	s32 word = (s32)ar_isp_get_le32(payload + band * ladder->stride + off);
+
+	if (frac.t) {
+		s32 prev = (s32)ar_isp_get_le32(payload +
+						(band - 1) * ladder->stride +
+						off);
+
+		word = ar_isp_ladder_blend_f32(prev, word, frac);
+	}
+
+	return (u32)word;
 }
 
 /* One payload word at the selected band, blended into the band above it. */

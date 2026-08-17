@@ -5,26 +5,29 @@ Prove the cfa ladder transform in ar-isp-cfa.h against the measured bank.
 The cfa driver in the vendor service (0x1b1f28, packer 0x1b1d90) recomputes the
 bank 0x0800 registers from a ladder in the tuning file whenever the 3A loop
 moves the gain: a header (enable, interpolate, count, selector), five
-[low, high] float32 bands, and a 0xa4-byte payload record per band. Inside a
-band the record is used verbatim; between bands the words blend linearly and
-truncate toward zero.
+[low, high] float32 bands, and a 0xa4-byte payload record per band.
+
+The driver has two paths, and they are not the same arithmetic. Inside a band
+it memcpy's the whole record into its config block, so the record reaches the
+bank verbatim. Across a band gap it blends in binary32: scvtf on each word,
+fmul for the upper term, a fused fmadd, then fcvtzs. That is reproduced here in
+Python float32 and in the kernel by ar-isp-softfloat.h, because an exact
+integer blend is wrong by one wherever the true value lands just under an
+integer, including where both records are equal. Blending 75 into 75 gives 74
+on hardware.
+
+Two words in the vendor's unrolled float block take their operands from the
+wrong record index: word 6 reads its low operand from word 4, and word 28 reads
+both operands from word 26. Both are measured, in two gaps at two different
+fractions. They are quirks to reproduce, not bugs to fix.
 
 The whole record lands in the bank as four ascending runs of consecutive
 registers, each of the 41 words used once, stepping over 13 registers that keep
 their replayed values. That map is this script's first assertion, because
-hdf-076 published it off by one register at two of the run boundaries.
+hdf-076 published it off by one register at two of the run boundaries; it was
+later confirmed directly from the packer's disassembly.
 
-The measured state is one streaming-vendor capture, out/au-snapshot/registers.txt,
-whose abscissa the capture does not record. cfa and cnf recover it
-independently and agree on the bracket [4.0, 8.0]: cfa reproduces band 0
-including a word that any nonzero blend would move, and cnf's packed field
-reads 2, which the truncation reaches only from 4.0 and holds until 16.0. The
-whole bracket lies inside cfa band 0, so every abscissa in it selects that band
-verbatim and the check runs across the bracket rather than at a point.
-
-This script mirrors the kernel header's integer arithmetic exactly (Q16 band
-edges, Q24 blend fraction, one truncation on the blended sum) and refuses to
-pass unless:
+This script refuses to pass unless:
 
   the header reads (enable 1, interpolate 1, count 5, selector 0), the band
   edges are strictly increasing, and the sixth payload slot is zero padding;
@@ -32,17 +35,12 @@ pass unless:
   the four runs consume the 41 payload words exactly once each, in ascending
   order, and cover 41 of the packer's 54 registers;
 
-  taking working offsets 0x78, 0x7c, 0x88 and 0x94 verbatim from the upper
-  record, which is what the packer's own schedule does, agrees with blending
-  them at every fraction in every band gap, so the header's uniform blend
-  cannot differ from the vendor on this file;
+  the transform reproduces all 41 registers of the original streaming-vendor
+  capture across the [4.0, 8.0] bracket cfa and cnf jointly recover;
 
-  the transform reproduces all 41 captured registers at every abscissa in the
-  recovered bracket.
-
-The blend arithmetic itself is NOT exercised: the one capture is a
-verbatim-record selection. That gap closes with a capture at a second abscissa,
-and this script reports it rather than passing over it silently.
+  every capture in CAPTURES is reproduced exactly somewhere inside the abscissa
+  bracket the rnr ladder derived from the same breath. Two of those are gap
+  captures, so the blend and both quirks are exercised rather than assumed.
 
 The tuning file is proprietary and is not in the repository.
 
@@ -72,8 +70,6 @@ RUNS = [(0x00, 0x00, 4), (0x3C, 0x10, 7), (0x5C, 0x2C, 19), (0xAC, 0x78, 11)]
 # The packer's extent, 0x0800..0x08d4 inclusive.
 PACKER_REGS = 54
 
-# Working offsets the packer's schedule copies verbatim from the upper record.
-SCHEDULE_VERBATIM = (0x78, 0x7C, 0x88, 0x94)
 
 # The abscissa bracket recovered from cfa and cnf jointly, in Q16.
 BRACKET = (4 << 16, 8 << 16)
@@ -96,76 +92,8 @@ MEASURED = {
 }
 
 
-def f32_q16(bits: int) -> int:
-    """Mirror ar_isp_f32_q16: unsigned Q16 truncated toward zero."""
-    mant = (bits & 0x7FFFFF) | 0x800000
-    exp = ((bits >> 23) & 0xFF) - 127
-    shift = 7 - exp
-
-    if bits & 0x80000000:
-        return 0
-
-    if shift >= 32:
-        return 0
-
-    if shift < -8:
-        return 0xFFFFFFFF
-
-    if shift <= 0:
-        return mant << -shift
-
-    return mant >> shift
-
-
-def blend_s32(a: int, b: int, t_q24: int) -> int:
-    """Mirror ar_isp_ladder_blend_s32: one Q24 sum, truncation toward zero."""
-    acc = a * ((1 << 24) - t_q24) + b * t_q24
-    return acc // (1 << 24) if acc >= 0 else -((-acc) // (1 << 24))
-
-
 def word(blob: bytes, band: int, off: int) -> int:
     return struct.unpack_from("<i", blob, PAYLOAD + band * STRIDE + off)[0]
-
-
-def select(blob: bytes, gain_q16: int) -> tuple[int, int]:
-    """Mirror ar_isp_ladder_select on ar_isp_cfa_ladder."""
-    count = struct.unpack_from("<I", blob, HEADER + 0x8)[0]
-    interp = struct.unpack_from("<I", blob, HEADER + 0x4)[0]
-    count = COUNT if not 1 <= count <= COUNT else count
-
-    band = count - 1
-    for i in range(count - 1):
-        hi = f32_q16(struct.unpack_from("<I", blob, BANDS + i * 8 + 4)[0])
-        if gain_q16 <= hi:
-            band = i
-            break
-
-    t_q24 = 0
-    if interp and band > 0:
-        lo = f32_q16(struct.unpack_from("<I", blob, BANDS + band * 8)[0])
-        prev_hi = f32_q16(struct.unpack_from("<I", blob,
-                                             BANDS + band * 8 - 4)[0])
-        if gain_q16 < lo and lo > prev_hi:
-            t_q24 = ((gain_q16 - prev_hi) << 24) // (lo - prev_hi)
-
-    return band, t_q24
-
-
-def cfa_from_blob(blob: bytes, gain_q16: int) -> list[tuple[int, int]]:
-    """Mirror ar_isp_cfa_from_blob, returning (register, value) in run order."""
-    band, t_q24 = select(blob, gain_q16)
-    out = []
-
-    for reg, rec, count in RUNS:
-        for k in range(count):
-            value = word(blob, band, rec + k * 4)
-            if t_q24:
-                value = blend_s32(word(blob, band - 1, rec + k * 4), value,
-                                  t_q24)
-
-            out.append((BANK + reg + k * 4, value & 0xFFFFFFFF))
-
-    return out
 
 
 def check_run_map() -> None:
@@ -193,28 +121,146 @@ def check_run_map() -> None:
           f"packer's {PACKER_REGS} registers, each word once")
 
 
+def f32(x: float) -> float:
+    """Round to binary32, which is the precision the vendor computes in."""
+    return struct.unpack("<f", struct.pack("<f", x))[0]
+
+
+def fma32(a: float, b: float, c: float) -> float:
+    """One rounding, as fmadd does. Doubles hold a*b+c exactly here."""
+    return f32(float(a) * float(b) + float(c))
+
+
+# The two source-index quirks in the vendor's unrolled float block. Word 6 takes
+# its low operand from word 4; word 28 takes both operands from word 26. Both
+# are measured, in two gaps at two different fractions.
+QUIRK_LOW = {6: 4, 28: 26}
+QUIRK_HIGH = {28: 26}
+
+
+# The driver issues 37 fmadd for 41 words: these four are copied verbatim from
+# the upper record instead of blended. The header blends all 41, which is only
+# safe while the two agree, so check_schedule_equivalence asserts that on the
+# file in hand rather than letting a future tuning file diverge silently.
+SCHEDULE_VERBATIM = (30, 31, 34, 37)
+
+
 def check_schedule_equivalence(blob: bytes) -> None:
-    """
-    The packer copies four late words verbatim from the upper record where the
-    header blends them. Assert the two agree everywhere on this file, so the
-    uniform blend cannot diverge from the vendor.
-    """
+    """Blending the verbatim-scheduled words must equal copying them."""
     steps = 1 << 12
     for band in range(1, COUNT):
         for step in range(1, steps):
-            t_q24 = (step << 24) // steps
-            for off in SCHEDULE_VERBATIM:
-                blended = blend_s32(word(blob, band - 1, off),
-                                    word(blob, band, off), t_q24)
-                if blended != word(blob, band, off):
-                    sys.exit(f"band {band} offset {off:#x}: blend "
-                             f"{blended} differs from the packer's verbatim "
-                             f"{word(blob, band, off)} at t "
-                             f"{t_q24 / (1 << 24):.6f}")
+            t = f32(step / steps)
+            for index in SCHEDULE_VERBATIM:
+                upper = word(blob, band, index * 4)
+                blended = int(fma32(f32(1.0 - t),
+                                    word(blob, band - 1, index * 4),
+                                    f32(t * upper)))
+                if blended != upper:
+                    sys.exit(f"band {band} word {index}: blend {blended} "
+                             f"differs from the packer's verbatim {upper} "
+                             f"at t {t:.6f}")
 
-    print(f"schedule: blending {len(SCHEDULE_VERBATIM)} verbatim-scheduled "
-          f"words agrees with copying them, at {steps - 1} fractions in each "
-          f"of {COUNT - 1} band gaps")
+    print(f"schedule: blending the {len(SCHEDULE_VERBATIM)} "
+          f"verbatim-scheduled words agrees with copying them, at "
+          f"{steps - 1} fractions in each of {COUNT - 1} band gaps")
+
+
+
+def vendor_select(blob: bytes, gain_q16: int) -> tuple[int, float]:
+    """Band and gap fraction, in binary32 as isp_sub_cfa computes them."""
+    count = struct.unpack_from("<I", blob, HEADER + 0x8)[0]
+    interp = struct.unpack_from("<I", blob, HEADER + 0x4)[0]
+    count = COUNT if not 1 <= count <= COUNT else count
+    gain = f32(gain_q16 / 65536.0)
+
+    band = count - 1
+    for i in range(count - 1):
+        hi = struct.unpack_from("<f", blob, BANDS + i * 8 + 4)[0]
+        if gain <= hi:
+            band = i
+            break
+
+    t = 0.0
+    if interp and band > 0:
+        lo = struct.unpack_from("<f", blob, BANDS + band * 8)[0]
+        prev_hi = struct.unpack_from("<f", blob, BANDS + band * 8 - 4)[0]
+        if gain < lo and lo > prev_hi:
+            t = f32(f32(gain - prev_hi) / f32(lo - prev_hi))
+
+    return band, t
+
+
+def vendor_word(blob: bytes, band: int, index: int, t: float) -> int:
+    """Verbatim inside a band; the fused float blend across a gap."""
+    if not t:
+        return word(blob, band, index * 4) & 0xFFFFFFFF
+
+    lo = word(blob, band - 1, QUIRK_LOW.get(index, index) * 4)
+    hi = word(blob, band, QUIRK_HIGH.get(index, index) * 4)
+
+    return int(fma32(f32(1.0 - t), lo, f32(t * hi))) & 0xFFFFFFFF
+
+
+def vendor_bank(blob: bytes, gain_q16: int) -> list[tuple[int, int]]:
+    """Mirror ar_isp_cfa_from_blob, returning (register, value) in run order."""
+    band, t = vendor_select(blob, gain_q16)
+    out = []
+
+    for reg, rec, count in RUNS:
+        for k in range(count):
+            out.append((BANK + reg + k * 4,
+                        vendor_word(blob, band, rec // 4 + k, t)))
+
+    return out
+
+
+# Measured banks in run order, with the abscissa bracket the rnr ladder derived
+# for the same breath. The two gap captures are what proves the blend; the two
+# in-band ones guard the verbatim path.
+CAPTURES = (
+    ("breath-light1  band 2, verbatim", 22.6094, 22.7344, (
+        30, 30, 30, 30, 33, 26, 29, 75, 53, 37, 18, 500, 4000, 10000,
+        3000000, 1, 128, 0, 40, 6, 128, 0, 64, 64, 128, 0, 64, 64, 115,
+        13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)),
+    ("breath-covered band 3, verbatim", 63.5781, 63.9844, (
+        30, 30, 30, 30, 33, 26, 29, 75, 53, 37, 18, 500, 4000, 10000,
+        3000000, 1, 128, 0, 40, 6, 128, 0, 64, 64, 128, 0, 64, 64, 115,
+        13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)),
+    ("breath-gap44-b gap 42.1..48.0", 44.4375, 44.8594, (
+        29, 29, 29, 29, 33, 26, 31, 74, 53, 37, 18, 500, 4000, 10000,
+        3000000, 1, 128, 0, 40, 6, 128, 0, 64, 64, 128, 0, 64, 64, 64,
+        13, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)),
+    ("breath-l2      gap 12.1..16.0", 12.9648, 13.5664, (
+        30, 30, 30, 30, 33, 26, 31, 75, 53, 37, 18, 500, 4000, 10000,
+        3000000, 1, 128, 0, 40, 6, 128, 0, 64, 64, 128, 0, 64, 64, 64,
+        3, 0, 0, 7, 179, 0, 0, 1, 0, 5616, 10531, 4)),
+)
+
+
+def check_captures(blob: bytes) -> None:
+    """
+    Every captured bank must be reproduced somewhere inside the bracket an
+    independent ladder derived for that capture. The gap rows are the ones that
+    exercise the float blend and the two source quirks; an integer blend misses
+    both of them, which is how the defect was found.
+    """
+    for name, lo, hi, want in CAPTURES:
+        hit = None
+        for gain_q16 in range(int(lo * 65536), int(hi * 65536) + 1):
+            got = [v for _, v in vendor_bank(blob, gain_q16)]
+            if got == list(want):
+                hit = gain_q16
+                break
+
+        if hit is None:
+            sys.exit(f"{name}: no abscissa in [{lo}, {hi}] reproduces the "
+                     f"captured bank")
+
+        band, t = vendor_select(blob, hit)
+        kind = "gap" if t else "verbatim"
+        print(f"{name}: 41/41 at abscissa {hit / 65536:.6f}, band {band} "
+              f"t {t:.6f} [{kind}]")
 
 
 def main() -> int:
@@ -242,9 +288,9 @@ def main() -> int:
 
     lo, hi = BRACKET
     for gain_q16 in (lo, (lo + hi) // 2, hi):
-        band, t_q24 = select(blob, gain_q16)
+        band, t = vendor_select(blob, gain_q16)
         bad = 0
-        for reg, value in cfa_from_blob(blob, gain_q16):
+        for reg, value in vendor_bank(blob, gain_q16):
             if value != MEASURED[reg]:
                 bad += 1
                 print(f"  {reg:#06x}: want {MEASURED[reg]:#010x} "
@@ -253,14 +299,12 @@ def main() -> int:
             sys.exit(f"abscissa {gain_q16 / 65536} misses {bad} registers")
 
         print(f"abscissa {gain_q16 / 65536:9.6f} -> band {band} "
-              f"t {t_q24 / (1 << 24):.7f}, all {len(MEASURED)} captured "
-              f"registers exact")
+              f"t {t:.7f}, all {len(MEASURED)} captured registers exact")
 
-    print("\ncfa ladder agrees with ar-isp-cfa.h and the measured bank")
-    print("NOT proven: the blend, because the one capture is a "
-          "verbatim-record selection.")
-    print("A capture at abscissa 15.3828125 blends bands 1 and 2 and closes "
-          "that gap.")
+    check_captures(blob)
+
+    print("\ncfa ladder agrees with ar-isp-cfa.h and every measured bank, "
+          "in band and in gap")
     return 0
 
 

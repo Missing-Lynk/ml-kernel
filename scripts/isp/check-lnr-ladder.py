@@ -22,6 +22,8 @@ import sys
 from collections.abc import Sequence
 
 from blob_layout import Layout
+from ladder_f32 import blend as fblend
+from ladder_f32 import select as fselect
 
 _LAY = Layout.load()
 
@@ -69,37 +71,20 @@ def read_u32(blob: bytes, off: int) -> int:
     return struct.unpack_from("<I", blob, off)[0]
 
 
-def blend(a: int, b: int, t_q24: int) -> int:
-    return (a * ((1 << 24) - t_q24) + b * t_q24) // (1 << 24)
+def blend(a: int, b: int, t: float) -> int:
+    return fblend(a, b, t)
 
 
-def trunc_blend(a: int, b: int, t_q24: int) -> int:
-    num = a * ((1 << 24) - t_q24) + b * t_q24
-    if num < 0:
-        return -((-num) // (1 << 24))
-    return num // (1 << 24)
+def trunc_blend(a: int, b: int, t: float) -> int:
+    return fblend(a, b, t)
 
 
-def select(blob: bytes, gain_q16: int) -> tuple[int, int]:
+def select(blob: bytes, gain_q16: int) -> tuple[int, float]:
     count = read_u32(blob, HEADER + 0x8)
     interp = read_u32(blob, HEADER + 0x4)
     count = COUNT if not 1 <= count <= COUNT else count
 
-    edges = [f32_q16(read_u32(blob, BANDS + i * 4)) for i in range(count * 2)]
-    band = count - 1
-    for i in range(count - 1):
-        if gain_q16 <= edges[i * 2 + 1]:
-            band = i
-            break
-
-    t_q24 = 0
-    if interp and band > 0:
-        lo = edges[band * 2]
-        prev_hi = edges[band * 2 - 1]
-        if gain_q16 < lo and lo > prev_hi:
-            t_q24 = ((gain_q16 - prev_hi) << 24) // (lo - prev_hi)
-
-    return band, t_q24
+    return fselect(blob, BANDS, count, interp, gain_q16)
 
 
 def word(blob: bytes, band: int, off: int, t_q24: int) -> int:

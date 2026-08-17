@@ -153,13 +153,14 @@ static const struct ar_isp_lnr_field ar_isp_lnr_fields[] = {
  * from shifting by its own width, which is undefined.
  */
 static inline void ar_isp_lnr_pack_field(u32 *dst, const u8 *payload,
-					 unsigned int band, u32 t_q24,
+					 unsigned int band,
+					 struct ar_isp_ladder_frac frac,
 					 unsigned int reg, unsigned int off,
 					 unsigned int shift, unsigned int width)
 {
 	u32 mask = width == 32 ? 0xffffffff : (1u << width) - 1;
-	u32 field = ar_isp_ladder_read_word(&ar_isp_lnr_ladder, payload, band,
-					    off, t_q24);
+	u32 field = ar_isp_ladder_read_word_f32(&ar_isp_lnr_ladder, payload,
+						band, off, frac);
 
 	dst[reg] &= ~(mask << shift);
 	dst[reg] |= (field & mask) << shift;
@@ -173,15 +174,16 @@ static inline void ar_isp_lnr_pack_field(u32 *dst, const u8 *payload,
 static inline void ar_isp_lnr_from_blob(u32 *dst, const u8 *blob, u32 gain_q16)
 {
 	const u8 *payload = blob + AR_ISP_LNR_BLOB_PAYLOAD;
+	struct ar_isp_ladder_frac frac;
 	unsigned int band, i;
-	u32 t_q24;
 
-	ar_isp_ladder_select(&ar_isp_lnr_ladder, blob, gain_q16, &band, &t_q24);
+	ar_isp_ladder_select_f32(&ar_isp_lnr_ladder, blob, gain_q16, &band,
+				 &frac);
 
 	for (i = 0; i < AR_ISP_LNR_FIELDS; i++) {
 		const struct ar_isp_lnr_field *f = &ar_isp_lnr_fields[i];
 
-		ar_isp_lnr_pack_field(dst, payload, band, t_q24, f->reg, f->off,
+		ar_isp_lnr_pack_field(dst, payload, band, frac, f->reg, f->off,
 				      f->shift, f->width);
 	}
 
@@ -194,10 +196,10 @@ static inline void ar_isp_lnr_from_blob(u32 *dst, const u8 *blob, u32 gain_q16)
 				   (i - AR_ISP_LNR_CURVE_SPLIT) *
 				   AR_ISP_LNR_CURVE_STRIDE;
 
-		ar_isp_lnr_pack_field(dst, payload, band, t_q24, reg, off, 0, 8);
-		ar_isp_lnr_pack_field(dst, payload, band, t_q24, reg, off + 4, 8, 8);
-		ar_isp_lnr_pack_field(dst, payload, band, t_q24, reg, off + 8, 16, 8);
-		ar_isp_lnr_pack_field(dst, payload, band, t_q24, reg, off + 12, 24, 8);
+		ar_isp_lnr_pack_field(dst, payload, band, frac, reg, off, 0, 8);
+		ar_isp_lnr_pack_field(dst, payload, band, frac, reg, off + 4, 8, 8);
+		ar_isp_lnr_pack_field(dst, payload, band, frac, reg, off + 8, 16, 8);
+		ar_isp_lnr_pack_field(dst, payload, band, frac, reg, off + 12, 24, 8);
 	}
 }
 

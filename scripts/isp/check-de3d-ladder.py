@@ -43,6 +43,8 @@ import struct
 import sys
 
 from blob_layout import Layout
+from ladder_f32 import blend as fblend
+from ladder_f32 import select as fselect
 
 _LAY = Layout.load()
 
@@ -113,38 +115,21 @@ def f32_q16(bits: int) -> int:
     return mant >> shift
 
 
-def blend_s32(a: int, b: int, t_q24: int) -> int:
-    """Mirror ar_isp_ladder_blend_s32: one Q24 sum, truncation toward zero."""
-    acc = a * ((1 << 24) - t_q24) + b * t_q24
-    return acc // (1 << 24) if acc >= 0 else -((-acc) // (1 << 24))
+def blend_s32(a: int, b: int, t: float) -> int:
+    """The vendor's fused float blend, truncated toward zero."""
+    return fblend(a, b, t)
 
 
 def word(blob: bytes, band: int, off: int) -> int:
     return struct.unpack_from("<i", blob, PAYLOAD + band * STRIDE + off)[0]
 
 
-def select(blob: bytes, gain_q16: int) -> tuple[int, int]:
-    """Mirror ar_isp_ladder_select on ar_isp_de3d_ladder."""
+def select(blob: bytes, gain_q16: int) -> tuple[int, float]:
     count = struct.unpack_from("<I", blob, HEADER + 0x8)[0]
     interp = struct.unpack_from("<I", blob, HEADER + 0x4)[0]
     count = COUNT if not 1 <= count <= COUNT else count
 
-    band = count - 1
-    for i in range(count - 1):
-        hi = f32_q16(struct.unpack_from("<I", blob, BANDS + i * 8 + 4)[0])
-        if gain_q16 <= hi:
-            band = i
-            break
-
-    t_q24 = 0
-    if interp and band > 0:
-        lo = f32_q16(struct.unpack_from("<I", blob, BANDS + band * 8)[0])
-        prev_hi = f32_q16(struct.unpack_from("<I", blob,
-                                             BANDS + band * 8 - 4)[0])
-        if gain_q16 < lo and lo > prev_hi:
-            t_q24 = ((gain_q16 - prev_hi) << 24) // (lo - prev_hi)
-
-    return band, t_q24
+    return fselect(blob, BANDS, count, interp, gain_q16)
 
 
 def de3d_from_blob(blob: bytes, gain_q16: int) -> list[int]:

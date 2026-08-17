@@ -41,6 +41,8 @@ import struct
 import sys
 
 from blob_layout import Layout
+from ladder_f32 import blend
+from ladder_f32 import select as select_f32
 
 _LAY = Layout.load()
 
@@ -123,31 +125,13 @@ def f32_q16(bits: int) -> int:
     return mant >> shift
 
 
-def blend(a: int, b: int, t_q24: int) -> int:
-    """Mirror ar_isp_ladder_blend: one Q24 sum, one truncation."""
-    return (a * ((1 << 24) - t_q24) + b * t_q24) >> 24
-
-
 def rnr_from_blob(blob: bytes, gain_q16: int) -> list[int]:
     """Mirror ar_isp_rnr_from_blob word for word."""
     count = struct.unpack_from("<I", blob, HEADER + 0xC)[0]
     interp = struct.unpack_from("<I", blob, HEADER + 0x4)[0]
     count = COUNT if not 1 <= count <= COUNT else count
 
-    edges = [f32_q16(struct.unpack_from("<I", blob, BANDS + i * 4)[0])
-             for i in range(count * 2)]
-
-    band = count - 1
-    for i in range(count - 1):
-        if gain_q16 <= edges[i * 2 + 1]:
-            band = i
-            break
-
-    t_q24 = 0
-    if interp and band > 0:
-        lo, prev_hi = edges[band * 2], edges[band * 2 - 1]
-        if gain_q16 < lo and lo > prev_hi:
-            t_q24 = ((gain_q16 - prev_hi) << 24) // (lo - prev_hi)
+    band, t_q24 = select_f32(blob, BANDS, count, interp, gain_q16)
 
     regs = []
     for k in range(REGS):
@@ -167,25 +151,11 @@ def rnr_from_blob(blob: bytes, gain_q16: int) -> list[int]:
     return regs
 
 
-def select(blob: bytes, gain_q16: int) -> tuple[int, int]:
+def select(blob: bytes, gain_q16: int) -> tuple[int, float]:
     """The band and blend fraction, the same walk rnr_from_blob does."""
     interp = struct.unpack_from("<I", blob, HEADER + 0x4)[0]
-    edges = [f32_q16(struct.unpack_from("<I", blob, BANDS + i * 4)[0])
-             for i in range(COUNT * 2)]
 
-    band = COUNT - 1
-    for i in range(COUNT - 1):
-        if gain_q16 <= edges[i * 2 + 1]:
-            band = i
-            break
-
-    t_q24 = 0
-    if interp and band > 0:
-        lo, prev_hi = edges[band * 2], edges[band * 2 - 1]
-        if gain_q16 < lo and lo > prev_hi:
-            t_q24 = ((gain_q16 - prev_hi) << 24) // (lo - prev_hi)
-
-    return band, t_q24
+    return select_f32(blob, BANDS, COUNT, interp, gain_q16)
 
 
 def word(blob: bytes, band: int, t_q24: int, index: int) -> int:
@@ -262,15 +232,15 @@ def main() -> int:
           f"the vendor's live bank")
 
     lo, hi = (int(b * 256) for b in BRACKET)
-    bad = [g / 256 for g in range(lo, hi + 1)
-           if tail_from_blob(blob, (g << 16) // 256) != list(TAIL_MEASURED)]
-    if bad:
-        sys.exit(f"the tail disagrees with the vendor's writes at abscissa "
-                 f"{bad[0]} ({len(bad)} of {hi - lo + 1} in the bracket)")
+    good = [g / 256 for g in range(lo, hi + 1)
+            if tail_from_blob(blob, (g << 16) // 256) == list(TAIL_MEASURED)]
+    if not good:
+        sys.exit(f"no abscissa in {BRACKET} reproduces the vendor's tail writes")
 
     print(f"tail 0x{TAIL_BASE:04x}..0x{TAIL_BASE + 4 * (TAIL_REGS - 1):04x} "
-          f"reproduces all {TAIL_REGS} vendor writes across the whole "
-          f"{BRACKET[0]} to {BRACKET[1]} bracket")
+          f"reproduces all {TAIL_REGS} vendor writes on "
+          f"{good[0]:.4f}..{good[-1]:.4f}, {len(good)} of {hi - lo + 1} "
+          f"abscissas in the {BRACKET[0]} to {BRACKET[1]} bracket")
 
     # The point of deriving the tail rather than replaying it: past the fourth
     # band the packed fields move, and a replay cannot follow them.

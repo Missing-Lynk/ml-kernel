@@ -57,10 +57,11 @@ static const struct ar_isp_ladder ar_isp_rnr_ladder = {
 static inline void ar_isp_rnr_from_blob(u32 *dst, const u8 *blob, u32 gain_q16)
 {
 	const u8 *payload = blob + AR_ISP_RNR_BLOB_PAYLOAD;
+	struct ar_isp_ladder_frac frac;
 	unsigned int band;
-	u32 t_q24;
 
-	ar_isp_ladder_select(&ar_isp_rnr_ladder, blob, gain_q16, &band, &t_q24);
+	ar_isp_ladder_select_f32(&ar_isp_rnr_ladder, blob, gain_q16, &band,
+				 &frac);
 
 	for (unsigned int reg = 0; reg < AR_ISP_RNR_REGS; reg++) {
 		u32 lo = ar_isp_get_le32(payload + band * AR_ISP_RNR_BLOB_STRIDE +
@@ -68,13 +69,13 @@ static inline void ar_isp_rnr_from_blob(u32 *dst, const u8 *blob, u32 gain_q16)
 		u32 hi = ar_isp_get_le32(payload + band * AR_ISP_RNR_BLOB_STRIDE +
 					 (AR_ISP_RNR_HI_WORD + reg) * 4);
 
-		if (t_q24) {
+		if (frac.t) {
 			const u8 *prev = payload + (band - 1) * AR_ISP_RNR_BLOB_STRIDE;
 
-			lo = ar_isp_ladder_blend(ar_isp_get_le32(prev +
-					(AR_ISP_RNR_LO_WORD + reg) * 4), lo, t_q24);
-			hi = ar_isp_ladder_blend(ar_isp_get_le32(prev +
-					(AR_ISP_RNR_HI_WORD + reg) * 4), hi, t_q24);
+			lo = (u32)ar_isp_ladder_blend_f32((s32)ar_isp_get_le32(prev +
+					(AR_ISP_RNR_LO_WORD + reg) * 4), (s32)lo, frac);
+			hi = (u32)ar_isp_ladder_blend_f32((s32)ar_isp_get_le32(prev +
+					(AR_ISP_RNR_HI_WORD + reg) * 4), (s32)hi, frac);
 		}
 
 		dst[reg] = (hi << 16) | (lo & 0xffff);
@@ -126,7 +127,8 @@ static inline void ar_isp_rnr_from_blob(u32 *dst, const u8 *blob, u32 gain_q16)
  * halfword positions the packer's masks give.
  */
 static inline u32 ar_isp_rnr_pack(const u8 *payload, unsigned int band,
-				  u32 t_q24, unsigned int word,
+				  struct ar_isp_ladder_frac frac,
+				  unsigned int word,
 				  unsigned int n, u32 mask, unsigned int step)
 {
 	u32 out = 0;
@@ -135,12 +137,12 @@ static inline u32 ar_isp_rnr_pack(const u8 *payload, unsigned int band,
 		const u8 *rec = payload + band * AR_ISP_RNR_BLOB_STRIDE;
 		u32 v = ar_isp_get_le32(rec + (word + i) * 4);
 
-		if (t_q24) {
+		if (frac.t) {
 			const u8 *prev = payload +
 					 (band - 1) * AR_ISP_RNR_BLOB_STRIDE;
 
-			v = ar_isp_ladder_blend(ar_isp_get_le32(prev +
-					(word + i) * 4), v, t_q24);
+			v = (u32)ar_isp_ladder_blend_f32((s32)ar_isp_get_le32(prev +
+					(word + i) * 4), (s32)v, frac);
 		}
 
 		out |= (v & mask) << (i * step);
@@ -158,30 +160,31 @@ static inline void ar_isp_rnr_tail_from_blob(u32 *dst, const u8 *blob,
 {
 	const u8 *payload = blob + AR_ISP_RNR_BLOB_PAYLOAD;
 	unsigned int band, word = AR_ISP_RNR_TAIL_WORD, reg = 0, i;
-	u32 t_q24;
+	struct ar_isp_ladder_frac frac;
 
-	ar_isp_ladder_select(&ar_isp_rnr_ladder, blob, gain_q16, &band, &t_q24);
+	ar_isp_ladder_select_f32(&ar_isp_rnr_ladder, blob, gain_q16, &band,
+				 &frac);
 
 	for (i = 0; i < AR_ISP_RNR_TRIPLES; i++) {
-		dst[reg++] = ar_isp_rnr_pack(payload, band, t_q24, word,
+		dst[reg++] = ar_isp_rnr_pack(payload, band, frac, word,
 					     2, AR_ISP_RNR_F12, 16);
-		dst[reg++] = ar_isp_rnr_pack(payload, band, t_q24, word + 2,
+		dst[reg++] = ar_isp_rnr_pack(payload, band, frac, word + 2,
 					     1, AR_ISP_RNR_F12, 0);
-		dst[reg++] = ar_isp_rnr_pack(payload, band, t_q24, word + 3,
+		dst[reg++] = ar_isp_rnr_pack(payload, band, frac, word + 3,
 					     4, AR_ISP_RNR_F5, 8);
 		word += AR_ISP_RNR_TRIPLE_WORDS;
 	}
 
 	for (i = 0; i < AR_ISP_RNR_BLOCKS; i++) {
-		dst[reg++] = ar_isp_rnr_pack(payload, band, t_q24, word,
+		dst[reg++] = ar_isp_rnr_pack(payload, band, frac, word,
 					     4, AR_ISP_RNR_F8, 8);
-		dst[reg++] = ar_isp_rnr_pack(payload, band, t_q24, word + 4,
+		dst[reg++] = ar_isp_rnr_pack(payload, band, frac, word + 4,
 					     4, AR_ISP_RNR_F8, 8);
-		dst[reg++] = ar_isp_rnr_pack(payload, band, t_q24, word + 8,
+		dst[reg++] = ar_isp_rnr_pack(payload, band, frac, word + 8,
 					     3, AR_ISP_RNR_F5, 8);
-		dst[reg++] = ar_isp_rnr_pack(payload, band, t_q24, word + 11,
+		dst[reg++] = ar_isp_rnr_pack(payload, band, frac, word + 11,
 					     3, AR_ISP_RNR_F5, 8);
-		dst[reg++] = ar_isp_rnr_pack(payload, band, t_q24, word + 14,
+		dst[reg++] = ar_isp_rnr_pack(payload, band, frac, word + 14,
 					     3, AR_ISP_RNR_F5, 8);
 		word += AR_ISP_RNR_BLOCK_WORDS;
 	}
