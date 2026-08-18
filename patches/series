@@ -12,3 +12,5 @@
 0280-wave5-vpu-enc.patch
 0300-dma-coherent-page-granular.patch
 0400-dwc2-gadget-buffer-dma.patch
+0500-dw-axi-dmac-h.patch
+0510-dw-axi-dmac-platform.patch

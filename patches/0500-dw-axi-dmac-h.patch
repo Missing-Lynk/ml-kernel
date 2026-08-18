@@ -1,0 +1,31 @@
+Why: carries the cfg_lock that 0510-dw-axi-dmac-platform.patch needs. DMAC_CFG
+is one controller-wide register holding both DMAC_EN and INT_EN, and mainline
+read-modify-writes it from process context (a channel start) and from the
+interrupt handler with nothing serializing the two. See 0510 for the failure
+mode; this patch only adds the lock and its include.
+
+--- a/drivers/dma/dw-axi-dmac/dw-axi-dmac.h
++++ b/drivers/dma/dw-axi-dmac/dw-axi-dmac.h
+@@ -14,6 +14,7 @@
+ #include <linux/clk.h>
+ #include <linux/device.h>
+ #include <linux/dmaengine.h>
++#include <linux/spinlock.h>
+ #include <linux/types.h>
+ 
+ #include "../virt-dma.h"
+@@ -71,6 +72,14 @@
+ 	struct clk		*core_clk;
+ 	struct clk		*cfgr_clk;
+ 	struct dw_axi_dma	*dw;
++	/*
++	 * ML (Artosyn): serializes the read-modify-write of DMAC_CFG, the one
++	 * controller-wide register holding DMAC_EN and INT_EN. The interrupt
++	 * handler clears and restores INT_EN there while a channel start on
++	 * another CPU sets DMAC_EN in the same register; without this the two
++	 * lose each other's update and INT_EN can stay 0 for good.
++	 */
++	spinlock_t		cfg_lock;
+ };
+ 
+ /* LLI == Linked List Item */

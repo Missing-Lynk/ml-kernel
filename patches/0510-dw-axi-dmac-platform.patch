@@ -1,0 +1,114 @@
+Why: mainline read-modify-writes DMAC_CFG - the single controller-wide register
+holding DMAC_EN (bit 0) and INT_EN (bit 1) - from two contexts with nothing
+serializing them. dw_axi_dma_interrupt() clears INT_EN on entry and restores it
+on exit; axi_chan_block_xfer_start() sets DMAC_EN on every channel start. The
+per-channel chan->vc.lock does not cover the handler's writes, so on SMP the two
+interleave and one update is lost. The handler's completion callback wakes the
+submitting thread on the other CPU while INT_EN is still 0, which is the exact
+window that makes the bad interleave likely rather than theoretical: that thread
+reads DMAC_CFG with INT_EN clear, and its write-back of DMAC_EN lands after the
+handler has restored INT_EN, clearing it again.
+
+Nothing sets INT_EN except the handler's own exit path, so the loss is
+self-latching. The controller stays enabled and keeps completing transfers, and
+per-channel INTSTATUS keeps being set, but no interrupt ever reaches the GIC
+again: every dmaengine client blocks until its timeout, forever, controller-wide,
+with no driver message of any kind.
+
+Seen twice on the Proxima-9311 goggle after ~200k interrupts of a 60 fps compose
+blit. Live, in the failed state: DMAC_CFG 0x00000001 (DMAC_EN set, INT_EN clear),
+DMAC_INTSTATUS 0x00000003 (channels 0 and 1 pending), dw_axi_dmac IRQ counts
+frozen, dmesg clean. Writing INT_EN back by hand restored the engine on the spot
+- the compositor went from 4091.6 ms per frame (four 1 s dmaengine timeouts) back
+to 16.6 ms with no restart.
+
+Fix is a leaf spinlock (chip->cfg_lock, added by 0500) around each of the four
+DMAC_CFG helpers. None of them calls another, so there is nothing to nest.
+
+--- a/drivers/dma/dw-axi-dmac/dw-axi-dmac-platform.c
++++ b/drivers/dma/dw-axi-dmac/dw-axi-dmac-platform.c
+@@ -122,40 +122,75 @@
+ 	axi_chan_iowrite32(chan, CH_CFG_H, cfg_hi);
+ }
+ 
++/*
++ * ML (Artosyn): DMAC_CFG read-modify-write, serialized against every other one.
++ *
++ * DMAC_EN and INT_EN share this single controller-wide register, and the four
++ * helpers below are reached from both process context (a channel start, via
++ * axi_dma_enable) and hard IRQ context (dw_axi_dma_interrupt, which clears
++ * INT_EN on entry and restores it on exit). chan->vc.lock does not serialize
++ * them: it is per channel and the handler does not take it around those writes.
++ *
++ * On SMP the two therefore interleave and lose an update. The handler's
++ * completion callback wakes the submitting thread on the other CPU while INT_EN
++ * is still 0, so that thread reads DMAC_CFG with INT_EN clear, and its write
++ * back of DMAC_EN lands after the handler has restored INT_EN, clearing it
++ * again. Nothing sets INT_EN except the handler's own exit path, so once it is
++ * lost the controller never raises another interrupt: transfers still run and
++ * still set per-channel INTSTATUS, but no IRQ reaches the GIC, every
++ * dma_async_issue_pending waiter times out, and the failure is permanent,
++ * silent and controller-wide. Observed on a Proxima-9311 after ~200k
++ * interrupts: DMAC_CFG read 0x1 (DMAC_EN set, INT_EN clear) with
++ * DMAC_INTSTATUS 0x3 pending; writing INT_EN back by hand resumed the engine.
++ *
++ * A single leaf lock is enough: none of the four calls another.
++ */
+ static inline void axi_dma_disable(struct axi_dma_chip *chip)
+ {
++	unsigned long flags;
+ 	u32 val;
+ 
++	spin_lock_irqsave(&chip->cfg_lock, flags);
+ 	val = axi_dma_ioread32(chip, DMAC_CFG);
+ 	val &= ~DMAC_EN_MASK;
+ 	axi_dma_iowrite32(chip, DMAC_CFG, val);
++	spin_unlock_irqrestore(&chip->cfg_lock, flags);
+ }
+ 
+ static inline void axi_dma_enable(struct axi_dma_chip *chip)
+ {
++	unsigned long flags;
+ 	u32 val;
+ 
++	spin_lock_irqsave(&chip->cfg_lock, flags);
+ 	val = axi_dma_ioread32(chip, DMAC_CFG);
+ 	val |= DMAC_EN_MASK;
+ 	axi_dma_iowrite32(chip, DMAC_CFG, val);
++	spin_unlock_irqrestore(&chip->cfg_lock, flags);
+ }
+ 
+ static inline void axi_dma_irq_disable(struct axi_dma_chip *chip)
+ {
++	unsigned long flags;
+ 	u32 val;
+ 
++	spin_lock_irqsave(&chip->cfg_lock, flags);
+ 	val = axi_dma_ioread32(chip, DMAC_CFG);
+ 	val &= ~INT_EN_MASK;
+ 	axi_dma_iowrite32(chip, DMAC_CFG, val);
++	spin_unlock_irqrestore(&chip->cfg_lock, flags);
+ }
+ 
+ static inline void axi_dma_irq_enable(struct axi_dma_chip *chip)
+ {
++	unsigned long flags;
+ 	u32 val;
+ 
++	spin_lock_irqsave(&chip->cfg_lock, flags);
+ 	val = axi_dma_ioread32(chip, DMAC_CFG);
+ 	val |= INT_EN_MASK;
+ 	axi_dma_iowrite32(chip, DMAC_CFG, val);
++	spin_unlock_irqrestore(&chip->cfg_lock, flags);
+ }
+ 
+ static inline void axi_chan_irq_disable(struct axi_dma_chan *chan, u32 irq_mask)
+@@ -1484,6 +1519,8 @@
+ 	chip->dw = dw;
+ 	chip->dev = &pdev->dev;
+ 	chip->dw->hdata = hdata;
++	/* ML (Artosyn): guards the DMAC_CFG read-modify-write, see above. */
++	spin_lock_init(&chip->cfg_lock);
+ 
+ 	chip->regs = devm_platform_ioremap_resource(pdev, 0);
+ 	if (IS_ERR(chip->regs))
