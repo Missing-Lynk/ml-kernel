@@ -35,6 +35,16 @@
 #define AR_ISP_CM2_RECIP1_REG		0x482c
 #define AR_ISP_CM2_RECIP2_REG		0x4830
 
+/*
+ * The reciprocal registers hold a ten-bit field. The vendor's packer stores the
+ * full word to both (`stp w0, w1, [x19, #44]` at 0x1a0694, after two `sdiv` of
+ * 1024), so a quotient wider than the field is written as-is and the hardware
+ * keeps the low ten bits: at a bound width of 1 the quotient is 1024 and the
+ * register reads zero, on the vendor and here alike. The mask is what a readback
+ * can be compared under, not something to write through.
+ */
+#define AR_ISP_CM2_RECIP_MASK		0x000003ff
+
 #define AR_ISP_CM2_CT_COLUMNS		1
 #define AR_ISP_CM2_RECORD_STRIDE	24
 #define AR_ISP_CM2_ROW_STRIDE		168

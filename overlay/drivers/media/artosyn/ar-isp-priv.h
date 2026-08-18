@@ -19,6 +19,8 @@
 #include <linux/spinlock.h>
 #include <linux/types.h>
 
+struct seq_file;
+
 #include "vendor-tables/ar-isp-defaults.h"
 #include "vendor-tables/ar-isp-library.h"
 
@@ -167,6 +169,7 @@ void ar_isp_cm2_apply(struct ar_isp *isp, bool verbose);
 void ar_isp_tone_apply(struct ar_isp *isp, bool force, bool verbose);
 void ar_isp_rgb2yuv_apply(struct ar_isp *isp);
 void ar_isp_ladders_apply(struct ar_isp *isp, bool verbose);
+int ar_isp_ladders_show(struct seq_file *s, struct ar_isp *isp);
 void ar_isp_tables_apply(struct ar_isp *isp);
 void ar_isp_tables_prepare(struct ar_isp *isp);
 void ar_isp_tables_release(struct ar_isp *isp);

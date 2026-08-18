@@ -27,6 +27,7 @@
 #include <linux/io.h>
 #include <linux/module.h>
 #include <linux/of_reserved_mem.h>
+#include <linux/seq_file.h>
 #include <linux/string.h>
 
 #include "ar-isp-priv.h"
@@ -915,6 +916,245 @@ void ar_isp_ladders_apply(struct ar_isp *isp, bool verbose)
 	ar_isp_cnf_apply(isp, verbose);
 	ar_isp_cm_apply(isp, verbose);
 	ar_isp_cm2_apply(isp, verbose);
+}
+
+/*
+ * One register of the ladder parity oracle: what the hardware holds, what a
+ * fresh recomputation asks for, and the mask the stage writes under.
+ *
+ * Only the masked bits are compared. Every ladder register the appliers
+ * read-modify-write shares its word with another producer, so the bits outside
+ * the mask carry state this derivation does not own and a difference there is
+ * not a divergence.
+ */
+static void ar_isp_ladder_cmp(struct seq_file *s, const char *stage, u32 off,
+			      u32 live, u32 want, u32 mask, unsigned int *bad)
+{
+	bool ok = ((live ^ want) & mask) == 0;
+
+	if (!ok)
+		(*bad)++;
+
+	seq_printf(s, "%-5s 0x%04x 0x%08x 0x%08x 0x%08x %s\n", stage, off, live,
+		   want, mask, ok ? "ok" : "MISMATCH");
+}
+
+/*
+ * Report why a stage contributes no registers. A parameter of -1, a clear
+ * tuning gate and a missing tuning file all leave the replayed bank in place on
+ * purpose, so none of them is a failure.
+ */
+static void ar_isp_ladder_skip(struct seq_file *s, const char *stage,
+			       const char *why)
+{
+	seq_printf(s, "%-5s %s\n", stage, why);
+}
+
+/*
+ * The gain-keyed banks, read back and compared against a recomputation from the
+ * tuning file at the parameter each stage currently carries.
+ *
+ * A parity oracle rather than a control: nothing here writes a register, so the
+ * node measures whether the arithmetic that ran on this hardware agrees with the
+ * arithmetic the host models reproduce from the same tuning file. Set a stage's
+ * gain parameter, latch it through the ladders node, and read this.
+ *
+ * lnr is seeded from the live bank because that is what its applier does. Its
+ * untouched fields therefore compare equal by construction and only the fields
+ * it packs are measured, which is the same coverage the host cross-check has.
+ *
+ * cm and cm2 are keyed on the AEC trigger scalar rather than the noise ladders'
+ * gain, so they answer to cm_trigger and cm2_trigger.
+ */
+int ar_isp_ladders_show(struct seq_file *s, struct ar_isp *isp)
+{
+	unsigned int bad = 0;
+	const u8 *blob;
+
+	seq_printf(s, "%-5s %-6s %-10s %-10s %-10s %s\n", "stage", "off",
+		   "live", "want", "mask", "verdict");
+
+	if (!isp->tuning) {
+		seq_puts(s, "no tuning file: every bank is the replay\n");
+
+		return 0;
+	}
+
+	blob = isp->tuning->data;
+
+	if (rnr_gain < 0) {
+		ar_isp_ladder_skip(s, "rnr", "parameter -1, bank left replayed");
+	} else if (ar_isp_get_le32(blob + AR_ISP_RNR_BLOB_HEADER +
+				   AR_ISP_LADDER_HDR_ENABLE) != 1) {
+		ar_isp_ladder_skip(s, "rnr", "tuning gate clear, bank left replayed");
+	} else {
+		u32 regs[AR_ISP_RNR_REGS];
+		u32 tail[AR_ISP_RNR_TAIL_REGS];
+
+		ar_isp_rnr_from_blob(regs, blob, (u32)rnr_gain << 8);
+		ar_isp_rnr_tail_from_blob(tail, blob, (u32)rnr_gain << 8);
+
+		for (unsigned int i = 0; i < AR_ISP_RNR_REGS; i++) {
+			u32 off = AR_ISP_RNR_BANK + AR_ISP_RNR_LADDER + i * 4;
+
+			ar_isp_ladder_cmp(s, "rnr", off,
+					  readl(isp->base + off), regs[i],
+					  U32_MAX, &bad);
+		}
+
+		for (unsigned int i = 0; i < AR_ISP_RNR_TAIL_REGS; i++) {
+			u32 off = AR_ISP_RNR_BANK + AR_ISP_RNR_TAIL + i * 4;
+
+			ar_isp_ladder_cmp(s, "rnr", off,
+					  readl(isp->base + off), tail[i],
+					  U32_MAX, &bad);
+		}
+	}
+
+	if (lnr_gain < 0) {
+		ar_isp_ladder_skip(s, "lnr", "parameter -1, bank left replayed");
+	} else if (ar_isp_get_le32(blob + AR_ISP_LNR_BLOB_HEADER +
+				   AR_ISP_LADDER_HDR_ENABLE) != 1) {
+		ar_isp_ladder_skip(s, "lnr", "tuning gate clear, bank left replayed");
+	} else {
+		u32 regs[AR_ISP_LNR_REGS];
+		u32 live[AR_ISP_LNR_REGS];
+
+		for (unsigned int i = 0; i < AR_ISP_LNR_REGS; i++) {
+			live[i] = readl(isp->base + AR_ISP_LNR_BANK + i * 4);
+			regs[i] = live[i];
+		}
+
+		ar_isp_lnr_from_blob(regs, blob, (u32)lnr_gain << 8);
+
+		for (unsigned int i = 0; i < AR_ISP_LNR_REGS; i++) {
+			if (i == AR_ISP_LNR_SKIP_NEVER_WRITTEN)
+				continue;
+
+			ar_isp_ladder_cmp(s, "lnr", AR_ISP_LNR_BANK + i * 4,
+					  live[i], regs[i], U32_MAX, &bad);
+		}
+	}
+
+	if (de3d_gain < 0) {
+		ar_isp_ladder_skip(s, "de3d", "parameter -1, bank left replayed");
+	} else if (ar_isp_get_le32(blob + AR_ISP_DE3D_BLOB_HEADER +
+				   AR_ISP_LADDER_HDR_ENABLE) != 1) {
+		ar_isp_ladder_skip(s, "de3d", "tuning gate clear, bank left replayed");
+	} else {
+		u32 regs[AR_ISP_DE3D_REGS];
+
+		ar_isp_de3d_from_blob(regs, blob, (u32)de3d_gain << 8);
+
+		for (unsigned int i = 0; i < AR_ISP_DE3D_REGS; i++) {
+			u32 off = AR_ISP_DE3D_BANK + ar_isp_de3d_regs[i].off;
+
+			ar_isp_ladder_cmp(s, "de3d", off,
+					  readl(isp->base + off), regs[i],
+					  ar_isp_de3d_regs[i].mask, &bad);
+		}
+	}
+
+	if (cfa_gain < 0) {
+		ar_isp_ladder_skip(s, "cfa", "parameter -1, bank left replayed");
+	} else if (ar_isp_get_le32(blob + AR_ISP_CFA_BLOB_HEADER +
+				   AR_ISP_LADDER_HDR_ENABLE) != 1) {
+		ar_isp_ladder_skip(s, "cfa", "tuning gate clear, bank left replayed");
+	} else {
+		u32 regs[AR_ISP_CFA_REGS];
+		unsigned int i = 0;
+
+		ar_isp_cfa_from_blob(regs, blob, (u32)cfa_gain << 8);
+
+		for (unsigned int run = 0; run < AR_ISP_CFA_RUNS; run++) {
+			for (unsigned int k = 0; k < ar_isp_cfa_runs[run].count;
+			     k++, i++) {
+				u32 off = AR_ISP_CFA_BANK +
+					  ar_isp_cfa_runs[run].reg + k * 4;
+				u32 mask = off == AR_ISP_CFA_BANK ?
+					   AR_ISP_CFA_HEAD_MASK : U32_MAX;
+
+				ar_isp_ladder_cmp(s, "cfa", off,
+						  readl(isp->base + off),
+						  regs[i], mask, &bad);
+			}
+		}
+	}
+
+	if (cnf_gain < 0) {
+		ar_isp_ladder_skip(s, "cnf", "parameter -1, bank left replayed");
+	} else {
+		u32 strength = ar_isp_cnf_strength_from_blob(blob,
+							     (u32)cnf_gain << 8);
+
+		ar_isp_ladder_cmp(s, "cnf", AR_ISP_CNF_STRENGTH_REG,
+				  readl(isp->base + AR_ISP_CNF_STRENGTH_REG),
+				  ar_isp_cnf_pack(strength),
+				  AR_ISP_CNF_STRENGTH_MASK, &bad);
+		ar_isp_ladder_cmp(s, "cnf", AR_ISP_CNF_NORM_REG_A,
+				  readl(isp->base + AR_ISP_CNF_NORM_REG_A),
+				  ar_isp_cnf_norm_pack(strength) |
+				  AR_ISP_CNF_NORM_A_BIT,
+				  AR_ISP_CNF_NORM_MASK, &bad);
+		ar_isp_ladder_cmp(s, "cnf", AR_ISP_CNF_NORM_REG_B,
+				  readl(isp->base + AR_ISP_CNF_NORM_REG_B),
+				  ar_isp_cnf_norm_pack(AR_ISP_CNF_NORM_CONST_B),
+				  AR_ISP_CNF_NORM_B_MASK, &bad);
+	}
+
+	if (cm_trigger < 0) {
+		ar_isp_ladder_skip(s, "cm", "parameter -1, bank left replayed");
+	} else if (ar_isp_get_le32(blob + AR_ISP_CM_HEADER) != 1) {
+		ar_isp_ladder_skip(s, "cm", "tuning gate clear, bank left replayed");
+	} else {
+		ar_isp_ladder_cmp(s, "cm", AR_ISP_CM_GAIN_REG,
+				  readl(isp->base + AR_ISP_CM_GAIN_REG),
+				  ar_isp_cm_gain_field_from_blob(blob,
+								 (u32)cm_trigger,
+								 0),
+				  AR_ISP_CM_GAIN_MASK, &bad);
+	}
+
+	if (cm2_trigger < 0) {
+		ar_isp_ladder_skip(s, "cm2", "parameter -1, bank left replayed");
+	} else if (ar_isp_get_le32(blob + AR_ISP_CM2_HEADER) != 1) {
+		ar_isp_ladder_skip(s, "cm2", "tuning gate clear, bank left replayed");
+	} else {
+		struct ar_isp_cm2_row row;
+		static const u32 offs[] = {
+			AR_ISP_CM2_LO1_REG, AR_ISP_CM2_HI1_REG,
+			AR_ISP_CM2_LO2_REG, AR_ISP_CM2_HI2_REG,
+			AR_ISP_CM2_RECIP1_REG, AR_ISP_CM2_RECIP2_REG,
+		};
+		u32 vals[ARRAY_SIZE(offs)];
+
+		static const u32 masks[] = {
+			U32_MAX, U32_MAX, U32_MAX, U32_MAX,
+			AR_ISP_CM2_RECIP_MASK, AR_ISP_CM2_RECIP_MASK,
+		};
+
+		ar_isp_cm2_from_blob(&row, blob, (u32)cm2_trigger, 0);
+
+		vals[0] = row.lo1;
+		vals[1] = row.hi1;
+		vals[2] = row.lo2;
+		vals[3] = row.hi2;
+		vals[4] = row.recip1;
+		vals[5] = row.recip2;
+
+		ar_isp_ladder_cmp(s, "cm2", AR_ISP_CM2_GAIN_REG,
+				  readl(isp->base + AR_ISP_CM2_GAIN_REG),
+				  row.gain_field, AR_ISP_CM2_GAIN_MASK, &bad);
+
+		for (unsigned int i = 0; i < ARRAY_SIZE(offs); i++)
+			ar_isp_ladder_cmp(s, "cm2", offs[i],
+					  readl(isp->base + offs[i]), vals[i],
+					  masks[i], &bad);
+	}
+
+	seq_printf(s, "\n%u mismatches\n", bad);
+
+	return 0;
 }
 
 /*

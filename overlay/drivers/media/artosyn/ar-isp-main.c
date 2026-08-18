@@ -706,6 +706,16 @@ static int ar_isp_regs_show(struct seq_file *s, void *unused)
 DEFINE_SHOW_ATTRIBUTE(ar_isp_regs);
 
 /*
+ * The gain-keyed banks, live against a fresh recomputation. ar-isp-tables.c owns
+ * the comparison because the gain parameters and the stage builders live there.
+ */
+static int ar_isp_ladder_banks_show(struct seq_file *s, void *unused)
+{
+	return ar_isp_ladders_show(s, s->private);
+}
+DEFINE_SHOW_ATTRIBUTE(ar_isp_ladder_banks);
+
+/*
  * Every stage's gate, read back and compared against the tuning file.
  *
  * The recovery in vendor-tables/ar-isp-gates.h says which register and bit
@@ -947,6 +957,8 @@ static int ar_isp_probe(struct platform_device *pdev)
 				   &ar_isp_arm_fops);
 	debugfs_create_file_unsafe("ladders", 0600, isp->debugfs, isp,
 				   &ar_isp_ladders_fops);
+	debugfs_create_file("ladder_banks", 0400, isp->debugfs, isp,
+			    &ar_isp_ladder_banks_fops);
 	debugfs_create_file_unsafe("tone", 0600, isp->debugfs, isp,
 				   &ar_isp_tone_fops);
 	debugfs_create_u32("irq_events", 0400, isp->debugfs, &isp->irq_events);
