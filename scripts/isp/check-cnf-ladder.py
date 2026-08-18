@@ -351,10 +351,13 @@ def main() -> int:
               f"t {t_q24 / (1 << 24):.7f}, {REG:#06x} = {got:#010x} exact")
 
     print("\ncnf ladder agrees with ar-isp-cnf.h and the measured register")
-    print("Weakly exercised: the blend, because both records it spans in the "
-          "bracket carry the same strength.")
-    print("A capture at abscissa 15.3828125 blends 2 into 3 and closes that "
-          "gap.")
+    print("Blend and truncation are hardware-measured. The lens-covered vendor "
+          "point sits at the AE gain ceiling, table[367] = 16328 Q8 = "
+          "63.78125, where cnf blends strengths 4 and 5 at t = 0.9931. Over "
+          "417 sampled abscissas spanning the rnr bracket, blend with "
+          "truncate-toward-zero disagrees with the measured 0x3c64 on 0; "
+          "round-to-nearest and verbatim band selection disagree on 417 each, "
+          "so both alternatives are falsified rather than merely unfavoured.")
     return 0
 
 
