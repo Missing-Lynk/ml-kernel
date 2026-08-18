@@ -28,6 +28,10 @@ import pathlib
 import struct
 import sys
 
+from blob_layout import Layout
+
+_LAY = Layout.load()
+
 # The AE state block, anchored off the generated exposure table rather than a
 # fixed address: the heap base moves between capture sessions.
 HEAP_BASE = 0x50C000
@@ -43,9 +47,11 @@ OFF_CURRENT_LUMA = STATE_AE + 4596
 
 SIG_LEN = 512
 
-# Blob-layout section "ae_exposure_table".
-BLOB_TABLE_OFF = 0x0B6524
-BLOB_TABLE_COUNT = 366
+# The shipped exposure table, keyed off the layout so the offset lives in one place.
+_TABLE = _LAY["ae_exposure_table"]
+BLOB_TABLE_OFF = _TABLE.offset
+BLOB_TABLE_COUNT = _TABLE.count
+BLOB_TABLE_STRIDE = _TABLE.stride
 
 # Scalar intervals inverted from each capture's cm/cm2 bank by
 # check-cm-ladder.py and check-cm2-ladder.py, quoted here as the measurement.
@@ -105,7 +111,8 @@ def blob_table(blob: bytes) -> list[tuple[int, int]]:
     out: list[tuple[int, int]] = []
 
     for i in range(BLOB_TABLE_COUNT):
-        gain, lines = struct.unpack_from("<II", blob, BLOB_TABLE_OFF + i * 8)
+        gain, lines = struct.unpack_from("<II", blob,
+                                         BLOB_TABLE_OFF + i * BLOB_TABLE_STRIDE)
 
         out.append((gain, lines))
 
