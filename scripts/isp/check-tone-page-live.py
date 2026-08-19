@@ -18,8 +18,23 @@ selector and packers, compiled unmodified out of the driver directory) and compa
     check-tone-page-live.py --tuning nt99235.bin --scalar-q8 74496 \\
         --gamma gamma.bin --drc drc.bin
 
+**Writing `tone_scalar` alone does not rebuild the pages.** The rebuild is armed separately, which
+is what `ml-aed` does:
+
+    echo $((scalar * 256)) > /sys/module/ar_isp/parameters/tone_scalar
+    echo 1 > /sys/kernel/debug/ar-isp/tone
+
+Without the arm the unit keeps serving its boot-pinned page, and since scalar 291 selects exactly
+what the default pins `gamma_curve 3` / `drc_profile 4` give, a check at that scalar passes whether
+or not the publish path works. Verify across several scalars, never one.
+
 A pinned unit (`tone_scalar` -1) publishes from `gamma_curve`/`drc_profile` instead, so pass
 `--scalar-q8` the value those pins correspond to, or run the unit with the scalar set.
+
+`--differ A B` answers a different question, before any device time is spent: would an experiment
+comparing those two scalars see anything at all? Two scalars inside the same band select the same
+entries verbatim and build byte-identical pages, so the comparison is void by construction however
+carefully it is run. That is not hypothetical; it is how the first tone gate boot was lost.
 
 The DRC page is the strong half. Its dynamic banks carry the tuning file's own 20-bit samples with
 no transform in between, so a byte-exact match proves the selector, the blend weight, the packer
@@ -105,15 +120,56 @@ def compare(name: str, live: bytes, want: bytes, expect_size: int) -> int:
     return len(diff)
 
 
+def report_difference(tuning: pathlib.Path, low: int, high: int) -> int:
+    """Would comparing these two scalars show anything? Returns nonzero when it would not."""
+    with tempfile.TemporaryDirectory() as tmp:
+        binary = build_tone_dump(pathlib.Path(tmp) / "tone-dump")
+        a_gamma, a_drc, a_pick = run_tone_dump(binary, tuning, low << 8, tmp)
+        b_gamma, b_drc, b_pick = run_tone_dump(binary, tuning, high << 8, tmp)
+
+    # tone-dump writes only the region it builds; compare exactly that much.
+    n_gamma = min(len(a_gamma), len(b_gamma))
+    n_drc = min(len(a_drc), len(b_drc))
+    d_gamma = sum(1 for i in range(n_gamma) if a_gamma[i] != b_gamma[i])
+    d_drc = sum(1 for i in range(n_drc) if a_drc[i] != b_drc[i])
+
+    print(f"scalar {low}: selection {a_pick}")
+    print(f"scalar {high}: selection {b_pick}\n")
+    print(f"gamma: {d_gamma} of {n_gamma} bytes differ")
+    print(f"drc  : {d_drc} of {n_drc} bytes differ\n")
+
+    if d_gamma or d_drc:
+        print("VERDICT: these two scalars build different pages, so a comparison between them can "
+              "show something.")
+
+        return 0
+
+    print("VERDICT: VOID. These two scalars build BYTE-IDENTICAL gamma and DRC pages, so any "
+          "experiment comparing them measures nothing about tone, however it is run. Pick scalars "
+          "that select different entries; the selector bands are wide and most of the range sits "
+          "inside one of them.")
+
+    return 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--tuning", required=True, type=pathlib.Path)
-    ap.add_argument("--scalar-q8", required=True, type=int,
+    ap.add_argument("--scalar-q8", type=int,
                     help="the tone_scalar the unit was running, in Q8")
     ap.add_argument("--gamma", type=pathlib.Path, help="device gamma_page dump")
     ap.add_argument("--drc", type=pathlib.Path, help="device drc_page dump")
+    ap.add_argument("--differ", nargs=2, type=int, metavar=("A", "B"),
+                    help="two scalars (NOT Q8): report whether they build different pages, so a "
+                         "planned comparison is not void before the device is booted")
     args = ap.parse_args()
+
+    if args.differ:
+        return report_difference(args.tuning, args.differ[0], args.differ[1])
+
+    if args.scalar_q8 is None:
+        sys.exit("--scalar-q8 is required unless --differ is used")
 
     if not args.gamma and not args.drc:
         sys.exit("nothing to compare: pass --gamma, --drc or both")
