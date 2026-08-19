@@ -15,6 +15,7 @@
 #define AR_ISP_PRIV_H
 
 #include <linux/clk.h>
+#include <linux/debugfs.h>
 #include <linux/io.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
@@ -74,6 +75,16 @@ struct ar_isp {
 	 */
 	struct ar_isp_tone_pick last_gamma;
 	struct ar_isp_tone_pick last_drc;
+
+	/*
+	 * Read-only views of the two tone pages, for debugfs. These are the
+	 * only stages with no register readback: gamma and DRC are DMA tables,
+	 * so ladder_banks cannot reach them and the published bytes are
+	 * otherwise unobservable from the host. The wrappers point straight at
+	 * the coherent allocations and are filled once those exist.
+	 */
+	struct debugfs_blob_wrapper gamma_blob;
+	struct debugfs_blob_wrapper drc_blob;
 
 	/*
 	 * Statistics targets. rro is the AE zone grid and both bank-0x6400

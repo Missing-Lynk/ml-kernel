@@ -961,6 +961,15 @@ static int ar_isp_probe(struct platform_device *pdev)
 			    &ar_isp_ladder_banks_fops);
 	debugfs_create_file_unsafe("tone", 0600, isp->debugfs, isp,
 				   &ar_isp_tone_fops);
+	/*
+	 * The two tone pages as the hardware fetches them. gamma and DRC are
+	 * the only configured stages with no register readback, so this is the
+	 * only way to compare a published page against the one the host-side
+	 * builder produces for the same trigger scalar.
+	 */
+	debugfs_create_blob("gamma_page", 0400, isp->debugfs, &isp->gamma_blob);
+	debugfs_create_blob("drc_page", 0400, isp->debugfs, &isp->drc_blob);
+
 	debugfs_create_u32("irq_events", 0400, isp->debugfs, &isp->irq_events);
 	debugfs_create_u32("irq_stats_events", 0400, isp->debugfs,
 			   &isp->irq_stats_events);
@@ -1000,6 +1009,10 @@ static void ar_isp_remove(struct platform_device *pdev)
 	if (isp->irq_requested)
 		free_irq(isp->irq, isp);
 
+	/* Before the release: the gamma_page and drc_page nodes are blob views
+	 * of the coherent table allocations, so a reader must not be able to
+	 * reach them after ar_isp_tables_release frees the pages.
+	 */
 	debugfs_remove_recursive(isp->debugfs);
 	ar_isp_tables_release(isp);
 	clk_bulk_disable_unprepare(ARRAY_SIZE(isp->clks), isp->clks);

@@ -1710,6 +1710,14 @@ void ar_isp_tables_prepare(struct ar_isp *isp)
 				  &isp->gamma_dma);
 	isp->drc = ar_isp_alloc(isp, "drc", AR_ISP_DRC_SIZE, &isp->drc_dma);
 
+	/* The debugfs views stay empty until the pages exist, so a read before
+	 * this point returns nothing rather than a stale or wild pointer.
+	 */
+	isp->gamma_blob.data = isp->gamma;
+	isp->gamma_blob.size = isp->gamma ? AR_ISP_GAMMA_SIZE : 0;
+	isp->drc_blob.data = isp->drc;
+	isp->drc_blob.size = isp->drc ? AR_ISP_DRC_SIZE : 0;
+
 	if (compander)
 		isp->tone = ar_isp_alloc(isp, "compander", AR_ISP_TONE_ALLOC,
 					 &isp->tone_dma);
