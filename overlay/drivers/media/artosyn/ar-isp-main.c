@@ -300,6 +300,100 @@ static const struct ar_isp_reg ar_isp_kept[] = {
 	{ 0x651c, 0x00000001 },
 };
 
+static bool gates;
+module_param(gates, bool, 0644);
+MODULE_PARM_DESC(gates,
+		 "write the tuning file's stage gates as a veto pass after configure; off still counts and logs what a write would change");
+
+/*
+ * The stage-gate veto, phase 2 of plans/isp-stage-gates.md.
+ *
+ * The configure path has already installed every gate as part of each stage's
+ * replayed or derived data, so with the base resolved from the tuning file
+ * this pass must find nothing to change: its pass condition on hardware is an
+ * empty register diff, and the deviation count logged here is that condition
+ * made cheap. Until a boot has shown the count at zero the writes stay behind
+ * the `gates` parameter and a default boot only counts.
+ *
+ * What is skipped stays skipped for a recovered reason:
+ *  - stages with no tuning flag (AR_ISP_STAGE_NO_BLOB): no base to resolve;
+ *  - AR_ISP_STAGE_HW_RB banks: they do not read back what was written, so a
+ *    read-modify-write folds the block's own state into the mask;
+ *  - gates with unresolved polarity (AR_ISP_GATE_UNKNOWN): writing one would
+ *    encode a guess the recovery refused to make;
+ *  - word gates whose flag reads on: their "on" value is computed by the
+ *    stage, not a constant, so only the off direction can be vetoed.
+ *
+ * A nonzero count is not automatically a driver defect: af_stats carries a
+ * tuning flag of 1 while the vendor runs the stage off, so its gate is
+ * decided somewhere the recovery has not reached, and the honest response is
+ * the log line, not a write (its statistics addresses are not allocated on
+ * this stack). That is the kind of finding this pass exists to surface.
+ */
+static void ar_isp_gates_veto(struct ar_isp *isp, bool commit)
+{
+	const u8 *blob = isp->tuning ? isp->tuning->data : NULL;
+	unsigned int deviations = 0;
+
+	if (!blob)
+		return;
+
+	for (unsigned int i = 0; i < ARRAY_SIZE(ar_isp_stages); i++) {
+		const struct ar_isp_stage *st = &ar_isp_stages[i];
+		int want;
+
+		if (!st->blob_gate || (st->flags & AR_ISP_STAGE_HW_RB))
+			continue;
+
+		if (st->blob_gate + 4 > isp->tuning->size)
+			continue;
+
+		want = ar_isp_get_le32(blob + st->blob_gate) ? 1 : 0;
+
+		for (unsigned int g = 0; g < st->n_gates; g++) {
+			const struct ar_isp_gate *gate = &st->gates[g];
+			u32 word = readl(isp->base + gate->reg);
+			u32 fixed = word;
+
+			switch (gate->kind) {
+			case AR_ISP_GATE_BIT_ENABLE:
+				fixed = want ? word | gate->set_mask :
+					       word & ~gate->clear_mask;
+				break;
+
+			case AR_ISP_GATE_BIT_BYPASS:
+				fixed = want ? word & ~gate->clear_mask :
+					       word | gate->set_mask;
+				break;
+
+			case AR_ISP_GATE_WORD:
+				if (!want)
+					fixed = 0;
+				break;
+
+			default:
+				break;
+			}
+
+			if (fixed == word)
+				continue;
+
+			deviations++;
+			if (commit)
+				writel(fixed, isp->base + gate->reg);
+
+			dev_info(isp->dev,
+				 "gates veto: %s 0x%04x 0x%08x -> 0x%08x%s\n",
+				 st->name, gate->reg, word, fixed,
+				 commit ? "" : " (not written, gates=0)");
+		} /* for each gate */
+	} /* for each stage */
+
+	if (deviations)
+		dev_info(isp->dev, "gates veto: %u deviation(s) %s\n",
+			 deviations, commit ? "written" : "counted only");
+}
+
 /*
  * Apply the whole configuration.
  *
@@ -345,6 +439,7 @@ static void ar_isp_configure(struct ar_isp *isp)
 	ar_isp_rgb2yuv_apply(isp);
 	ar_isp_ladders_apply(isp, false);
 	ar_isp_de3d_geom_apply(isp, false);
+	ar_isp_gates_veto(isp, gates);
 
 	isp->configured = true;
 
@@ -561,6 +656,7 @@ static void ar_isp_configure_prefix(struct ar_isp *isp, size_t n)
 	ar_isp_rgb2yuv_apply(isp);
 	ar_isp_ladders_apply(isp, false);
 	ar_isp_de3d_geom_apply(isp, false);
+	ar_isp_gates_veto(isp, gates);
 
 	isp->configured = true;
 
