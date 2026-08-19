@@ -184,7 +184,8 @@ def main() -> int:
     ap.add_argument("--session", type=pathlib.Path,
                     help="the au-vendor-session capture directory")
     ap.add_argument("--sweep", type=pathlib.Path,
-                    help="a device sweep CSV from glue/camera/au-tone-test.sh")
+                    help="a device sweep CSV: uptime_s,tone_scalar,exp_index,luma,target,settle "
+                         "with a header line, one row per sample")
     ap.add_argument("--tuning", type=pathlib.Path,
                     help="the sensor tuning blob, required with --sweep")
     args = ap.parse_args()
