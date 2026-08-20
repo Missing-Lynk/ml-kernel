@@ -59,6 +59,21 @@ OPEN_CAPTURE: pathlib.Path = ROOT / "out/au-snapshot/ours-registers-live.txt"
 CAPTURE_WINDOWS: tuple[str, ...] = ("cvisp +0x8000", "cvisp +0x4000", "cvisp +0x4400",
                                     "cvisp +0x4600", "cvisp +0x4700")
 
+# Our side of the 128-word 0x8000 window, read on a later boot than OPEN_CAPTURE. It
+# extends that capture rather than replacing it: across the 64 words the two share,
+# they agree everywhere except 0x8098, the ring base, which is a fresh allocation each
+# boot and is already classed as a DRAM address. Offsets are relative to 0x8000, and
+# OPEN_CAPTURE wins wherever both carry a word, so the matched operating point stays
+# the authority and this file only supplies 0x8100-0x81fc.
+OPEN_CAPTURE_WIDE: pathlib.Path = ROOT / "out/au-ltm-live-20260821/live-cvisp-8000.txt"
+WIDE_BASE: int = 0x8000
+
+# The vendor's side of the same widened window, from a slot-A session written to its own
+# directory so the reference capture above stays the authority on every window they share.
+# Absent until that session runs, in which case the three recordings past 0x80fc stay
+# unmeasured and the checker says so.
+VENDOR_CAPTURE_WIDE: pathlib.Path = ROOT / "out/au-snapshot-wide/registers.txt"
+
 # The mode the recovered configuration was captured at, and the only one the
 # driver configures today (ar-cvisp.c AR_CVISP_WIDTH / AR_CVISP_HEIGHT).
 FRAME_WIDTH: int = 1920
@@ -240,6 +255,23 @@ def capture(path: pathlib.Path) -> dict[int, int]:
     return words
 
 
+def flat_capture(path: pathlib.Path, base: int) -> dict[int, int]:
+    """A headerless register dump, every row an offset from base."""
+    if not path.exists():
+        return {}
+    words: dict[int, int] = {}
+    for line in path.read_text(errors="replace").split("\n"):
+        row = re.match(r"\+0x([0-9a-f]+):\s+(.*)", line.strip())
+        if row is None:
+            continue
+
+        offset: int = int(row.group(1), 16)
+        for index, word in enumerate(row.group(2).split()):
+            words[base + offset + 4 * index] = int(word, 16)
+
+    return words
+
+
 def measured_section(trace: dict[int, int], residue: list[int]) -> int:
     """
     Report how much of the configuration is measured equal to the streaming vendor.
@@ -250,8 +282,10 @@ def measured_section(trace: dict[int, int], residue: list[int]) -> int:
     operating point reads the same word. Returns the count of residue registers no
     capture covers, which is the only part still resting on the recording alone.
     """
-    vendor: dict[int, int] = capture(VENDOR_CAPTURE)
-    ours: dict[int, int] = capture(OPEN_CAPTURE)
+    vendor: dict[int, int] = capture(VENDOR_CAPTURE_WIDE)
+    vendor.update(capture(VENDOR_CAPTURE))
+    ours: dict[int, int] = flat_capture(OPEN_CAPTURE_WIDE, WIDE_BASE)
+    ours.update(capture(OPEN_CAPTURE))
     if not vendor or not ours:
         print("slot-A captures absent: no measurement against the vendor available\n")
         return len(residue)
@@ -269,11 +303,20 @@ def measured_section(trace: dict[int, int], residue: list[int]) -> int:
 
     seen: list[int] = [off for off in residue if off in vendor and off in ours]
     unseen: list[int] = [off for off in residue if off not in seen]
-    print(f"    of the {len(residue)} recordings, {len(seen)} are covered by the captures "
-          f"and read the same on both units:")
+    agree: list[int] = [off for off in seen if vendor[off] == ours[off]]
+    disagree: list[int] = [off for off in seen if vendor[off] != ours[off]]
 
-    for off in seen:
-        print(f"      {off:#06x} = {vendor[off]:#010x}")
+    print(f"    of the {len(residue)} recordings, {len(seen)} are covered by the captures")
+    if agree:
+        print(f"      {len(agree)} read the same on both units:")
+        for off in agree:
+            print(f"        {off:#06x} = {vendor[off]:#010x}")
+
+    if disagree:
+        print(f"      {len(disagree)} read DIFFERENTLY, so the recording is wrong for this "
+              f"unit and the value is a real vendor difference:")
+        for off in disagree:
+            print(f"        {off:#06x}  vendor {vendor[off]:#010x}  ours {ours[off]:#010x}")
 
     if unseen:
         print(f"    {len(unseen)} sit outside every captured window, so they rest on the "
@@ -282,7 +325,7 @@ def measured_section(trace: dict[int, int], residue: list[int]) -> int:
             print(f"      {off:#06x}")
 
     print()
-    return len(unseen)
+    return len(unseen) + len(disagree)
 
 
 def main() -> int:
@@ -359,7 +402,8 @@ def main() -> int:
     print("The composition reproduces the trace exactly, with nothing unsourced.")
     print(f"The CVISP replay is {len(residue)} registers, down from {total}, and of those")
     print(f"{unmeasured} rest on the recording alone; the rest read the same on the streaming")
-    print("vendor and on our unit at the matched operating point.")
+    print("vendor and on our unit. The block is light-invariant, so a capture of it does not")
+    print("have to be taken at the matched operating point.")
     return 0
 
 
