@@ -300,8 +300,21 @@
  * tiles of 256 u16 each, each tile summing to 8040. The hardware fills the
  * whole 0x80000; what follows the histogram is not decoded.
  */
+/*
+ * 0x2834 is the mesh pass count. The vendor's isp_sub_ltm.c set_format runs its
+ * block-geometry pass twice, once over the configured mesh and once over a mesh
+ * of twice the density, and carries a counter that is 2 for the first pass and 4
+ * for the second. The counter is what reaches this register, so a unit that has
+ * completed both passes reads 4. Bit 12 of 0x2800 distinguishes the passes and is
+ * written before the doubling, which is why the streaming vendor reads 4 here
+ * with that bit clear. The mesh itself is 8x8, the 64 cells the page's 64 tiles
+ * are accumulated over, and 0x2830 carries 0x1f in each of two fields.
+ */
 #define AR_ISP_LTM_PAGE_ADDR		0x2808
 #define AR_ISP_LTM_STATS_ADDR		0x280c
+#define AR_ISP_LTM_MESH_PASSES		0x2834
+#define AR_ISP_LTM_MESH_PASS_FIRST	2
+#define AR_ISP_LTM_MESH_PASS_SECOND	(AR_ISP_LTM_MESH_PASS_FIRST * 2)
 #define AR_ISP_LTM_PAGE_SIZE		0x4000
 #define AR_ISP_LTM_STATS_SIZE		0x80000
 #define AR_ISP_LTM_HIST_SIZE		0x8000

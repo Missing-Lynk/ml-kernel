@@ -435,6 +435,13 @@ void ar_isp_stats_publish(struct ar_isp *isp)
 		writel(lower_32_bits(isp->ltm_stats_dma),
 		       isp->base + AR_ISP_LTM_STATS_ADDR);
 
+	/*
+	 * The mesh pass count the vendor's set_format leaves behind. The static
+	 * image carries zero here and the streaming vendor reads 4, which is the
+	 * only configuration difference across this whole bank.
+	 */
+	writel(AR_ISP_LTM_MESH_PASS_SECOND, isp->base + AR_ISP_LTM_MESH_PASSES);
+
 	if (isp->rro || isp->hist)
 		dev_info(isp->dev, "stats: rro %pad, rro_face %pad, hist %pad\n",
 			 &isp->rro_dma, &isp->rro_face_dma, &isp->hist_dma);
