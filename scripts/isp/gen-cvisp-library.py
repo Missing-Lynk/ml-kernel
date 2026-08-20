@@ -184,7 +184,7 @@ def emit(handle, digest: str, installed: list) -> None:
 
     guard_open, guard_close = arlib.guard("AR_CVISP_LIBRARY_H")
     write(guard_open + "\n")
-    write('#include "ar-cvisp-defaults.h"\n\n')
+    write('#include "ar-cvisp-derived.h"\n\n')
 
     write("/*\n")
     write(f" * {total} registers across {len(installed)} CVISP images.\n")

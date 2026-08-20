@@ -893,6 +893,40 @@ def is_geometry(value: int) -> bool:
     return (high in GEOMETRY and not low) or (low in GEOMETRY and not high)
 
 
+# CVISP is a separate block at 0x08e00000 with its own configuration path, so it
+# has its own classifier. The audit reports its bottom line here rather than
+# leaving it outside the headline, which is what let a 331-register replay sit
+# beside a zero-unexplained result for the main ISP.
+CVISP_BASELINE: int = 8
+
+
+def cvisp_section() -> int:
+    """Print the CVISP block's own provenance line. Returns the recorded count."""
+    checker = HERE / 'check-cvisp-derivation.py'
+    spec = importlib.util.spec_from_file_location('cvisp_check', checker)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    body = module.DEFAULTS.read_text()
+    state: dict[int, int] = {}
+    for name in ('setup', 'late', 'tick'):
+        for off, val in module.parse_table(body, name):
+            state[off] = val
+
+    classes, _mismatch = module.classify(state, module.parse_library(),
+                                         module.geometry_words())
+
+    print(f'\nCVISP, the block at 0x08e00000, configured from '
+          f'vendor-tables/ar-cvisp-derived.h: {len(state)}\n')
+    for name in ('library image', 'frame geometry', 'port scoreboard', 'zero write',
+                 'unity gain', 'blc constant', 'vendor DRAM address', 'trace residue',
+                 'UNSOURCED'):
+        if classes.get(name):
+            print(f'    {len(classes[name]):5}  {name}')
+    print('\n  run scripts/isp/check-cvisp-derivation.py for which ones and why')
+    return len(classes.get('trace residue', [])) + len(classes.get('UNSOURCED', []))
+
+
 def main() -> int:
     library, final, origin = load_tables()
     derived = derived_registers()
@@ -1089,6 +1123,18 @@ def main() -> int:
             listed = ' '.join(f'{r:#06x}' for r in sorted(regs)[:8])
             more = ' ...' if len(regs) > 8 else ''
             print(f'    {name:<20}{len(regs):4}   {listed}{more}')
+
+
+    cvisp_residue: int = cvisp_section()
+
+    if cvisp_residue > CVISP_BASELINE:
+        print(f'\nregression: {cvisp_residue} CVISP registers are still '
+              f'recordings against a baseline of {CVISP_BASELINE}')
+        return 1
+
+    if cvisp_residue < CVISP_BASELINE:
+        print(f'\nimproved: {cvisp_residue} CVISP recordings against a baseline of '
+              f'{CVISP_BASELINE}; lower CVISP_BASELINE to lock it in')
 
     if needs_device > DEVICE_BASELINE:
         print(f'\nregression: {needs_device} registers need a device read '

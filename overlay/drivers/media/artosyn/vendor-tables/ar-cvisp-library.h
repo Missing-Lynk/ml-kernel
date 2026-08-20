@@ -31,7 +31,7 @@
 #ifndef AR_CVISP_LIBRARY_H
 #define AR_CVISP_LIBRARY_H
 
-#include "ar-cvisp-defaults.h"
+#include "ar-cvisp-derived.h"
 
 /*
  * 277 registers across 3 CVISP images.
