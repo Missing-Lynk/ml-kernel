@@ -43,6 +43,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/slab.h>
 
 #include "vendor-tables/ar-isp-defaults.h"
 #include "vendor-tables/ar-isp-gates.h"
@@ -812,6 +813,108 @@ static int ar_isp_ladder_banks_show(struct seq_file *s, void *unused)
 DEFINE_SHOW_ATTRIBUTE(ar_isp_ladder_banks);
 
 /*
+ * The LTM coefficient page node, both directions.
+ *
+ * Reading returns the half the descriptor currently names, which is the page
+ * the hardware fetches. Writing feeds a replacement: bytes stage into a
+ * per-open buffer and publish on close, once exactly one whole page has
+ * arrived. Close is the only honest commit point because every userspace
+ * writer chunks; a feed that closes short or long is dropped with a warning
+ * in the log, since close(2) does not carry the error back reliably.
+ *
+ * This is the consumer-side hook for the CLAHE port: whatever computes the
+ * page (ml-aed, a harness, a replayed vendor capture) delivers it here and
+ * the driver publishes it under the vendor's double-buffer contract.
+ */
+struct ar_isp_ltm_feed {
+	struct ar_isp *isp;
+	u8 *buf;
+	size_t filled;
+};
+
+static int ar_isp_ltm_page_open(struct inode *inode, struct file *file)
+{
+	struct ar_isp_ltm_feed *feed;
+
+	feed = kzalloc(sizeof(*feed), GFP_KERNEL);
+	if (!feed)
+		return -ENOMEM;
+
+	feed->buf = kzalloc(AR_ISP_LTM_PAGE_SIZE, GFP_KERNEL);
+	if (!feed->buf) {
+		kfree(feed);
+		return -ENOMEM;
+	}
+
+	feed->isp = inode->i_private;
+	file->private_data = feed;
+
+	return 0;
+}
+
+static ssize_t ar_isp_ltm_page_read(struct file *file, char __user *buf,
+				    size_t count, loff_t *ppos)
+{
+	struct ar_isp_ltm_feed *feed = file->private_data;
+	struct ar_isp *isp = feed->isp;
+	ssize_t ret;
+
+	if (!isp->ltm_page)
+		return -ENODEV;
+
+	mutex_lock(&isp->ltm_lock);
+	ret = simple_read_from_buffer(buf, count, ppos,
+				      (u8 *)isp->ltm_page +
+				      isp->ltm_page_half *
+				      AR_ISP_LTM_PAGE_SIZE,
+				      AR_ISP_LTM_PAGE_SIZE);
+	mutex_unlock(&isp->ltm_lock);
+
+	return ret;
+}
+
+static ssize_t ar_isp_ltm_page_write(struct file *file, const char __user *buf,
+				     size_t count, loff_t *ppos)
+{
+	struct ar_isp_ltm_feed *feed = file->private_data;
+	ssize_t ret;
+
+	ret = simple_write_to_buffer(feed->buf, AR_ISP_LTM_PAGE_SIZE, ppos,
+				     buf, count);
+	if (ret > 0 && (size_t)*ppos > feed->filled)
+		feed->filled = *ppos;
+
+	return ret;
+}
+
+static int ar_isp_ltm_page_release(struct inode *inode, struct file *file)
+{
+	struct ar_isp_ltm_feed *feed = file->private_data;
+	struct ar_isp *isp = feed->isp;
+
+	if (feed->filled == AR_ISP_LTM_PAGE_SIZE)
+		ar_isp_ltm_page_publish(isp, feed->buf);
+	else if (feed->filled)
+		dev_warn(isp->dev,
+			 "ltm_page feed dropped: %zu bytes, a page is %u\n",
+			 feed->filled, AR_ISP_LTM_PAGE_SIZE);
+
+	kfree(feed->buf);
+	kfree(feed);
+
+	return 0;
+}
+
+static const struct file_operations ar_isp_ltm_page_fops = {
+	.owner = THIS_MODULE,
+	.open = ar_isp_ltm_page_open,
+	.read = ar_isp_ltm_page_read,
+	.write = ar_isp_ltm_page_write,
+	.release = ar_isp_ltm_page_release,
+	.llseek = default_llseek,
+};
+
+/*
  * Every stage's gate, read back and compared against the tuning file.
  *
  * The recovery in vendor-tables/ar-isp-gates.h says which register and bit
@@ -1007,6 +1110,7 @@ static int ar_isp_probe(struct platform_device *pdev)
 
 	isp->dev = dev;
 	spin_lock_init(&isp->stats_lock);
+	mutex_init(&isp->ltm_lock);
 
 	isp->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(isp->base))
@@ -1065,6 +1169,18 @@ static int ar_isp_probe(struct platform_device *pdev)
 	 */
 	debugfs_create_blob("gamma_page", 0400, isp->debugfs, &isp->gamma_blob);
 	debugfs_create_blob("drc_page", 0400, isp->debugfs, &isp->drc_blob);
+
+	/*
+	 * The LTM page (read = the half the hardware fetches, write = feed a
+	 * page, committed on close) and the raw histogram head of ltm_stats.
+	 * The histogram is a live hardware-written buffer with no ping-pong
+	 * yet, so a read can tear across a frame boundary; a consumer that
+	 * needs coherence reads it twice and keeps a stable pair.
+	 */
+	debugfs_create_file("ltm_page", 0600, isp->debugfs, isp,
+			    &ar_isp_ltm_page_fops);
+	debugfs_create_blob("ltm_hist", 0400, isp->debugfs,
+			    &isp->ltm_stats_blob);
 
 	debugfs_create_u32("irq_events", 0400, isp->debugfs, &isp->irq_events);
 	debugfs_create_u32("irq_stats_events", 0400, isp->debugfs,

@@ -17,6 +17,7 @@
 #include <linux/clk.h>
 #include <linux/debugfs.h>
 #include <linux/io.h>
+#include <linux/mutex.h>
 #include <linux/spinlock.h>
 #include <linux/types.h>
 
@@ -101,12 +102,24 @@ struct ar_isp {
 	void *rro_face;
 	dma_addr_t rro_face_dma;
 
-	/* Bank 0x2800: the coefficient page at 0x2808 published as a fixed
-	 * identity, and the ltm_stats scribble target at 0x280c, whose 0x80000
-	 * extent is measured rather than guessed.
+	/*
+	 * Bank 0x2800: the coefficient page at 0x2808 and the ltm_stats
+	 * scribble target at 0x280c, whose 0x80000 extent is measured rather
+	 * than guessed.
+	 *
+	 * The page is double buffered the way the vendor publishes it: its
+	 * descriptor is rewritten to the freshly filled half on every publish,
+	 * because a single fixed buffer can be overwritten while the hardware
+	 * is still fetching it (the vendor alternates two addresses per frame).
+	 * ltm_page_half is the half the descriptor currently names; publishes
+	 * fill the other one. ltm_lock serialises publishers, who are all
+	 * process context: configure, and the debugfs feed.
 	 */
 	void *ltm_page;
 	dma_addr_t ltm_page_dma;
+	unsigned int ltm_page_half;
+	struct mutex ltm_lock;
+	struct debugfs_blob_wrapper ltm_stats_blob;
 
 	void *ltm_stats;
 	dma_addr_t ltm_stats_dma;
@@ -165,6 +178,7 @@ static inline void ar_isp_rmw(struct ar_isp *isp, u32 off, u32 mask, u32 val)
  */
 void ar_isp_de3d_publish(struct ar_isp *isp);
 void ar_isp_de3d_geom_apply(struct ar_isp *isp, bool verbose);
+int ar_isp_ltm_page_publish(struct ar_isp *isp, const void *page);
 void ar_isp_stats_arm(struct ar_isp *isp, unsigned int half);
 const void *ar_isp_stats_ready(struct ar_isp *isp, const void *buf, size_t size);
 void ar_isp_stats_publish(struct ar_isp *isp);

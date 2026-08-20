@@ -183,6 +183,23 @@ module_param(de3d_gain, int, 0644);
 MODULE_PARM_DESC(de3d_gain,
 		 "de3d ladder abscissa as a Q8 linear gain (default 256 = 1.0, the cold band; -1 leaves the replayed bank alone)");
 
+/*
+ * The de3d user strength knobs, the vendor's two-field pair (privctx+764/+772,
+ * transform at libmpp_service.so 0x1c69f4). 0..100, 50 is neutral and exactly
+ * identity, so the default changes no register and matches every capture. The
+ * 14-bit field saturates toward 200 at 100 and the 9-bit field toward 120; the
+ * vendor never moves either on the shipped path. See ar_isp_de3d_strength.
+ */
+static int de3d_strength = 50;
+module_param(de3d_strength, int, 0644);
+MODULE_PARM_DESC(de3d_strength,
+		 "de3d 14-bit denoise field strength, 0..100 (50 = neutral, the shipped state)");
+
+static int de3d_strength9 = 50;
+module_param(de3d_strength9, int, 0644);
+MODULE_PARM_DESC(de3d_strength9,
+		 "de3d 9-bit denoise field strength, 0..100 (50 = neutral, the shipped state)");
+
 static int cfa_gain = 256;
 module_param(cfa_gain, int, 0644);
 MODULE_PARM_DESC(cfa_gain,
@@ -410,7 +427,8 @@ void ar_isp_stats_publish(struct ar_isp *isp)
 	spin_unlock_irqrestore(&isp->stats_lock, flags);
 
 	if (isp->ltm_page)
-		writel(lower_32_bits(isp->ltm_page_dma),
+		writel(lower_32_bits(isp->ltm_page_dma +
+				     isp->ltm_page_half * AR_ISP_LTM_PAGE_SIZE),
 		       isp->base + AR_ISP_LTM_PAGE_ADDR);
 
 	if (isp->ltm_stats)
@@ -653,6 +671,22 @@ void ar_isp_de3d_apply(struct ar_isp *isp, bool verbose)
 	}
 
 	ar_isp_de3d_from_blob(regs, blob, (u32)de3d_gain << 8);
+
+	/*
+	 * The user strength knobs ride on top of the ladder: reg 0x2e1c (regs[4])
+	 * is the whole 14-bit field, and the 9-bit field lives in bits 16..24 of
+	 * 0x2e20 (regs[5]). Clamped to the recovered 0..100; 50 is a no-op.
+	 */
+	if (de3d_strength >= 0 && de3d_strength <= 100 && de3d_strength != 50)
+		regs[4] = ar_isp_de3d_strength(regs[4] & 0x3fff,
+					       de3d_strength, 200) & 0x3fff;
+
+	if (de3d_strength9 >= 0 && de3d_strength9 <= 100 && de3d_strength9 != 50) {
+		u32 f = ar_isp_de3d_strength((regs[5] >> 16) & 0x1ff,
+					     de3d_strength9, 120) & 0x1ff;
+
+		regs[5] = (regs[5] & ~(0x1ffu << 16)) | (f << 16);
+	}
 
 	for (unsigned int i = 0; i < AR_ISP_DE3D_REGS; i++) {
 		u32 off = AR_ISP_DE3D_BANK + ar_isp_de3d_regs[i].off;
@@ -1447,18 +1481,50 @@ static void ar_isp_fill_ltm(struct ar_isp *isp)
 		 * measured maximum, truncating as every quantisation in this
 		 * pipeline does. The stride leaves a gap after each tile's 128
 		 * samples; the whole page is zeroed first so the gaps match the
-		 * vendor's.
+		 * vendor's. Both halves get the identity, so the descriptor is
+		 * sane whichever one it names before the first publish.
 		 */
-		memset(isp->ltm_page, 0, AR_ISP_LTM_PAGE_SIZE);
+		memset(isp->ltm_page, 0, AR_ISP_LTM_PAGE_SIZE * 2);
 		for (unsigned int i = 0; i < AR_ISP_LTM_TILES; i++)
 			for (unsigned int j = 0; j < AR_ISP_LTM_SAMPLES; j++)
 				page[i * AR_ISP_LTM_TILE_STRIDE / 2 + j] =
 					cpu_to_le16(j * AR_ISP_LTM_CURVE_MAX /
 						    (AR_ISP_LTM_SAMPLES - 1));
+		memcpy((u8 *)isp->ltm_page + AR_ISP_LTM_PAGE_SIZE,
+		       isp->ltm_page, AR_ISP_LTM_PAGE_SIZE);
 	}
 
 	if (isp->ltm_stats)
 		memset(isp->ltm_stats, 0, AR_ISP_LTM_STATS_SIZE);
+}
+
+/*
+ * Install a new coefficient page the way the vendor does: fill the half the
+ * descriptor does not currently name, then point the descriptor at it. The
+ * hardware latches the address when it fetches, so the half being fetched
+ * from is never the one being written (plans/done/au-ltm-page-algorithm.md
+ * section 3). writel orders the copy ahead of the descriptor update.
+ *
+ * Serialised by ltm_lock: publishers are configure and the debugfs feed, both
+ * process context.
+ */
+int ar_isp_ltm_page_publish(struct ar_isp *isp, const void *page)
+{
+	unsigned int next;
+
+	if (!isp->ltm_page)
+		return -ENODEV;
+
+	mutex_lock(&isp->ltm_lock);
+	next = isp->ltm_page_half ^ 1;
+	memcpy((u8 *)isp->ltm_page + next * AR_ISP_LTM_PAGE_SIZE, page,
+	       AR_ISP_LTM_PAGE_SIZE);
+	writel(lower_32_bits(isp->ltm_page_dma + next * AR_ISP_LTM_PAGE_SIZE),
+	       isp->base + AR_ISP_LTM_PAGE_ADDR);
+	isp->ltm_page_half = next;
+	mutex_unlock(&isp->ltm_lock);
+
+	return 0;
 }
 
 static void ar_isp_fill_lsc(struct ar_isp *isp, const u8 *blob,
@@ -1751,11 +1817,14 @@ void ar_isp_tables_prepare(struct ar_isp *isp)
 
 	if (ltm) {
 		isp->ltm_page = ar_isp_alloc(isp, "ltm_page",
-					     AR_ISP_LTM_PAGE_SIZE,
+					     AR_ISP_LTM_PAGE_SIZE * 2,
 					     &isp->ltm_page_dma);
 		isp->ltm_stats = ar_isp_alloc(isp, "ltm_stats",
 					      AR_ISP_LTM_STATS_SIZE,
 					      &isp->ltm_stats_dma);
+		isp->ltm_stats_blob.data = isp->ltm_stats;
+		isp->ltm_stats_blob.size = isp->ltm_stats ?
+					   AR_ISP_LTM_HIST_SIZE : 0;
 	}
 
 	if (de3d) {
@@ -1834,8 +1903,8 @@ void ar_isp_tables_release(struct ar_isp *isp)
 				  isp->hist, isp->hist_dma);
 
 	if (isp->ltm_page)
-		dma_free_coherent(isp->dev, AR_ISP_LTM_PAGE_SIZE, isp->ltm_page,
-				  isp->ltm_page_dma);
+		dma_free_coherent(isp->dev, AR_ISP_LTM_PAGE_SIZE * 2,
+				  isp->ltm_page, isp->ltm_page_dma);
 
 	if (isp->ltm_stats)
 		dma_free_coherent(isp->dev, AR_ISP_LTM_STATS_SIZE,

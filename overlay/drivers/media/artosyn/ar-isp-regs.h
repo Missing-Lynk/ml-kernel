@@ -267,10 +267,11 @@
  * allocation. The vendor's 0x8000 stride is its own allocation granularity and
  * carries no meaning for buffers of our sizes.
  *
- * ltm_stats is deliberately single-buffered. Nothing reads it while the LTM
- * page is a fixed identity, so doubling its measured 0x80000 extent would spend
- * half a megabyte of coherent memory to serve no consumer. It joins the
- * ping-pong when the CLAHE port gives it one.
+ * ltm_stats is deliberately single-buffered. Nothing in the kernel consumes
+ * it, so doubling its measured 0x80000 extent would spend half a megabyte of
+ * coherent memory to serve no reader; its histogram extent is exposed raw
+ * through debugfs (torn reads possible, documented there) for host-side work.
+ * It joins the ping-pong when the CLAHE port gives it a per-frame consumer.
  */
 #define AR_ISP_STATS_HALVES		2
 
@@ -282,16 +283,28 @@
  * measured 0x80000 extent. Both are plain address publishes on the vendor's
  * per-frame list, with no valid bit.
  *
- * The vendor recomputes the page every frame from ltm_stats. Publishing a
- * fixed identity page forgoes local tone adaptation but is scene-safe, which
- * is what a cold boot needs: the replay otherwise arms the vendor's address,
- * and on a boot where slot A never streamed that memory is junk applied as
- * per-tile tone curves.
+ * The vendor recomputes the page every frame from ltm_stats. The default
+ * payload here is a fixed identity page, which forgoes local tone adaptation
+ * but is scene-safe, which is what a cold boot needs: the replay otherwise
+ * arms the vendor's address, and on a boot where slot A never streamed that
+ * memory is junk applied as per-tile tone curves.
+ *
+ * The page buffer is two halves of its own 0x4000 extent, because the
+ * vendor's publish contract is double buffered: the descriptor is rewritten
+ * to the freshly filled half on every publish, so the half being fetched is
+ * never the one being written. The vendor's 0x80000 stride between its two
+ * addresses is its allocation granularity, not the page size, and carries no
+ * meaning for a buffer this driver owns.
+ *
+ * AR_ISP_LTM_HIST_SIZE is the histogram extent at the head of ltm_stats: 64
+ * tiles of 256 u16 each, each tile summing to 8040. The hardware fills the
+ * whole 0x80000; what follows the histogram is not decoded.
  */
 #define AR_ISP_LTM_PAGE_ADDR		0x2808
 #define AR_ISP_LTM_STATS_ADDR		0x280c
 #define AR_ISP_LTM_PAGE_SIZE		0x4000
 #define AR_ISP_LTM_STATS_SIZE		0x80000
+#define AR_ISP_LTM_HIST_SIZE		0x8000
 #define AR_ISP_LTM_TILES		64
 #define AR_ISP_LTM_SAMPLES		128
 #define AR_ISP_LTM_TILE_STRIDE		0x100

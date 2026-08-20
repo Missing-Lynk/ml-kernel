@@ -172,6 +172,36 @@ static inline u32 ar_isp_de3d_slope(const u8 *payload, unsigned int band,
 	return (u32)(AR_ISP_DE3D_SLOPE_NUM / span) & 0xffff;
 }
 
+/*
+ * The user strength knob the vendor applies to two de3d fields, recovered from
+ * the strength function at libmpp_service.so 0x1c69f4. `strength` is 0..100
+ * with 50 the neutral midpoint; `ceil` is the field's saturation value, 200
+ * for the 14-bit field and 120 for the 9-bit field.
+ *
+ *   P <= 50   out = V - (50 - P) * V / 50           falls to 0 at P = 0
+ *   P >  50   out = C - (100 - P) * (C - V) / 50     rises to C at P = 100
+ *
+ * The vendor computes this in double and truncates toward zero (fcvtzs). The
+ * whole expression is (50*V - (50-P)*V)/50 and (50*C - (100-P)*(C-V))/50
+ * respectively, and C integer division truncates toward zero, so the integer
+ * form below reproduces the vendor bit for bit with no FPU. Exactly identity
+ * at 50: the (50 - 50) and (100 - 50) terms cancel to V with no remainder.
+ */
+static inline u32 ar_isp_de3d_strength(u32 v, int strength, u32 ceil)
+{
+	s64 t;
+
+	if (strength == 50)
+		return v;
+
+	if (strength < 50)
+		t = (s64)strength * v;
+	else
+		t = 50 * (s64)ceil - (100 - strength) * ((s64)ceil - v);
+
+	return (u32)(t / 50);
+}
+
 /* Build the 50 de3d ladder registers from the tuning file at the abscissa. */
 static inline void ar_isp_de3d_from_blob(u32 *dst, const u8 *blob, u32 gain_q16)
 {
