@@ -12,7 +12,8 @@
 # the repo so it never pollutes git. FAST=1 reuses the tree for an incremental make
 # (dev loop; NOT reproducible - clean-build before flashing a slot). BOARD=<name> selects
 # the device (devices/<name>/: its DTS + config-fragment list); default betafpv-vr04-goggle,
-# so a bare build.sh is the goggle exactly as before.
+# so a bare build.sh is the goggle exactly as before. EXTRA_FRAGMENTS="a b" merges
+# configs/a.config configs/b.config after the board list, for a build that is not flashed.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -160,6 +161,7 @@ do_build(){  # tree-dir
     -e MINIMAL="${MINIMAL:-}" \
     -e NOTRIM="${NOTRIM:-}" \
     -e LAX_FRAGMENTS="${LAX_FRAGMENTS:-}" \
+    -e EXTRA_FRAGMENTS="${EXTRA_FRAGMENTS:-}" \
     -e BOARD="$BOARD" \
     -e JOBS="$JOBS" \
     -e VERBOSE="$VERBOSE" \

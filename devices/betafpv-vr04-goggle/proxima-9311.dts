@@ -166,6 +166,36 @@
 			reg = <0 0x29200000 0 0x06e00000>;
 			no-map;
 		};
+
+		/* Persistent store, 1 MiB immediately below the MMZ carveout, so kernel RAM ends
+		 * at 0x29100000 and the two reservations are contiguous to the top of DRAM.
+		 * DRAM keeps its contents across a watchdog reset, so what the kernel wrote here
+		 * before it died is still present when SPL boots the next kernel, which exposes
+		 * it as /sys/fs/pstore. This is the only record of a hang that reaches neither
+		 * the serial console nor the flash.
+		 *
+		 * `no-map` keeps the region out of the linear map: pstore then reaches it through
+		 * ioremap_wc (Normal non-cacheable), so a written byte is in DRAM rather than in a
+		 * dirty cache line the reset discards, and unaligned access still works.
+		 *
+		 * Every zone size must be a power of two: ramoops rounds each one DOWN to one and
+		 * silently leaves the difference unused. These four tile the region exactly, in the
+		 * order the driver carves them (dmesg records take what the other three leave):
+		 * console 256K + ftrace 128K (per-CPU, bit 0 of `flags`, so 64K per core) + pmsg
+		 * 128K + four 128K kmsg records. Four records let an unattended soak record several
+		 * events before a harvest. max-reason 5 (KMSG_DUMP_MAX) keeps every dump reason,
+		 * not only oops and panic. */
+		ramoops@29100000 {
+			compatible = "ramoops";
+			reg = <0 0x29100000 0 0x00100000>;
+			no-map;
+			console-size = <0x40000>;
+			ftrace-size = <0x20000>;
+			pmsg-size = <0x20000>;
+			record-size = <0x20000>;
+			max-reason = <5>;
+			flags = <1>;
+		};
 	};
 
 	/* Userspace dma-heap /dev/dma_heap/mmz (ml_mmzheap.ko) over the MMZ pool.

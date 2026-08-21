@@ -117,6 +117,15 @@ if [ -z "$MINIMAL" ] && [ -f /repo/configs/artosyn.config ]; then
     exit 1
   fi
 
+  # EXTRA_FRAGMENTS is a space-separated list of fragment basenames merged LAST, after the
+  # board list, so they override it. For builds that are RAM-booted rather than flashed: a
+  # fragment here may grow the Image past the 6 MB kernel slot.
+  for name in ${EXTRA_FRAGMENTS:-}; do
+    f="/repo/configs/$name.config"
+    [ -f "$f" ] || { echo "EXTRA_FRAGMENTS lists '$name' but configs/$name.config is missing" >&2; exit 1; }
+    frags="$frags $f"
+  done
+
   # -Q silences the (expected) "redefined by fragment" notices: defconfig enables many drivers
   # as =m and our fragments turn them off, so the override warning would fire on every build.
   # shellcheck disable=SC2086  # $frags is a space-separated list and must word-split
