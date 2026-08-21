@@ -71,6 +71,11 @@ copy_kos "$KTREE/drivers/media/v4l2-core" "$KTREE/drivers/media/common/videobuf2
          "$KTREE/drivers/media/platform/chips-media/wave5" \
          "$KTREE/drivers/media/artosyn"
 
+# Persistent store: ramoops keeps the console across a watchdog reset, and PSTORE_RAM hard-selects
+# reed_solomon, so modprobe needs both staged to resolve encode_rs8 through modules.dep. Built only
+# where the board's fragments turn pstore on, and copy_kos skips a directory that does not exist.
+copy_kos "$KTREE/fs/pstore" "$KTREE/lib/reed_solomon"
+
 # The out-of-tree build above is unconditional, so an empty $BUILD_OUT means it produced
 # nothing and the whitelist below would silently ship without the Artosyn modules.
 compgen -G "$BUILD_OUT/*.ko" >/dev/null \
@@ -96,6 +101,9 @@ cp "$KTREE/modules.builtin" "$KTREE/modules.builtin.modinfo" "$STAGE/lib/modules
 # configured with a display (CONFIG_DRM_ARTOSYN) - the air unit has no panel.
 CRITICAL="wave5.ko"
 grep -q '^CONFIG_DRM_ARTOSYN=' "$KTREE/.config" && CRITICAL="$CRITICAL artosyn_vo.ko"
+# Only where the board asked for pstore: an image whose modules-load.d force-loads ramoops but
+# ships no ramoops.ko boots fine and silently keeps no post-mortem record at all.
+grep -q '^CONFIG_PSTORE_RAM=m' "$KTREE/.config" && CRITICAL="$CRITICAL ramoops.ko reed_solomon.ko"
 for critical in $CRITICAL; do
   [ -f "$MODDIR/$critical" ] || { echo "FATAL: $critical missing from stage (in-tree modules build incomplete)"; exit 1; }
 done

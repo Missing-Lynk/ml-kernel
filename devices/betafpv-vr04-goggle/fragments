@@ -18,3 +18,4 @@ usb-mtp      # MTP over USB (FunctionFS) for the DVR-recordings gadget
 dma          # DesignWare AXI DMA (dw-axi-dmac) for the GStreamer two-tile compositor
 cpufreq      # cpufreq-dt + governors for the CGU CPU clock (performance = vendor parity)
 i2c-rtc      # DesignWare i2c0 + the board's DS1307 RTC
+pstore       # ramoops post-mortem store: the kernel's last words survive a watchdog reset
