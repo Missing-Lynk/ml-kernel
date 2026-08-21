@@ -151,7 +151,10 @@ def check_one(header: str, gen: str, style: str, extra: list[str],
 
     a: list[str] = target.read_text().splitlines()
     b: list[str] = produced.splitlines()
-    differing: int = sum(1 for x, y in zip(a, b) if x != y) + abs(len(a) - len(b))
+    # strict=False: the two are expected to differ in length, and the surplus lines are
+    # counted separately by the length term.
+    differing: int = (sum(1 for x, y in zip(a, b, strict=False) if x != y)
+                      + abs(len(a) - len(b)))
     return "DRIFT", f"{differing} of {max(len(a), len(b))} lines differ"
 
 
