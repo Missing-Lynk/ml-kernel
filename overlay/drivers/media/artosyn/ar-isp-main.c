@@ -1098,6 +1098,90 @@ static int ar_isp_stats_raw_show(struct seq_file *s, void *unused)
 }
 DEFINE_SHOW_ATTRIBUTE(ar_isp_stats_raw);
 
+/*
+ * What the hardware writes into ltm_stats past the decoded histogram.
+ *
+ * The block fills the whole measured 0x80000 extent, of which only the first
+ * 0x8000 is decoded: 64 tiles of 256 u16, each summing to 8040. The remaining
+ * 0x78000 has never been read, because the extent is a coherent DMA buffer and
+ * a /dev/mem probe of its physical address maps MMIO attributes, which give no
+ * valid view of it. That probe returns zeros while the driver's own view of the
+ * same buffer is non-zero, so the tail has to be read through the driver.
+ *
+ * This reports one line per 4 KiB block: how many of its bytes are non-zero and
+ * the first non-zero offset within it. Blocks that are entirely zero are
+ * summarised as a run rather than listed, so the whole extent fits in one read
+ * over a slow link and a tail the hardware never touches is one line rather
+ * than 122.
+ *
+ * The open question this exists to answer is where the two clip-shaping tables
+ * live. Their physical addresses ride the vendor algorithm's config and reach
+ * no register in the gtm2 or ltm bank, so whether the hardware publishes them
+ * inside this extent is the first thing to rule in or out.
+ *
+ * ltm_stats has no ping-pong, so a read can tear across a frame boundary. That
+ * is harmless for a map of which blocks are written and would not be for a
+ * consumer of the values.
+ */
+static int ar_isp_ltm_tail_show(struct seq_file *s, void *unused)
+{
+	struct ar_isp *isp = s->private;
+	const u8 *stats = isp->ltm_stats;
+	unsigned int zero_run = 0;
+	unsigned int written = 0;
+
+	if (!stats) {
+		seq_puts(s, "ltm_stats is not allocated\n");
+		return 0;
+	}
+
+	seq_printf(s, "extent 0x%x, histogram head 0x%x, tail 0x%x, block 0x%x\n",
+		   AR_ISP_LTM_STATS_SIZE, AR_ISP_LTM_HIST_SIZE,
+		   AR_ISP_LTM_STATS_SIZE - AR_ISP_LTM_HIST_SIZE,
+		   AR_ISP_LTM_TAIL_BLOCK);
+
+	for (unsigned int off = AR_ISP_LTM_HIST_SIZE;
+	     off < AR_ISP_LTM_STATS_SIZE; off += AR_ISP_LTM_TAIL_BLOCK) {
+		unsigned int nonzero = 0;
+		unsigned int first = AR_ISP_LTM_TAIL_BLOCK;
+
+		for (unsigned int i = 0; i < AR_ISP_LTM_TAIL_BLOCK; i++) {
+			if (stats[off + i]) {
+				if (!nonzero) {
+					first = i;
+				}
+
+				nonzero++;
+			}
+		}
+
+		if (!nonzero) {
+			zero_run++;
+			continue;
+		}
+
+		if (zero_run) {
+			seq_printf(s, "  ... %u blocks all zero\n", zero_run);
+			zero_run = 0;
+		}
+
+		written++;
+		seq_printf(s, "  0x%06x  %5u of %u bytes non-zero, first at +0x%x\n",
+			   off, nonzero, AR_ISP_LTM_TAIL_BLOCK, first);
+	}
+
+	if (zero_run) {
+		seq_printf(s, "  ... %u blocks all zero\n", zero_run);
+	}
+
+	seq_printf(s, "%u of %u tail blocks written\n", written,
+		   (AR_ISP_LTM_STATS_SIZE - AR_ISP_LTM_HIST_SIZE) /
+		   AR_ISP_LTM_TAIL_BLOCK);
+
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(ar_isp_ltm_tail);
+
 static int ar_isp_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1181,6 +1265,18 @@ static int ar_isp_probe(struct platform_device *pdev)
 			    &ar_isp_ltm_page_fops);
 	debugfs_create_blob("ltm_hist", 0400, isp->debugfs,
 			    &isp->ltm_stats_blob);
+
+	/*
+	 * The whole extent and a map of which of its 4 KiB blocks the hardware
+	 * writes. ltm_hist above is the decoded histogram head; these two are
+	 * what the undecoded 0x78000 tail needs, and reading them through the
+	 * driver is the only valid way to see it, since the buffer is coherent
+	 * DMA and a /dev/mem probe of its physical address reads zeros.
+	 */
+	debugfs_create_blob("ltm_stats", 0400, isp->debugfs,
+			    &isp->ltm_stats_full_blob);
+	debugfs_create_file("ltm_tail", 0400, isp->debugfs, isp,
+			    &ar_isp_ltm_tail_fops);
 
 	debugfs_create_u32("irq_events", 0400, isp->debugfs, &isp->irq_events);
 	debugfs_create_u32("irq_stats_events", 0400, isp->debugfs,

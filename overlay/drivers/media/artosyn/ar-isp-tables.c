@@ -1832,6 +1832,9 @@ void ar_isp_tables_prepare(struct ar_isp *isp)
 		isp->ltm_stats_blob.data = isp->ltm_stats;
 		isp->ltm_stats_blob.size = isp->ltm_stats ?
 					   AR_ISP_LTM_HIST_SIZE : 0;
+		isp->ltm_stats_full_blob.data = isp->ltm_stats;
+		isp->ltm_stats_full_blob.size = isp->ltm_stats ?
+						AR_ISP_LTM_STATS_SIZE : 0;
 	}
 
 	if (de3d) {

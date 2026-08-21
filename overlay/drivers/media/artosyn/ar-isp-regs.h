@@ -269,9 +269,10 @@
  *
  * ltm_stats is deliberately single-buffered. Nothing in the kernel consumes
  * it, so doubling its measured 0x80000 extent would spend half a megabyte of
- * coherent memory to serve no reader; its histogram extent is exposed raw
- * through debugfs (torn reads possible, documented there) for host-side work.
- * It joins the ping-pong when the CLAHE port gives it a per-frame consumer.
+ * coherent memory to serve no reader; the whole extent, its decoded histogram
+ * head and a map of which blocks the hardware writes are exposed raw through
+ * debugfs (torn reads possible, documented there) for host-side work. It joins
+ * the ping-pong when the CLAHE port gives it a per-frame consumer.
  */
 #define AR_ISP_STATS_HALVES		2
 
@@ -298,7 +299,8 @@
  *
  * AR_ISP_LTM_HIST_SIZE is the histogram extent at the head of ltm_stats: 64
  * tiles of 256 u16 each, each tile summing to 8040. The hardware fills the
- * whole 0x80000; what follows the histogram is not decoded.
+ * whole 0x80000; what follows the histogram is not decoded, and the ltm_tail
+ * debugfs node maps which of those blocks carry data.
  */
 /*
  * 0x2834 is the mesh pass count. The vendor's isp_sub_ltm.c set_format runs its
@@ -318,6 +320,8 @@
 #define AR_ISP_LTM_PAGE_SIZE		0x4000
 #define AR_ISP_LTM_STATS_SIZE		0x80000
 #define AR_ISP_LTM_HIST_SIZE		0x8000
+/* Granularity the tail map reports at, one line per block. */
+#define AR_ISP_LTM_TAIL_BLOCK		0x1000
 #define AR_ISP_LTM_TILES		64
 #define AR_ISP_LTM_SAMPLES		128
 #define AR_ISP_LTM_TILE_STRIDE		0x100

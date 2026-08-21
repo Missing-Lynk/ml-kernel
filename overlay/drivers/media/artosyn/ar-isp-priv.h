@@ -121,6 +121,13 @@ struct ar_isp {
 	struct mutex ltm_lock;
 	struct debugfs_blob_wrapper ltm_stats_blob;
 
+	/*
+	 * The whole 0x80000 extent, where ltm_stats_blob is only its decoded
+	 * histogram head. Separate wrappers because the two differ in size and
+	 * a reader asking for the histogram should not be handed the tail.
+	 */
+	struct debugfs_blob_wrapper ltm_stats_full_blob;
+
 	void *ltm_stats;
 	dma_addr_t ltm_stats_dma;
 
