@@ -5,7 +5,9 @@ Three of the tables the vendor's service library carries as prepacked constants 
 elementary functions of the sample index. Gamma page 1 and both DRC tail banks are
 reproduced here exactly, every sample, so their generators compute the table instead of
 slicing the library and unpacking bit fields. The compander's curve is reproduced to one
-count and so is carried, with its form recorded here for review.
+count with its smooth form, and exactly with a small correction set. Its other three
+tables need no corrections at all, but the page is still carried because that correction
+set and three of the square law's samples are unexplained.
 
 Two separate claims hold these tables up, and they are checked in two places:
 
@@ -142,30 +144,32 @@ def drc_tail_bank1() -> list[int]:
     return samples
 
 
-# The compander page's one region that carries a curve rather than a ramp: 257 samples of
-# 16 bits at page offset 0x400, stored as overlapping pairs, one pair per 32-bit word. Two
-# square-root branches meet at a knee at index 64, across which the slope jumps, so this
-# is two curves and not one with a bend. Each branch is written through the endpoint it
-# reaches, so the only number solved for is the second branch's shift:
+# The compander page's main curve: 257 samples of 16 bits at page offset 0x400, stored
+# as overlapping pairs, one pair per 32-bit word. Two square-root branches meet at a knee
+# at index 64, across which the slope jumps, so this is two curves and not one with a
+# bend. Each branch is written through the endpoint it reaches, so the only number solved
+# for is the second branch's shift:
 #
 #     i <= 64:  round(KNEE_VALUE * sqrt(i / 64))
 #     i >  64:  round(FULL_SCALE * sqrt((i - SHIFT) / (256 - SHIFT)))
 #
-# That reproduces 242 of 257 samples and never misses by more than one count, which is
-# close enough to say what the page is and not close enough to generate it, so
-# ar-isp-compander.h carries the words. This function exists for the check that keeps
-# that claim honest.
+# No single branch amplitude, shift or rounding mode reproduces every sample. The vendor
+# table is exactly the smooth model with the 15 one-count-low samples named below. This is
+# a compact exact model, not a recovered producer, so ar-isp-compander.h still carries the
+# words.
 
 COMPANDER_SAMPLES: int = 257
 COMPANDER_KNEE: int = 64
 COMPANDER_KNEE_VALUE: int = 16270
 COMPANDER_FULL_SCALE: int = 0xFFFF
 COMPANDER_SHIFT: float = 52.159
-COMPANDER_TOLERANCE: int = 1
+COMPANDER_CURVE_LOW_CORRECTIONS: tuple[int, ...] = (
+    3, 4, 14, 34, 40, 46, 52, 55, 58, 59, 65, 82, 96, 113, 114,
+)
 
 
 def compander_curve() -> list[int]:
-    """The 257 samples of the compander's curve region, to within COMPANDER_TOLERANCE."""
+    """The exact 257 samples of the compander's square-root curve region."""
     last = COMPANDER_SAMPLES - 1
     samples: list[int] = []
     for i in range(COMPANDER_SAMPLES):
@@ -175,6 +179,116 @@ def compander_curve() -> list[int]:
             value = COMPANDER_FULL_SCALE * math.sqrt((i - COMPANDER_SHIFT) /
                                                      (last - COMPANDER_SHIFT))
 
-        samples.append(round(value))
+        sample = round(value)
+        if i in COMPANDER_CURVE_LOW_CORRECTIONS:
+            sample -= 1
+
+        samples.append(sample)
+
+    return samples
+
+
+# The compander head opens with a 33-sample 20-bit table in the same overlapping triple
+# packing as DRC. It is two straight segments meeting at sample 2:
+#
+#     i <= 2:  i * 0x20732
+#     i >  2:  0x40e64 + round((2^20 - 0x40e64) * (i - 2) / 30)
+#
+# clipped to the 20-bit lane maximum, which only the last sample reaches.
+#
+# The second segment runs to 2^20, one count past the largest value the lane can hold,
+# and saturates there. That is the same arithmetic the square-law table at page offset
+# 0x1000 uses, where 16 * 256^2 is also 2^20: both 20-bit tables in this page are built
+# against full scale and clipped by the lane. Anchoring the line on 0xfffff instead moves
+# it half a count and costs six one-count corrections, so the anchor is what makes this
+# exact with nothing carried.
+
+COMPANDER_HEAD_SAMPLES: int = 33
+COMPANDER_HEAD_KNEE: int = 2
+COMPANDER_HEAD_STEP: int = 0x20732
+COMPANDER_HEAD_TOP: int = 1 << 20
+
+
+def compander_head_ramp() -> list[int]:
+    """The compander head table: two long steps, then a line to full scale."""
+    start = COMPANDER_HEAD_KNEE * COMPANDER_HEAD_STEP
+    span = COMPANDER_HEAD_TOP - start
+    intervals = COMPANDER_HEAD_SAMPLES - 1 - COMPANDER_HEAD_KNEE
+    samples = [i * COMPANDER_HEAD_STEP for i in range(COMPANDER_HEAD_KNEE + 1)]
+    for k in range(1, intervals + 1):
+        samples.append(min(start + (span * k + intervals // 2) // intervals,
+                           DRC_LANE_MAX))
+
+    return samples
+
+
+# The compander head has a second 16-bit overlapping-pair table at page offset 0x800: 33
+# samples, of which the first 32 are a ramp in 0x800 steps. Unlike the square-root curve
+# above, this reproduces the library's samples exactly.
+#
+# The last sample is 0xfb00, which is 0x300 rather than 0x800 above the one before it, and
+# it is carried for the same reason the DRC banks carry theirs. A saturation would explain
+# it and nothing supports one: it is below the 0xffff the region could reach, the clamp
+# would bind on no other sample, and the page's two neighbouring tables both do run to
+# their own full scale, the square-root curve to 0xffff and the 20-bit table at offset 0 to
+# 0xfffff. So the value is recorded rather than derived from a rule.
+
+COMPANDER_RAMP_SAMPLES: int = 33
+COMPANDER_RAMP_STEP: int = 0x800
+COMPANDER_RAMP_LAST: int = 0xFB00
+
+
+def compander_ramp() -> list[int]:
+    """The exact 33-sample compander ramp at page offset 0x800."""
+    ramp = [i * COMPANDER_RAMP_STEP for i in range(COMPANDER_RAMP_SAMPLES - 1)]
+
+    return [*ramp, COMPANDER_RAMP_LAST]
+
+
+# The compander mid span is a 257-sample 20-bit table in the same overlapping triple
+# packing as DRC. Its body is a square law:
+#
+#     sample[i] = 16 * i^2 + round(i^2 / 2114)
+#
+# capped to the 20-bit lane maximum, which is what the last sample reaches. The square is
+# (i / 256)^2 at 20 bits, so this table companding by a square is the counterpart of the
+# square-root curve at page offset 0x400.
+#
+# The correction is at most 29 counts in 1048575 and its divisor is fitted. The samples
+# admit any value in (2113.1, 2116.8], nothing in that window has a reading, and 2048,
+# which the square's own scale would suggest, lies outside it. So the correction is
+# recorded rather than derived, and the bias is the divisor halved rather than a second
+# free constant.
+#
+# Samples 0 to 7 are a linear toe at 127 counts per step, which the square law meets at
+# sample 8.
+#
+# Samples 249, 250 and 251 are carried and unexplained. They leave the square, climb about
+# 21500 a step to reach full scale at 251, and then sample 252 drops 32481 counts back
+# onto the square law, which runs on to the end. That makes the table non-monotonic across
+# one interval, and a transfer curve that reverses inverts the response over it, the same
+# hazard ar_isp_gamma_from_blob clamps for. Whether the vendor intended a shoulder here is
+# not recovered, so the three values are recorded and the break is left visible instead of
+# being folded into the formula.
+
+COMPANDER_MID_SAMPLES: int = 257
+COMPANDER_MID_SQUARE_SCALE: int = 16
+COMPANDER_MID_CORRECTION_DIVISOR: int = 2114
+COMPANDER_MID_TOE: tuple[int, ...] = (1, 128, 255, 382, 510, 637, 764, 891)
+COMPANDER_MID_ANOMALY: dict[int, int] = {249: 0xF5730, 250: 0xFAB26, 251: 0xFFFFF}
+
+
+def compander_mid() -> list[int]:
+    """The compander mid table: a square law, a linear toe and three carried samples."""
+    samples: list[int] = list(COMPANDER_MID_TOE)
+    for i in range(len(COMPANDER_MID_TOE), COMPANDER_MID_SAMPLES):
+        if i in COMPANDER_MID_ANOMALY:
+            samples.append(COMPANDER_MID_ANOMALY[i])
+            continue
+
+        square = COMPANDER_MID_SQUARE_SCALE * i * i
+        correction = ((i * i + COMPANDER_MID_CORRECTION_DIVISOR // 2) //
+                      COMPANDER_MID_CORRECTION_DIVISOR)
+        samples.append(min(square + correction, DRC_LANE_MAX))
 
     return samples
