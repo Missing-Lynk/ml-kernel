@@ -9,6 +9,15 @@
  *
  * Only the two regions that carry content are here. The zero span at 0x900 and
  * the repeated unity record from 0x1800 are rebuilt by ar_isp_compander_fill.
+ *
+ * That content is three regions in two packings. Records 64 to 127, page offset
+ * 0x400, hold the curve: 257 samples of 16 bits as overlapping pairs, one pair to
+ * a word. It is two square-root branches meeting at a knee at index 64, which
+ * isp_curves.compander_curve reproduces to one count, close enough to review the
+ * page against and not close enough to generate it. Records 128 to 135 are 33
+ * samples in the same packing, stepping by 0x800. Records 0 to 15 are 33 samples
+ * in the 20-bit triple packing the DRC banks use, two long steps then a uniform
+ * ramp to full scale.
  */
 
 #ifndef AR_ISP_COMPANDER_H

@@ -82,31 +82,13 @@ updates the blob-fed ISP stages; swapping in a newer `libmpp_service.so` updates
 static tables under `overlay/drivers/media/artosyn/vendor-tables/`. Re-run the generators and
 `scripts/isp/audit-provenance.py` after either input changes.
 
-Minimal ISP input-refresh loop, from this directory:
-
-```sh
-TUNING=../out/air-gather/camera/nt99235_tuning_preview_fpv.bin
-LIB=../out/air-gather/vendor-root/usr/lib/libmpp_service.so
-
-python3 scripts/isp/gen-isp-library.py --lib "$LIB" \
-    -o overlay/drivers/media/artosyn/vendor-tables/ar-isp-library.h
-python3 scripts/isp/isp-gates.py --lib "$LIB" --blob "$TUNING" \
-    --header overlay/drivers/media/artosyn/vendor-tables/ar-isp-gates.h
-python3 scripts/isp/gen-ccm.py --lib "$LIB" --blob "$TUNING" \
-    > overlay/drivers/media/artosyn/vendor-tables/ar-isp-ccm-init.h
-python3 scripts/isp/gen-gamma-page1.py --lib "$LIB" \
-    > overlay/drivers/media/artosyn/vendor-tables/ar-isp-gamma-page1.h
-python3 scripts/isp/gen-drc-tail.py --lib "$LIB" \
-    > overlay/drivers/media/artosyn/vendor-tables/ar-isp-drc-tail.h
-python3 scripts/isp/gen-compander.py --lib "$LIB" \
-    > overlay/drivers/media/artosyn/vendor-tables/ar-isp-compander.h
-python3 scripts/isp/gen-rgb2yuv.py --lib "$LIB" \
-    > overlay/drivers/media/artosyn/vendor-tables/ar-isp-rgb2yuv.h
-
-python3 scripts/isp/check-ladder-c.py --tuning "$TUNING"
-python3 scripts/isp/check-tone-selector.py --tuning "$TUNING" --lib "$LIB"
-python3 scripts/isp/audit-provenance.py
-```
+Which generator produces which header, and what each one is given, is declared in
+`scripts/isp/check-regenerable.py`, and every generated header names its generator in its own
+banner. Read the refresh sequence off those two rather than off a copy of the list here: a copy
+goes stale the first time a generator changes its inputs. `check-regenerable.py` is also what
+says whether a header still reproduces, so run it after regenerating and before committing. The
+per-stage verifications are the rest of the `scripts/isp/check-*.py` set; each states in its own
+docstring which vendor inputs it needs.
 
 The scripts pin the vendor layouts they decode. A digest or structural mismatch is a map change to
 recover and document before committing regenerated headers.

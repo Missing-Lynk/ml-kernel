@@ -1,66 +1,34 @@
 #!/usr/bin/env python3
 """
-Extract the ISP gamma table's second page from the vendor library as a kernel header.
+Emit the ISP gamma table's second page as a kernel header.
 
 The gamma allocation's first 0x1000 bytes are the only part the hardware fetches, and they
 are two 0x800 pages. Page 0 is AE-selected out of the tuning file and is generated at
-runtime by ar-isp-codec.h. Page 1 is not in the tuning file in any form: it is a prepacked
-constant in the vendor service library, which the dynamic gamma handler copies into its
+runtime by ar-isp-codec.h. Page 1 is in no tuning file in any form: the vendor's service
+library carries it prepacked, and the dynamic gamma handler copies that constant into its
 working allocation before the packer overwrites page 0 and leaves page 1 alone.
 
-The constant is byte-identical to page 1 of every capture on file. Three sibling 0x1000
-blocks at VMA 0x47e1a0, 0x47f1a0 and 0x4801a0 are identical to each other, and each is the
-same 0x800 page stored twice, matching the three gamma descriptors that alias one buffer.
+That constant is the Rec.709 transfer function at twelve bits, so this computes it rather
+than copying the library's bytes. The function and its constants are in isp_curves.py;
+kernel/scripts/isp/check-table-closed-forms.py compares the result against the library
+sample by sample, which is what makes computing it safe.
 
 Emitted decoded, as a sample array rather than packed bytes, because the packing already
 lives in ar-isp-codec.h and a curve is reviewable where a blob is not.
 
-The library is proprietary and not in the repository; supply it with --lib. The generated
-header is checked in, so this script is rerun only if the vendor library changes.
-
     kernel/scripts/isp/gen-gamma-page1.py \\
-        --lib out/air-gather/vendor-root/usr/lib/libmpp_service.so \\
         > overlay/drivers/media/artosyn/vendor-tables/ar-isp-gamma-page1.h
 """
 
 import argparse
-import struct
 import sys
 from collections.abc import Sequence
 
 import arlib
-
-PAGE1_VMA = 0x47E1A0
-PAGE = 0x800
-RECORDS = 128
-SAMPLES = 512
-
-# Packing, mirrored from ar-isp-codec.h: each record is four words holding four 12-bit
-# samples at fixed positions, plus a forward field mirroring the sample after the page.
-RECORD_BYTES = 16
-SAMPLE_BITS = 12
-SAMPLE_MASK = (1 << SAMPLE_BITS) - 1
-SAMPLE_SHIFTS = ((0, 0), (0, 12), (1, 16), (2, 8))
-FORWARD_SHIFT = 20
-
+import isp_curves
 
 # Emitted table width.
 ROWS_PER_LINE = 8
-
-def decode_page(data: bytes, base: int) -> list[int]:
-    """Undo the packing in ar-isp-codec.h: 128 records of four twelve-bit samples."""
-    out = []
-    for record in range(RECORDS):
-        words = struct.unpack_from("<4I", data, base + record * RECORD_BYTES)
-        out.extend((words[w] >> shift) & SAMPLE_MASK for w, shift in SAMPLE_SHIFTS)
-
-    return out
-
-
-def forward_field(data: bytes, base: int) -> int:
-    """The last record's mirror of the sample after the page. Not derivable from the samples."""
-    word2 = struct.unpack_from("<I", data, base + (RECORDS - 1) * RECORD_BYTES + 8)[0]
-    return (word2 >> FORWARD_SHIFT) & SAMPLE_MASK
 
 
 def emit(samples: Sequence[int], tail: int) -> None:
@@ -69,13 +37,24 @@ def emit(samples: Sequence[int], tail: int) -> None:
         "The gamma table's second page.",
         "",
         "Page 0 is AE-selected from the tuning file and generated at runtime. This one is",
-        "not in the tuning file at all, in packed or unpacked form, so it is carried: it is",
-        "a prepacked constant in the vendor service library, byte-identical to page 1 of",
-        "every capture on file.",
+        "in no tuning file in any form; the vendor service library carries it prepacked,",
+        "byte-identical to page 1 of every capture on file.",
         "",
-        "The tail is the last record's forward field, which mirrors the sample after the",
-        "page and cannot be derived from the samples. Leaving it zero maps the brightest",
-        "inputs to black; see ar_isp_gamma_pack_page.",
+        "It is the Rec.709 transfer function with its 0.45 exponent replaced by 1/2.2,",
+        "sampled at the page's own 512 points and truncated to twelve bits:",
+        "",
+        "\tf(x) = 4.5 * x                       for x < 0.018",
+        "\t     = 1.099 * x^(1/2.2) - 0.099     otherwise",
+        "",
+        "\tsample[i] = floor(4095 * f(i / 512))",
+        "",
+        "That reproduces all 512 samples of the library's copy. The toe covers the first",
+        "ten. Only the exponent departs from stock Rec.709, so check that before assuming",
+        "any other curve behaves the same way.",
+        "",
+        "AR_ISP_GAMMA_PAGE1_TAIL is the same function one step past the page, at x = 1.",
+        "The last record mirrors it forward and the hardware reads it there, so",
+        "ar_isp_gamma_pack_page writes it.",
     )), end="")
     print()
     print(guard_open, end="")
@@ -90,24 +69,18 @@ def emit(samples: Sequence[int], tail: int) -> None:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--lib", required=True, help="vendor libmpp_service.so")
-    args = ap.parse_args()
+    argparse.ArgumentParser(description=__doc__).parse_args()
 
-    with open(args.lib, "rb") as handle:
-        lib = handle.read()
+    samples = isp_curves.gamma_page1_samples()
 
-    block = arlib.lib_slice(lib, PAGE1_VMA, 2 * PAGE,
-                            f"{args.lib}: gamma page 1")
-    if block[:PAGE] != block[PAGE:]:
-        sys.exit(f"{args.lib}: the two halves at 0x{PAGE1_VMA:x} differ; the layout has changed")
-
-    samples = decode_page(block, 0)
-    for i in range(1, SAMPLES):
+    # The hardware reads a transfer curve, so a sample below its predecessor inverts the
+    # response over that interval. The function is monotonic; this catches a constant
+    # edited to something that is not.
+    for i in range(1, len(samples)):
         if samples[i] < samples[i - 1]:
-            sys.exit(f"{args.lib}: sample {i} decreases; this is not a transfer curve")
+            sys.exit(f"sample {i} decreases; this is not a transfer curve")
 
-    emit(samples, forward_field(block, 0))
+    emit(samples, isp_curves.gamma_page1_tail())
     return 0
 
 

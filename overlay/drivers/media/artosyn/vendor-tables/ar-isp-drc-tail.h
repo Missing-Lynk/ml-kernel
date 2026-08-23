@@ -3,10 +3,29 @@
 /*
  * The half of the DRC page the vendor never recomputes.
  *
- * Two 257-sample curves, decoded out of the prepacked 0x2000 template the vendor
- * service library loads through its ISP-init descriptor array. Neither curve appears
- * in the tuning file in any form, so unlike the first two banks they cannot be
- * generated and are carried here instead.
+ * Two 257-sample curves. The page's other two banks are rebuilt from the tuning
+ * file on every AE update; these two appear in it in no form, and the vendor
+ * service library carries them prepacked.
+ *
+ * Both are an exponential in the square root of the normalised sample index, at
+ * one amplitude of 0x18000, exactly 1.5 in the Q16 the banks carry gains in:
+ *
+ *	u = sqrt(i / 256)
+ *	bank0[i] = floor(0x18000 * exp(-0.3624559 * u))
+ *	bank1[i] = floor(0x18000 * (exp(-5.8 * u) - exp(-5.8)))
+ *
+ * The subtraction is what takes bank1 to exactly zero at full scale. Two samples
+ * lie off the curves and are carried as the library holds them: sample 0 of both
+ * banks is a clamp at 15.9375 in Q16, where a gain curve evaluated at black would
+ * run away, and bank1 sample 1 sits 283 counts above its curve for a reason that
+ * is not recovered.
+ *
+ * The same two forms generate the tuning file's own DRC profiles, with a linear
+ * abscissa where these use the square root, which is what says the shape is the
+ * vendor's arithmetic rather than a curve that happens to fit. The amplitude is
+ * pinned by the samples to 0.04 counts and bank1's rate is exactly 5.8. bank0's
+ * rate was solved from this table with no meaning found behind the number, so
+ * these curves are vendor data in compact form rather than a derivation.
  */
 
 #ifndef AR_ISP_DRC_TAIL_H

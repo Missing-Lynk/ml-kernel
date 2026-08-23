@@ -4,13 +4,24 @@
  * The gamma table's second page.
  *
  * Page 0 is AE-selected from the tuning file and generated at runtime. This one is
- * not in the tuning file at all, in packed or unpacked form, so it is carried: it is
- * a prepacked constant in the vendor service library, byte-identical to page 1 of
- * every capture on file.
+ * in no tuning file in any form; the vendor service library carries it prepacked,
+ * byte-identical to page 1 of every capture on file.
  *
- * The tail is the last record's forward field, which mirrors the sample after the
- * page and cannot be derived from the samples. Leaving it zero maps the brightest
- * inputs to black; see ar_isp_gamma_pack_page.
+ * It is the Rec.709 transfer function with its 0.45 exponent replaced by 1/2.2,
+ * sampled at the page's own 512 points and truncated to twelve bits:
+ *
+ *	f(x) = 4.5 * x                       for x < 0.018
+ *	     = 1.099 * x^(1/2.2) - 0.099     otherwise
+ *
+ *	sample[i] = floor(4095 * f(i / 512))
+ *
+ * That reproduces all 512 samples of the library's copy. The toe covers the first
+ * ten. Only the exponent departs from stock Rec.709, so check that before assuming
+ * any other curve behaves the same way.
+ *
+ * AR_ISP_GAMMA_PAGE1_TAIL is the same function one step past the page, at x = 1.
+ * The last record mirrors it forward and the hardware reads it there, so
+ * ar_isp_gamma_pack_page writes it.
  */
 
 #ifndef AR_ISP_GAMMA_PAGE1_H

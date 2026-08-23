@@ -285,7 +285,7 @@ The census over the whole tuning blob and bank map is closed: the powers-of-two 
 
 The crush was `0x2e2c` and `0x2e30`, whose corrected values sit past the prefix the replay applies; writing them recovers the whole shadow range (57% of pixels under luma 32 becomes 0.0%). See `ar_isp_output_fix` in `vendor-tables/ar-isp-defaults.h`.
 
-A related trap, worth keeping: the vendor's coefficient pages survive in DRAM across a RAM-boot at the addresses the replay arms, so a pipeline that does not generate its own tables runs correctly on **inherited** content and only fails on a cold boot. `ar-isp-tables.c` generates every byte the hardware fetches (gamma page 0 and the DRC dynamic half from the tuning file; gamma page 1 and the DRC tail carried as decoded curves via `scripts/isp/gen-gamma-page1.py` and `scripts/isp/gen-drc-tail.py`). Packed multi-lane table formats are neither mostly zero nor monotonic read as flat `u32`, so zero-fraction and monotonicity heuristics score the packing, not the content.
+A related trap, worth keeping: the vendor's coefficient pages survive in DRAM across a RAM-boot at the addresses the replay arms, so a pipeline that does not generate its own tables runs correctly on **inherited** content and only fails on a cold boot. `ar-isp-tables.c` generates every byte the hardware fetches (gamma page 0 and the DRC dynamic half from the tuning file; gamma page 1 and the DRC tail computed from their closed forms by `scripts/isp/gen-gamma-page1.py` and `scripts/isp/gen-drc-tail.py`). Packed multi-lane table formats are neither mostly zero nor monotonic read as flat `u32`, so zero-fraction and monotonicity heuristics score the packing, not the content.
 
 ### What the driver owns
 
