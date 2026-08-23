@@ -8,6 +8,12 @@ attachment is released through a devres action: of_reserved_mem_device_init has
 no devres form, so without one it survives every probe-failure return below it
 and the remove path, and a rebind then inherits stale dma_mem state.
 
+(3) The probe no longer writes 0x0a106018. That word is the display controller's
+CRG (artosyn_vo CRG_DC), which the display bring-up read-modify-writes unlocked,
+so two drivers raced on one register. It was set here as a belt-and-braces venc
+clock gate, but the venc gate is 0x0a104018 BIT(12), outside this page and
+already set by the time the codec probes.
+
 --- a/drivers/media/platform/chips-media/wave5/wave5-vpu.c
 +++ b/drivers/media/platform/chips-media/wave5/wave5-vpu.c
 @@ -7,11 +7,15 @@
@@ -91,7 +97,7 @@ and the remove path, and a rebind then inherits stale dma_mem state.
  	dev = devm_kzalloc(&pdev->dev, sizeof(*dev), GFP_KERNEL);
  	if (!dev)
  		return -ENOMEM;
-@@ -325,6 +362,56 @@
+@@ -325,6 +362,60 @@
  
  	dev->sram_size = match_data->sram_size;
  
@@ -133,8 +139,12 @@ and the remove path, and a rebind then inherits stale dma_mem state.
 +			/* 6. de-isolate the venc power domain */
 +			writel(readl(iso + 0x004) | BIT(26), iso + 0x004);
 +			writel(readl(iso + 0x014) | BIT(2), iso + 0x014);
-+			/* 7. venc clock gate (belt-and-braces; usually already set): 0x0a106018 BIT(12) */
-+			writel(readl(crg + 0x018) | BIT(12), crg + 0x018);
++			/*
++			 * The venc clock gate is 0x0a104018 BIT(12), outside this page
++			 * and already set. 0x0a106018 is the display controller's CRG
++			 * word (artosyn_vo CRG_DC), whose bring-up read-modify-writes
++			 * it unlocked, so this sequence must leave that word alone.
++			 */
 +			usleep_range(1000, 2000); /* let the domain + clock settle */
 +		} else {
 +			dev_warn(&pdev->dev, "could not map media CRG/PMU to power on the codec\n");
