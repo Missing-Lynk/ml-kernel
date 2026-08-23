@@ -14,14 +14,27 @@ so two drivers raced on one register. It was set here as a belt-and-braces venc
 clock gate, but the venc gate is 0x0a104018 BIT(12), outside this page and
 already set by the time the codec probes.
 
+(4) inject_lost_enc_irq. Drops N encoder completions to reproduce the lost-interrupt
+failure on demand, which is the case the job timeout in the encoder exists to cover
+and the only one no test could previously reach. Default 0, which changes nothing.
+
+(5) /sys/kernel/debug/wave5. state reports the registers that separate a healthy
+VPU from a poisoned one - a VCPU program counter frozen at one address with
+BUSY_STATUS still set is the wedge signature - plus the live instances and their
+job-timeout and firmware-fault counters. recover performs the global block reset
+and firmware re-download from 0240. Both take a pm_runtime reference first,
+because runtime suspend gates the codec clocks and the registers read back
+garbage without it.
+
 --- a/drivers/media/platform/chips-media/wave5/wave5-vpu.c
 +++ b/drivers/media/platform/chips-media/wave5/wave5-vpu.c
-@@ -7,11 +7,15 @@
+@@ -7,11 +7,16 @@
  #include <linux/kernel.h>
  #include <linux/module.h>
  #include <linux/platform_device.h>
 +#include <linux/of_reserved_mem.h>	/* ML: dedicated codec memory pool (the DTS mmz node) */
  #include <linux/clk.h>
++#include <linux/debugfs.h>
  #include <linux/firmware.h>
  #include <linux/interrupt.h>
  #include <linux/pm_runtime.h>
@@ -32,7 +45,43 @@ already set by the time the codec probes.
  #include "wave5-vpu.h"
  #include "wave5-regdefine.h"
  #include "wave5-vpuconfig.h"
-@@ -229,7 +233,8 @@
+@@ -117,6 +122,20 @@
+ 	return IRQ_HANDLED;
+ }
+ 
++/*
++ * ML (Artosyn): drop this many encoder completions on the floor, then resume normally.
++ *
++ * The failure that makes the whole VPU unrecoverable is a completion that never arrives: the m2m
++ * job stays TRANS_RUNNING, teardown parks uninterruptibly in v4l2_m2m_cancel_job() holding the
++ * mutex both video nodes are registered with, and only a power cycle clears it. The firmware
++ * cannot be asked to lose an interrupt on demand, so the driver drops one instead, which produces
++ * the identical state and makes both the failure and the job-timeout recovery testable on
++ * hardware. Zero, the default, changes nothing.
++ */
++static unsigned int inject_lost_enc_irq;
++module_param(inject_lost_enc_irq, uint, 0644);
++MODULE_PARM_DESC(inject_lost_enc_irq, "drop N encoder completions to simulate a lost interrupt");
++
+ static irqreturn_t wave5_vpu_irq_thread(int irq, void *dev_id)
+ {
+ 	struct vpu_device *dev = dev_id;
+@@ -130,6 +149,14 @@
+ 			if (!ret)
+ 				break;
+ 
++			if (inject_lost_enc_irq && inst->type == VPU_INST_TYPE_ENC) {
++				inject_lost_enc_irq--;
++				dev_warn(dev->dev,
++					 "dropping an encoder completion on purpose, %u left\n",
++					 inject_lost_enc_irq);
++				continue;
++			}
++
+ 			inst->ops->finish_process(inst);
+ 		}
+ 	}
+@@ -229,7 +256,8 @@
  	if (vpu->irq < 0)
  		hrtimer_cancel(&vpu->hrtimer);
  
@@ -42,7 +91,7 @@ already set by the time the codec probes.
  	clk_bulk_disable_unprepare(vpu->num_clks, vpu->clks);
  
  	return 0;
-@@ -240,7 +245,8 @@
+@@ -240,7 +268,8 @@
  	struct vpu_device *vpu = dev_get_drvdata(dev);
  	int ret = 0;
  
@@ -52,10 +101,89 @@ already set by the time the codec probes.
  	ret = clk_bulk_prepare_enable(vpu->num_clks, vpu->clks);
  	if (ret) {
  		dev_err(dev, "Enabling clocks, fail: %d\n", ret);
-@@ -258,6 +264,17 @@
+@@ -258,6 +287,96 @@
  	SET_RUNTIME_PM_OPS(wave5_pm_suspend, wave5_pm_resume, NULL)
  };
  
++/*
++ * ML (Artosyn): /sys/kernel/debug/wave5.
++ *
++ * state reports the four registers that separate a healthy VPU from a poisoned one - a VCPU
++ * program counter frozen at one address with BUSY_STATUS still set is the wedge signature - plus
++ * the live instances and their fault counters. recover accepts 1 and performs the global block
++ * reset and firmware re-download. It destroys every live instance, so it is an operator tool for
++ * a VPU that has already stopped answering, not something to wire into a running pipeline.
++ */
++static int wave5_debugfs_state_show(struct seq_file *m, void *unused)
++{
++	struct vpu_device *dev = m->private;
++	struct vpu_instance *inst;
++	unsigned long flags;
++	int ret;
++
++	ret = pm_runtime_resume_and_get(dev->dev);
++	if (ret)
++		return ret;
++
++	seq_printf(m, "product_code   0x%08x\n", dev->product_code);
++	seq_printf(m, "vcpu_cur_pc    0x%08x\n", vpu_read_reg(dev, W5_VCPU_CUR_PC));
++	seq_printf(m, "busy_status    0x%08x\n", vpu_read_reg(dev, W5_VPU_BUSY_STATUS));
++	seq_printf(m, "vint_reason    0x%08x\n", vpu_read_reg(dev, W5_VPU_VINT_REASON));
++	seq_printf(m, "fail_reason    0x%08x\n", vpu_read_reg(dev, W5_RET_FAIL_REASON));
++	seq_printf(m, "firmware       %s\n", dev->fw_name ? dev->fw_name : "(none)");
++
++	pm_runtime_put_sync(dev->dev);
++
++	spin_lock_irqsave(&dev->irq_spinlock, flags);
++	list_for_each_entry(inst, &dev->instances, list)
++		seq_printf(m, "inst %d %s state %d job_timeouts %u fw_faults %u\n",
++			   inst->id, inst->type == VPU_INST_TYPE_ENC ? "enc" : "dec",
++			   inst->state, inst->job_timeout_count, inst->enc_fault_count);
++	spin_unlock_irqrestore(&dev->irq_spinlock, flags);
++
++	return 0;
++}
++DEFINE_SHOW_ATTRIBUTE(wave5_debugfs_state);
++
++static ssize_t wave5_debugfs_recover_write(struct file *file, const char __user *buf,
++					   size_t count, loff_t *ppos)
++{
++	struct vpu_device *dev = file_inode(file)->i_private;
++	bool go;
++	int ret;
++
++	ret = kstrtobool_from_user(buf, count, &go);
++	if (ret)
++		return ret;
++	if (!go)
++		return count;
++
++	ret = pm_runtime_resume_and_get(dev->dev);
++	if (ret)
++		return ret;
++
++	ret = wave5_vpu_recover(dev);
++
++	pm_runtime_put_sync(dev->dev);
++
++	return ret ? ret : count;
++}
++
++static const struct file_operations wave5_debugfs_recover_fops = {
++	.owner = THIS_MODULE,
++	.open = simple_open,
++	.write = wave5_debugfs_recover_write,
++	.llseek = noop_llseek,
++};
++
++static void wave5_debugfs_init(struct vpu_device *dev)
++{
++	dev->debugfs_dir = debugfs_create_dir("wave5", NULL);
++
++	debugfs_create_file("state", 0444, dev->debugfs_dir, dev, &wave5_debugfs_state_fops);
++	debugfs_create_file("recover", 0200, dev->debugfs_dir, dev, &wave5_debugfs_recover_fops);
++}
++
 +/*
 + * ML (Artosyn): of_reserved_mem_device_init has no devres form, so the
 + * attachment outlives every probe-failure return below it and the remove path.
@@ -70,7 +198,7 @@ already set by the time the codec probes.
  static int wave5_vpu_probe(struct platform_device *pdev)
  {
  	int ret;
-@@ -278,6 +295,26 @@
+@@ -278,6 +397,26 @@
  		return ret;
  	}
  
@@ -97,10 +225,12 @@ already set by the time the codec probes.
  	dev = devm_kzalloc(&pdev->dev, sizeof(*dev), GFP_KERNEL);
  	if (!dev)
  		return -ENOMEM;
-@@ -325,6 +362,60 @@
+@@ -324,6 +463,61 @@
+ 		dev_warn(&pdev->dev, "sram node not found\n");
  
  	dev->sram_size = match_data->sram_size;
- 
++	dev->fw_name = match_data->fw_name;
++
 +	/*
 +	 * Artosyn Proxima-9311: power on the h26x/WAVE521C codec before touching any
 +	 * VPU register. Without this the whole host interface reads back 0 (product
@@ -154,15 +284,16 @@ already set by the time the codec probes.
 +		if (iso)
 +			iounmap(iso);
 +	}
-+
+ 
  	dev->product_code = wave5_vdi_read_register(dev, VPU_PRODUCT_CODE_REGISTER);
  	ret = wave5_vdi_init(&pdev->dev);
- 	if (ret < 0) {
-@@ -395,7 +482,16 @@
+@@ -395,7 +589,18 @@
  	pm_runtime_set_autosuspend_delay(&pdev->dev, 500);
  	pm_runtime_use_autosuspend(&pdev->dev);
  	pm_runtime_enable(&pdev->dev);
 -	wave5_vpu_sleep_wake(&pdev->dev, true, NULL, 0);
++
++	wave5_debugfs_init(dev);
 +	/*
 +	 * Artosyn Proxima-9311: do NOT sleep the VPU here. The firmware sleep/wake
 +	 * handshake (W5_SLEEP_VPU / W5_WAKEUP_VPU + REMAP_CORE_START) does not
@@ -175,4 +306,13 @@ already set by the time the codec probes.
 +	 */
  
  	return 0;
+ 
+@@ -437,6 +642,8 @@
+ 		kthread_destroy_worker(dev->worker);
+ 	}
+ 
++	debugfs_remove_recursive(dev->debugfs_dir);
++
+ 	pm_runtime_dont_use_autosuspend(&pdev->dev);
+ 	pm_runtime_disable(&pdev->dev);
  

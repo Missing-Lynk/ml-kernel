@@ -16,9 +16,45 @@ then a restore to the configured value. The value is saved rather than
 re-derived, because for HEVC the seq-init path falls back to avc_idr_period when
 intra_period is zero, so enc_param is not the truth.
 
+Instance fields for the encoder job timeout: the delayed work itself, one
+warning latch per fault kind, and the two counters reported at release.
+
+struct vpu_device gains fw_name, the bitcode name probe loaded, so the firmware
+can be downloaded again over a running VPU, and debugfs_dir for the wave5
+debugfs directory (0260). wave5_vpu_recover() and its already-locked form are
+declared beside wave5_vpu_init_with_bitcode().
+
 --- a/drivers/media/platform/chips-media/wave5/wave5-vpuapi.h
 +++ b/drivers/media/platform/chips-media/wave5/wave5-vpuapi.h
-@@ -818,6 +818,12 @@
+@@ -9,6 +9,7 @@
+ #define VPUAPI_H_INCLUDED
+ 
+ #include <linux/kfifo.h>
++#include <linux/workqueue.h>
+ #include <linux/idr.h>
+ #include <linux/genalloc.h>
+ #include <media/v4l2-device.h>
+@@ -753,6 +754,11 @@
+ 	enum product_id product;
+ 	struct vpu_attr attr;
+ 	struct vpu_buf common_mem;
++	/*
++	 * ML (Artosyn): the bitcode name probe loaded, kept so the firmware can be
++	 * downloaded again over a running VPU. See wave5_vpu_recover().
++	 */
++	const char *fw_name;
+ 	u32 last_performance_cycles;
+ 	u32 sram_size;
+ 	struct gen_pool *sram_pool;
+@@ -770,6 +776,7 @@
+ 	struct semaphore irq_sem; /* signal to irq_thread when interrupt happens*/
+ 	struct reset_control *resets;
+ 	spinlock_t irq_spinlock; /* protect instances list */
++	struct dentry *debugfs_dir; /* ML: /sys/kernel/debug/wave5 */
+ };
+ 
+ struct vpu_instance;
+@@ -818,11 +825,27 @@
  	bool cbcr_interleave;
  	bool nv21;
  	bool eos;
@@ -31,7 +67,37 @@ intra_period is zero, so enc_param is not the truth.
  	struct vpu_buf bitstream_vbuf;
  	dma_addr_t last_rd_ptr;
  	size_t remaining_consumed_bytes;
-@@ -878,6 +884,26 @@
+ 	bool needs_reallocation;
+ 
++	/* ML (Artosyn): bound on an encode job the firmware never answers. Armed when device_run
++	 * leaves a job active, disarmed by the completion. Its expiry is the only thing that can
++	 * release a task parked in v4l2_m2m_cancel_job(), which waits uninterruptibly with no
++	 * timeout while holding the mutex both video nodes are registered with. */
++	struct delayed_work job_timeout_work;
++	bool job_timeout_warned;    /* latch: one warning per instance, not one per job */
++	bool enc_fault_warned;      /* latch for the firmware's own error reports */
++	u32 job_timeout_count;      /* jobs finished by the timeout above */
++	u32 enc_fault_count;        /* completions that carried a firmware error */
++
+ 	unsigned int min_src_buf_count;
+ 	unsigned int rot_angle;
+ 	unsigned int mirror_direction;
+@@ -849,6 +872,14 @@
+ void wave5_vdi_free_sram(struct vpu_device *vpu_dev);
+ 
+ int wave5_vpu_init_with_bitcode(struct device *dev, u8 *bitcode, size_t size);
++
++/* ML (Artosyn): block reset plus a forced firmware re-download, the only thing that clears a
++ * firmware instance the close path could not stop. Global: it destroys every live instance, so
++ * callers must establish that this is the last one. wave5_vpu_recover_locked() is the same body
++ * for a caller that already holds hw_lock.
++ */
++int wave5_vpu_recover(struct vpu_device *vpu_dev);
++int wave5_vpu_recover_locked(struct vpu_device *vpu_dev);
+ int wave5_vpu_flush_instance(struct vpu_instance *inst);
+ int wave5_vpu_get_version_info(struct device *dev, u32 *revision, unsigned int *product_id);
+ int wave5_vpu_dec_open(struct vpu_instance *inst, struct dec_open_param *open_param);
+@@ -878,6 +909,26 @@
  					enum tiled_map_type map_type);
  int wave5_vpu_enc_start_one_frame(struct vpu_instance *inst, struct enc_param *param,
  				  u32 *fail_res);

@@ -22,9 +22,150 @@ the open-param copy the change command reads from, and
 wave5_vpu_enc_apply_pending_rate() clears the pending mask before it attempts the
 change, so a change that fails cannot re-arm itself on every following frame.
 
+Firmware reload. wave5_initialize_vpu() drops the wave5_vpu_is_init() guard and
+wave5_vpu_recover() wraps a block reset plus a fresh firmware download around it.
+The guard reads W5_VCPU_CUR_PC and treats any running VCPU as already
+initialised, so it rejects exactly the case that needs the download - a firmware
+that has stopped answering - and the wave5_vpu_re_init() fallback it takes
+instead is a no-op here, because its old_code_base check compares equal against
+the page-granular first-fit coherent pool (0300).
+
+Probe forces too. Nothing on this SoC powers the codec block down between a
+module unload and the next load, or across a watchdog reset, so W5_VCPU_CUR_PC
+is still non-zero and the guard rejected the probe with -EBUSY: the recorded
+"vpu_init_with_bitcode, fail: -16" warm reload failure, which made a module swap
+impossible and every driver change a full reflash. A cold probe reaches the same
+reset-and-download path either way, because a VCPU that has never run reads back
+a program counter of zero, so this cannot change cold-boot behaviour.
+
+Both close paths call wave5_vpu_recover_locked() in place of SW_RESET_SAFETY. SAFETY routes through
+wave5_vpu_sleep_wake(), whose wake handshake does not complete on this
+integration and which opens with wave5_wait_vpu_busy(), the same wait that fails
+when the command queue is jammed - so it returned -ETIMEDOUT before reaching the
+block reset and the frees it was meant to make safe never happened.
+SW_RESET_ON_BOOT asserts W5_RST_BLOCK_ALL directly. The reset is global, so it
+stays behind the existing last-instance check.
+
 --- a/drivers/media/platform/chips-media/wave5/wave5-vpuapi.c
 +++ b/drivers/media/platform/chips-media/wave5/wave5-vpuapi.c
-@@ -171,7 +171,9 @@
+@@ -6,6 +6,7 @@
+  */
+ 
+ #include <linux/bug.h>
++#include <linux/firmware.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/delay.h>
+ #include "wave5-vpuapi.h"
+@@ -15,28 +16,50 @@
+ #define DECODE_ALL_TEMPORAL_LAYERS 0
+ #define DECODE_ALL_SPATIAL_LAYERS 0
+ 
+-static int wave5_initialize_vpu(struct device *dev, u8 *code, size_t size)
++/*
++ * ML (Artosyn): the reset-and-download body, for a caller that already holds hw_lock.
++ *
++ * Mainline guards this with wave5_vpu_is_init(), which reads W5_VCPU_CUR_PC and treats any running
++ * VCPU as an already-initialised one: it returns -EBUSY after a wave5_vpu_re_init() that is itself
++ * a no-op here, because re_init's old_code_base check compares equal against the page-granular
++ * first-fit coherent pool. Nothing on this SoC clears that program counter between a module unload
++ * and the next load, or across a watchdog reset, so the guard rejected every warm probe
++ * ("vpu_init_with_bitcode, fail: -16") and it rejects a firmware that has stopped answering, which
++ * is the case that needs the download most. Both callers want the reset unconditionally, so the
++ * guard is gone rather than parameterised. Cold boot is unaffected: a VCPU that has never run
++ * reads back a program counter of zero, so the guard was never taken there.
++ */
++static int wave5_initialize_vpu_locked(struct device *dev, u8 *code, size_t size)
+ {
+-	int ret;
+ 	struct vpu_device *vpu_dev = dev_get_drvdata(dev);
++	int ret;
+ 
+-	ret = mutex_lock_interruptible(&vpu_dev->hw_lock);
++	lockdep_assert_held(&vpu_dev->hw_lock);
++
++	/* SW_RESET_ON_BOOT, never SAFETY or FORCE: those two route through
++	 * wave5_vpu_sleep_wake(), whose wake handshake does not complete on this integration and
++	 * which opens with wave5_wait_vpu_busy() - the very wait that fails when the command queue
++	 * is jammed. ON_BOOT quiesces the bus and asserts W5_RST_BLOCK_ALL directly, which is what
++	 * halts the VCPU and its DMA.
++	 */
++	ret = wave5_vpu_reset(dev, SW_RESET_ON_BOOT);
+ 	if (ret)
+ 		return ret;
+ 
+-	if (wave5_vpu_is_init(vpu_dev)) {
+-		wave5_vpu_re_init(dev, (void *)code, size);
+-		ret = -EBUSY;
+-		goto err_out;
+-	}
++	return wave5_vpu_init(dev, (void *)code, size);
++}
+ 
+-	ret = wave5_vpu_reset(dev, SW_RESET_ON_BOOT);
++static int wave5_initialize_vpu(struct device *dev, u8 *code, size_t size)
++{
++	int ret;
++	struct vpu_device *vpu_dev = dev_get_drvdata(dev);
++
++	ret = mutex_lock_interruptible(&vpu_dev->hw_lock);
+ 	if (ret)
+-		goto err_out;
++		return ret;
+ 
+-	ret = wave5_vpu_init(dev, (void *)code, size);
++	ret = wave5_initialize_vpu_locked(dev, code, size);
+ 
+-err_out:
+ 	mutex_unlock(&vpu_dev->hw_lock);
+ 	return ret;
+ }
+@@ -49,6 +72,45 @@
+ 	return wave5_initialize_vpu(dev, bitcode, size);
+ }
+ 
++int wave5_vpu_recover_locked(struct vpu_device *vpu_dev)
++{
++	const struct firmware *fw;
++	int ret;
++
++	if (!vpu_dev->fw_name)
++		return -ENOENT;
++
++	ret = request_firmware(&fw, vpu_dev->fw_name, vpu_dev->dev);
++	if (ret) {
++		dev_err(vpu_dev->dev, "VPU recover, request_firmware fail: %d\n", ret);
++		return ret;
++	}
++
++	ret = wave5_initialize_vpu_locked(vpu_dev->dev, (u8 *)fw->data, fw->size);
++	release_firmware(fw);
++	if (ret) {
++		dev_err(vpu_dev->dev, "VPU recover, reset and firmware download fail: %d\n", ret);
++		return ret;
++	}
++
++	dev_warn(vpu_dev->dev, "VPU recovered: block reset and firmware re-download\n");
++	return 0;
++}
++
++int wave5_vpu_recover(struct vpu_device *vpu_dev)
++{
++	int ret;
++
++	ret = mutex_lock_interruptible(&vpu_dev->hw_lock);
++	if (ret)
++		return ret;
++
++	ret = wave5_vpu_recover_locked(vpu_dev);
++
++	mutex_unlock(&vpu_dev->hw_lock);
++	return ret;
++}
++
+ int wave5_vpu_flush_instance(struct vpu_instance *inst)
+ {
+ 	int ret = 0;
+@@ -171,7 +233,9 @@
  	p_dec_info->stream_buf_start_addr = buffer_addr;
  	p_dec_info->stream_buf_size = buffer_size;
  	p_dec_info->stream_buf_end_addr = buffer_addr + buffer_size;
@@ -35,7 +176,7 @@ change, so a change that fails cannot re-arm itself on every following frame.
  	p_dec_info->temp_id_select_mode = TEMPORAL_ID_MODE_ABSOLUTE;
  	p_dec_info->target_temp_id = DECODE_ALL_TEMPORAL_LAYERS;
  	p_dec_info->target_spatial_id = DECODE_ALL_SPATIAL_LAYERS;
-@@ -214,36 +216,65 @@
+@@ -214,36 +278,66 @@
  
  	pm_runtime_resume_and_get(inst->dev->dev);
  
@@ -71,11 +212,12 @@ change, so a change that fails cannot re-arm itself on every following frame.
 +	/* ML (Artosyn): free even when finish_seq failed/timed out - BUT only after the
 +	 * VCPU is provably stopped. Freeing under a still-running instance lets the
 +	 * firmware DMA into reallocated memory (hard-hangs the SoC); leaking instead
-+	 * starves the fixed mmz pool. SW_RESET_SAFETY drains+halts the whole VPU first,
-+	 * making the frees safe - but it is GLOBAL: resetting under other live instances
-+	 * (a second decoder, possibly another process's) corrupts their firmware state.
-+	 * Only reset when this is the LAST instance; otherwise leak this instance's
-+	 * buffers, the lesser evil. */
++	 * starves the fixed mmz pool. wave5_vpu_recover_locked() asserts W5_RST_BLOCK_ALL and
++	 * downloads the firmware again, halting the VCPU and its DMA and making the frees safe -
++	 * but it is GLOBAL: resetting under other live instances (a second decoder, possibly
++	 * another process's) corrupts their firmware state. Only reset when this is the LAST
++	 * instance; otherwise leak this instance's buffers, the lesser evil.
++	 */
 +	if (ret < 0) {
 +		bool last;
 +		unsigned long flags;
@@ -90,10 +232,10 @@ change, so a change that fails cannot re-arm itself on every following frame.
 +			inst->keep_dma_bufs = true;
 +			goto unlock_and_return;
 +		}
-+		dev_warn(inst->dev->dev, "%s: instance still running, VPU safety reset before free\n",
++		dev_warn(inst->dev->dev, "%s: instance still running, VPU reload before free\n",
 +			 __func__);
-+		if (wave5_vpu_reset(vpu_dev->dev, SW_RESET_SAFETY)) {
-+			dev_err(inst->dev->dev, "%s: safety reset failed, leaking instance buffers\n",
++		if (wave5_vpu_recover_locked(vpu_dev)) {
++			dev_err(inst->dev->dev, "%s: VPU reload failed, leaking instance buffers\n",
 +				__func__);
 +			inst->keep_dma_bufs = true;
 +			goto unlock_and_return;
@@ -112,7 +254,7 @@ change, so a change that fails cannot re-arm itself on every following frame.
  	}
  
  	wave5_vdi_free_dma_memory(vpu_dev, &p_dec_info->vb_task);
-@@ -251,7 +282,7 @@
+@@ -251,7 +345,7 @@
  unlock_and_return:
  	mutex_unlock(&vpu_dev->hw_lock);
  	pm_runtime_put_sync(inst->dev->dev);
@@ -121,7 +263,7 @@ change, so a change that fails cannot re-arm itself on every following frame.
  }
  
  int wave5_vpu_dec_issue_seq_init(struct vpu_instance *inst)
-@@ -720,31 +751,54 @@
+@@ -720,31 +814,54 @@
  
  	pm_runtime_resume_and_get(inst->dev->dev);
  
@@ -174,10 +316,10 @@ change, so a change that fails cannot re-arm itself on every following frame.
 +			inst->keep_dma_bufs = true;
 +			goto unlock_and_return;
 +		}
-+		dev_warn(inst->dev->dev, "%s: instance still running, VPU safety reset before free\n",
++		dev_warn(inst->dev->dev, "%s: instance still running, VPU reload before free\n",
 +			 __func__);
-+		if (wave5_vpu_reset(vpu_dev->dev, SW_RESET_SAFETY)) {
-+			dev_err(inst->dev->dev, "%s: safety reset failed, leaking instance buffers\n",
++		if (wave5_vpu_recover_locked(vpu_dev)) {
++			dev_err(inst->dev->dev, "%s: VPU reload failed, leaking instance buffers\n",
 +				__func__);
 +			inst->keep_dma_bufs = true;
 +			goto unlock_and_return;
@@ -187,7 +329,7 @@ change, so a change that fails cannot re-arm itself on every following frame.
  	wave5_vdi_free_dma_memory(vpu_dev, &p_enc_info->vb_work);
  
  	if (inst->std == W_HEVC_ENC || inst->std == W_AVC_ENC) {
-@@ -755,10 +809,11 @@
+@@ -755,10 +872,11 @@
  	}
  
  	wave5_vdi_free_dma_memory(vpu_dev, &p_enc_info->vb_task);
@@ -200,7 +342,7 @@ change, so a change that fails cannot re-arm itself on every following frame.
  }
  
  int wave5_vpu_enc_register_frame_buffer(struct vpu_instance *inst, unsigned int num,
-@@ -867,6 +922,50 @@
+@@ -867,6 +985,50 @@
  	return ret;
  }
  

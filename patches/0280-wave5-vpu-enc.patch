@@ -95,6 +95,33 @@ allows. max_num_merge 0 is not a vendor difference so much as a gap - the field
 takes 1 or 2 and nothing ever wrote it. The fields the vendor agrees with
 upstream on are left alone.
 
+(10) Job timeout, .job_abort and fault counters. A completion that never arrives
+leaves the m2m job TRANS_RUNNING forever; v4l2_m2m_cancel_job() then waits
+uninterruptibly with no timeout while holding the mutex both video nodes are
+registered with, so teardown parks in D state and the whole VPU is unusable until
+a power cycle. device_run now arms a 500 ms delayed work when it leaves a job
+active, the completion disarms it, and its expiry returns the buffers as errors
+and calls v4l2_m2m_job_finish. The 500 ms default sits above the firmware's own ~125 ms
+watchdog, whose report arrives as an ordinary completion the error path already
+handles, so the timeout only covers the no-answer case. The work runs on a
+workqueue taking irq_lock and never dev_lock, because the task it releases is
+holding dev_lock. .job_abort moves the instance to STOP so no further job starts
+while teardown waits. The firmware-error warning is latched per instance and
+counted instead of printed per occurrence: it fires on one in three abandoned
+teardowns, and a per-occurrence warning is a log flood rather than a signal. The
+counts are reported once, at release.
+The timeout is a module param, and setting it to zero restores the unbounded wait:
+with inject_lost_enc_irq that reproduces the deadlock on demand, which is what
+shows the recovery is the thing preventing it.
+
+(11) STREAMOFF drain budget. The drain loop gets a total budget,
+enc_drain_timeout_ms, default 2000 ms. Upstream waits VPU_ENC_TIMEOUT, 60 s, on
+each pass and bounds the number of passes at nothing, so a firmware that stopped
+answering parks STREAMOFF uninterruptibly: 124 s measured across two passes with
+the job timeout above already armed, making this a second unbounded wait
+independent of the one that timeout covers. The budget bounds both the per-pass
+wait and the pass count. Zero restores the upstream behaviour.
+
 --- a/drivers/media/platform/chips-media/wave5/wave5-vpu-enc.c
 +++ b/drivers/media/platform/chips-media/wave5/wave5-vpu-enc.c
 @@ -125,6 +125,30 @@
@@ -229,7 +256,7 @@ upstream on are left alone.
  		src_buf = v4l2_m2m_src_buf_remove(m2m_ctx);
  		if (!src_buf) {
  			dev_dbg(inst->dev->dev,
-@@ -219,20 +288,25 @@
+@@ -219,38 +288,153 @@
  				__func__);
  			return -EINVAL;
  		}
@@ -258,7 +285,75 @@ upstream on are left alone.
  	}
  
  	return 0;
-@@ -242,15 +316,52 @@
+ }
+ 
++/*
++ * How long an encode job may stay in flight before the driver stops waiting for the firmware.
++ *
++ * The firmware reports its own watchdog (WAVE5_SYSERR_WATCHDOG_TIMEOUT) about 125 ms after a
++ * picture it cannot finish, and that report arrives as an ordinary completion which
++ * finish_encode already handles. The default sits well above that, so it fires only when no
++ * completion arrives at all. That case has nothing else to break it: v4l2_m2m_cancel_job() waits
++ * uninterruptibly with no timeout, holding the mutex both video nodes are registered with, so one
++ * unanswered job takes the encoder and both decoders down until the SoC is power cycled.
++ *
++ * Zero disables the timeout, restoring the unbounded wait. Paired with inject_lost_enc_irq
++ * (0260) that reproduces the deadlock deliberately, which is how this recovery is shown to be
++ * the thing preventing it rather than merely correlated with its absence.
++ */
++static unsigned int enc_job_timeout_ms = 500;
++module_param(enc_job_timeout_ms, uint, 0644);
++MODULE_PARM_DESC(enc_job_timeout_ms, "ms before an unanswered encode job is failed (0 disables)");
++
++/**
++ * wave5_vpu_enc_job_timeout - finish an encode job the firmware never completed.
++ *
++ * Runs on a workqueue and takes irq_lock only, which is what makes it able to help: the task it
++ * releases is itself inside v4l2_m2m_cancel_job() holding dev_lock. irq_lock is the same lock the
++ * IRQ thread holds around finish_process, so a completion arriving at the same moment is
++ * serialised against this rather than racing it.
++ *
++ * The buffers are returned with VB2_BUF_STATE_ERROR. By the time this runs the firmware's own
++ * watchdog window has long passed, so the block is not still writing into them.
++ */
++static void wave5_vpu_enc_job_timeout(struct work_struct *work)
++{
++	struct vpu_instance *inst = container_of(to_delayed_work(work),
++						 struct vpu_instance, job_timeout_work);
++	struct v4l2_m2m_ctx *m2m_ctx = inst->v4l2_fh.m2m_ctx;
++	struct vb2_v4l2_buffer *src_buf;
++	struct vb2_v4l2_buffer *dst_buf;
++
++	mutex_lock(&inst->dev->irq_lock);
++
++	inst->job_timeout_count++;
++	if (!inst->job_timeout_warned) {
++		inst->job_timeout_warned = true;
++		dev_warn(inst->dev->dev,
++			 "%s: no completion for an encode job in %u ms, finishing it as an error\n",
++			 __func__, enc_job_timeout_ms);
++	}
++
++	src_buf = wave5_vpu_enc_active_src_buf(inst);
++	if (src_buf) {
++		inst->timestamp = src_buf->vb2_buf.timestamp;
++		v4l2_m2m_buf_done(src_buf, VB2_BUF_STATE_ERROR);
++	}
++	inst->active_enc_src_idx = -1;
++
++	dst_buf = v4l2_m2m_dst_buf_remove(m2m_ctx);
++	if (dst_buf) {
++		dst_buf->vb2_buf.timestamp = inst->timestamp;
++		dst_buf->field = V4L2_FIELD_NONE;
++		v4l2_m2m_buf_done(dst_buf, VB2_BUF_STATE_ERROR);
++	}
++
++	v4l2_m2m_job_finish(inst->v4l2_m2m_dev, m2m_ctx);
++
++	mutex_unlock(&inst->dev->irq_lock);
++}
++
+ static void wave5_vpu_enc_finish_encode(struct vpu_instance *inst)
  {
  	struct v4l2_m2m_ctx *m2m_ctx = inst->v4l2_fh.m2m_ctx;
  	int ret;
@@ -268,6 +363,8 @@ upstream on are left alone.
  	struct vb2_v4l2_buffer *dst_buf = NULL;
 +	bool recoverable_vlc_buf_full;
 +	enum vb2_buffer_state src_state;
++
++	cancel_delayed_work(&inst->job_timeout_work);
  
  	ret = wave5_vpu_enc_get_output_info(inst, &enc_output_info);
  	if (ret) {
@@ -281,9 +378,14 @@ upstream on are left alone.
 +		 * device mutex held, whole VPU unusable). Log loudly and finish
 +		 * the job so userspace gets its buffers back as errors.
 +		 */
-+		dev_warn(inst->dev->dev,
-+			 "%s: vpu_enc_get_output_info fail: %d  reason: 0x%x | info: 0x%x\n",
-+			 __func__, ret, enc_output_info.error_reason, enc_output_info.warn_info);
++		inst->enc_fault_count++;
++		if (!inst->enc_fault_warned) {
++			inst->enc_fault_warned = true;
++			dev_warn(inst->dev->dev,
++				 "%s: vpu_enc_get_output_info fail: %d  reason: 0x%x | info: 0x%x\n",
++				 __func__, ret, enc_output_info.error_reason,
++				 enc_output_info.warn_info);
++		}
 +		recoverable_vlc_buf_full =
 +			enc_output_info.error_reason == WAVE5_SYSERR_VLC_BUF_FULL;
 +		src_state = recoverable_vlc_buf_full ? VB2_BUF_STATE_DONE : VB2_BUF_STATE_ERROR;
@@ -315,7 +417,7 @@ upstream on are left alone.
  		return;
  	}
  
-@@ -281,6 +392,7 @@
+@@ -281,6 +465,7 @@
  			dev_warn(inst->dev->dev, "%s: no source buffer with index: %d found\n",
  				 __func__, enc_output_info.enc_src_idx);
  		}
@@ -323,7 +425,7 @@ upstream on are left alone.
  	}
  
  	dst_buf = v4l2_m2m_dst_buf_remove(m2m_ctx);
-@@ -401,6 +513,24 @@
+@@ -401,6 +586,24 @@
  
  	wave5_update_pix_fmt(&f->fmt.pix_mp, VPU_FMT_TYPE_CODEC,
  			     width, height, frmsize);
@@ -348,7 +450,7 @@ upstream on are left alone.
  	f->fmt.pix_mp.colorspace = inst->colorspace;
  	f->fmt.pix_mp.ycbcr_enc = inst->ycbcr_enc;
  	f->fmt.pix_mp.quantization = inst->quantization;
-@@ -484,11 +614,44 @@
+@@ -484,11 +687,44 @@
  	return 0;
  }
  
@@ -393,7 +495,7 @@ upstream on are left alone.
  	int width, height;
  
  	dev_dbg(inst->dev->dev, "%s: fourcc: %u width: %u height: %u num_planes: %u field: %u\n",
-@@ -510,6 +673,7 @@
+@@ -510,6 +746,7 @@
  
  	wave5_update_pix_fmt(&f->fmt.pix_mp, VPU_FMT_TYPE_RAW,
  			     width, height, frmsize);
@@ -401,7 +503,7 @@ upstream on are left alone.
  	return 0;
  }
  
-@@ -518,6 +682,17 @@
+@@ -518,6 +755,17 @@
  	struct vpu_instance *inst = file_to_vpu_inst(file);
  	const struct vpu_format *vpu_fmt;
  	const struct v4l2_format_info *info;
@@ -419,7 +521,7 @@ upstream on are left alone.
  	int i, ret;
  
  	dev_dbg(inst->dev->dev, "%s: fourcc: %u width: %u height: %u num_planes: %u field: %u\n",
-@@ -566,8 +741,15 @@
+@@ -566,8 +814,15 @@
  		return -EINVAL;
  
  	wave5_update_pix_fmt(&inst->dst_fmt, VPU_FMT_TYPE_CODEC,
@@ -436,7 +538,7 @@ upstream on are left alone.
  	inst->conf_win.width = inst->dst_fmt.width;
  	inst->conf_win.height = inst->dst_fmt.height;
  
-@@ -684,6 +866,7 @@
+@@ -684,6 +939,7 @@
  static int wave5_vpu_enc_s_parm(struct file *file, void *fh, struct v4l2_streamparm *a)
  {
  	struct vpu_instance *inst = file_to_vpu_inst(file);
@@ -444,7 +546,7 @@ upstream on are left alone.
  
  	dev_dbg(inst->dev->dev, "%s: type: %u\n", __func__, a->type);
  
-@@ -703,6 +886,9 @@
+@@ -703,6 +959,9 @@
  		__func__, a->parm.output.timeperframe.numerator,
  		a->parm.output.timeperframe.denominator);
  
@@ -454,7 +556,7 @@ upstream on are left alone.
  	return 0;
  }
  
-@@ -746,6 +932,8 @@
+@@ -746,6 +1005,8 @@
  static int wave5_vpu_enc_s_ctrl(struct v4l2_ctrl *ctrl)
  {
  	struct vpu_instance *inst = wave5_ctrl_to_vpu_inst(ctrl);
@@ -463,7 +565,7 @@ upstream on are left alone.
  
  	dev_dbg(inst->dev->dev, "%s: name: %s | value: %d\n", __func__, ctrl->name, ctrl->val);
  
-@@ -763,6 +951,7 @@
+@@ -763,6 +1024,7 @@
  		inst->rot_angle = ctrl->val;
  		break;
  	case V4L2_CID_MPEG_VIDEO_VBV_SIZE:
@@ -471,7 +573,7 @@ upstream on are left alone.
  		inst->vbv_buf_size = ctrl->val;
  		break;
  	case V4L2_CID_MPEG_VIDEO_BITRATE_MODE:
-@@ -778,11 +967,15 @@
+@@ -778,11 +1040,15 @@
  		}
  		break;
  	case V4L2_CID_MPEG_VIDEO_BITRATE:
@@ -487,7 +589,7 @@ upstream on are left alone.
  	case V4L2_CID_MPEG_VIDEO_MULTI_SLICE_MODE:
  		inst->enc_param.independ_slice_mode = ctrl->val;
  		inst->enc_param.avc_slice_mode = ctrl->val;
-@@ -1081,6 +1274,13 @@
+@@ -1081,6 +1347,13 @@
  		return -EINVAL;
  	}
  
@@ -501,7 +603,7 @@ upstream on are left alone.
  	return 0;
  }
  
-@@ -1156,9 +1356,21 @@
+@@ -1156,9 +1429,21 @@
  	else
  		open_param->src_format = FORMAT_420;
  
@@ -524,7 +626,7 @@ upstream on are left alone.
  	open_param->wave_param.skip_intra_trans = 1;
  	open_param->wave_param.intra_nx_n_enable = 1;
  	open_param->wave_param.nr_intra_weight_y = 7;
-@@ -1167,8 +1379,16 @@
+@@ -1167,8 +1452,16 @@
  	open_param->wave_param.nr_inter_weight_y = 4;
  	open_param->wave_param.nr_inter_weight_cb = 4;
  	open_param->wave_param.nr_inter_weight_cr = 4;
@@ -543,7 +645,7 @@ upstream on are left alone.
  
  	open_param->line_buf_int_en = true;
  	open_param->pic_width = inst->conf_win.width;
-@@ -1176,9 +1396,17 @@
+@@ -1176,9 +1469,17 @@
  	open_param->frame_rate_info = inst->frame_rate;
  	open_param->rc_enable = inst->rc_enable;
  	if (inst->rc_enable) {
@@ -562,7 +664,7 @@ upstream on are left alone.
  	}
  	open_param->wave_param.mb_level_rc_enable = input.mb_level_rc_enable;
  	open_param->wave_param.cu_level_rc_enable = input.cu_level_rc_enable;
-@@ -1343,17 +1571,20 @@
+@@ -1343,17 +1644,20 @@
  
  		ret = wave5_set_enc_openparam(&open_param, inst);
  		if (ret) {
@@ -587,7 +689,7 @@ upstream on are left alone.
  
  		if (inst->mirror_direction) {
  			wave5_vpu_enc_give_command(inst, ENABLE_MIRRORING, NULL);
-@@ -1376,6 +1607,8 @@
+@@ -1376,6 +1680,8 @@
  			dev_warn(inst->dev->dev, "Sequence not found: %d\n", ret);
  			goto return_buffers;
  		}
@@ -596,7 +698,7 @@ upstream on are left alone.
  		ret = switch_state(inst, VPU_INST_STATE_INIT_SEQ);
  		if (ret)
  			goto return_buffers;
-@@ -1390,6 +1623,7 @@
+@@ -1390,6 +1696,7 @@
  		}
  
  		ret = switch_state(inst, VPU_INST_STATE_PIC_RUN);
@@ -604,7 +706,87 @@ upstream on are left alone.
  	}
  	if (ret)
  		goto return_buffers;
-@@ -1579,6 +1813,7 @@
+@@ -1429,10 +1736,28 @@
+ 	v4l2_m2m_clear_state(m2m_ctx);
+ }
+ 
++/*
++ * Total budget for STREAMOFF to drain the firmware's report queue.
++ *
++ * The drain below waits per pass, and a firmware that has stopped answering makes every pass wait
++ * the full VPU_ENC_TIMEOUT of 60 s. Measured: 124 s in D state across two passes, with the job
++ * timeout already armed - so this is a second uninterruptible wait, independent of the one that
++ * timeout covers. A budget across the whole loop bounds both the per-pass wait and the number of
++ * passes. Two seconds is far above a healthy drain, which completes in milliseconds.
++ *
++ * Zero restores the upstream per-pass VPU_ENC_TIMEOUT with no total budget.
++ */
++static unsigned int enc_drain_timeout_ms = 2000;
++module_param(enc_drain_timeout_ms, uint, 0644);
++MODULE_PARM_DESC(enc_drain_timeout_ms,
++		 "ms STREAMOFF waits for the encoder report queue to drain (0 restores the 60 s per-pass wait)");
++
+ static void wave5_vpu_enc_stop_streaming(struct vb2_queue *q)
+ {
+ 	struct vpu_instance *inst = vb2_get_drv_priv(q);
+ 	bool check_cmd = true;
++	unsigned int drain_ms = enc_drain_timeout_ms ? enc_drain_timeout_ms : VPU_ENC_TIMEOUT;
++	unsigned long drain_deadline = jiffies + msecs_to_jiffies(drain_ms);
+ 
+ 	/*
+ 	 * Note that we don't need m2m_ctx->next_buf_last for this driver, so we
+@@ -1454,7 +1779,15 @@
+ 		if (q_status.report_queue_count == 0)
+ 			break;
+ 
+-		if (wave5_vpu_wait_interrupt(inst, VPU_ENC_TIMEOUT) < 0)
++		if (time_after_eq(jiffies, drain_deadline)) {
++			dev_warn(inst->dev->dev,
++				 "%s: %u report(s) still queued after %u ms, abandoning the drain\n",
++				 __func__, q_status.report_queue_count, drain_ms);
++			break;
++		}
++
++		if (wave5_vpu_wait_interrupt(inst,
++					     jiffies_to_msecs(drain_deadline - jiffies)) < 0)
+ 			break;
+ 
+ 		if (wave5_vpu_enc_get_output_info(inst, &enc_output_info))
+@@ -1520,6 +1853,9 @@
+ 			break;
+ 		}
+ 		dev_dbg(inst->dev->dev, "%s: leave with active job", __func__);
++		if (enc_job_timeout_ms)
++			schedule_delayed_work(&inst->job_timeout_work,
++					      msecs_to_jiffies(enc_job_timeout_ms));
+ 		pm_runtime_put_autosuspend(inst->dev->dev);
+ 		return;
+ 	default:
+@@ -1558,8 +1894,23 @@
+ 	return false;
+ }
+ 
++/**
++ * wave5_vpu_enc_job_abort - teardown is waiting on the running job.
++ *
++ * v4l2_m2m_cancel_job() calls this and then waits for the job to clear. Moving to STOP keeps
++ * job_ready from starting another one; the running job is left to its completion, or to
++ * wave5_vpu_enc_job_timeout() when none arrives, which is what bounds that wait.
++ */
++static void wave5_vpu_enc_job_abort(void *priv)
++{
++	struct vpu_instance *inst = priv;
++
++	switch_state(inst, VPU_INST_STATE_STOP);
++}
++
+ static const struct v4l2_m2m_ops wave5_vpu_enc_m2m_ops = {
+ 	.device_run = wave5_vpu_enc_device_run,
++	.job_abort = wave5_vpu_enc_job_abort,
+ 	.job_ready = wave5_vpu_enc_job_ready,
+ };
+ 
+@@ -1579,6 +1930,7 @@
  	inst->dev = dev;
  	inst->type = VPU_INST_TYPE_ENC;
  	inst->ops = &wave5_vpu_enc_inst_ops;
@@ -612,7 +794,15 @@ upstream on are left alone.
  
  	inst->codec_info = kzalloc(sizeof(*inst->codec_info), GFP_KERNEL);
  	if (!inst->codec_info) {
-@@ -1740,6 +1975,8 @@
+@@ -1590,6 +1942,7 @@
+ 	v4l2_fh_add(&inst->v4l2_fh, filp);
+ 
+ 	INIT_LIST_HEAD(&inst->list);
++	INIT_DELAYED_WORK(&inst->job_timeout_work, wave5_vpu_enc_job_timeout);
+ 
+ 	inst->v4l2_m2m_dev = inst->dev->v4l2_m2m_enc_dev;
+ 	inst->v4l2_fh.m2m_ctx =
+@@ -1740,6 +2093,8 @@
  	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
  			  V4L2_CID_MPEG_VIDEO_PREPEND_SPSPPS_TO_IDR,
  			  0, 1, 1, 0);
@@ -621,3 +811,17 @@ upstream on are left alone.
  
  	if (v4l2_ctrl_hdl->error) {
  		ret = -ENODEV;
+@@ -1791,6 +2146,13 @@
+ 
+ static int wave5_vpu_enc_release(struct file *filp)
+ {
++	struct vpu_instance *inst = file_to_vpu_inst(filp);
++
++	if (inst->enc_fault_count || inst->job_timeout_count)
++		dev_warn(inst->dev->dev,
++			 "encoder instance closing after %u firmware error(s) and %u timed-out job(s)\n",
++			 inst->enc_fault_count, inst->job_timeout_count);
++
+ 	return wave5_vpu_release_device(filp, wave5_vpu_enc_close, "encoder");
+ }
+ 

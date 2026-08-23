@@ -1,4 +1,4 @@
-Why: two changes to the instance-teardown path.
+Why: three changes to the instance-teardown path.
 
 Upstream takes interruptible locks in teardown and bails out early on close
 failure. Teardown runs from file release, where on SIGKILL a fatal signal is
@@ -12,9 +12,27 @@ wave5_cleanup_instance then unconditionally freed the FBC/DPB framebuffers and
 the bitstream ring, which defeats the deliberate leak in 0240: freeing memory a
 running firmware instance still DMAs into hard-hangs the SoC. Cleanup now
 honours keep_dma_bufs (0250) and leaks those buffers too.
+
+Cancel the encoder's job-timeout work before the instance is freed. It cannot be
+cancelled earlier in the release path: that path is what the work exists to release.
+
 --- a/drivers/media/platform/chips-media/wave5/wave5-helper.c
 +++ b/drivers/media/platform/chips-media/wave5/wave5-helper.c
-@@ -45,10 +45,19 @@
+@@ -36,6 +36,13 @@
+ {
+ 	int i;
+ 
++	/* ML (Artosyn): the encoder arms a delayed work to bound a job the firmware never
++	 * answers. Nothing below may free the instance while that work can still run.
++	 * Cancelling here rather than in the release path is deliberate: the release path is
++	 * itself waiting on that work when a job is stuck. */
++	if (inst->type == VPU_INST_TYPE_ENC)
++		cancel_delayed_work_sync(&inst->job_timeout_work);
++
+ 	/*
+ 	 * For Wave515 SRAM memory is allocated at
+ 	 * wave5_vpu_dec_register_device() and freed at
+@@ -45,10 +52,19 @@
  	    inst->dev->product_code != WAVE515_CODE)
  		wave5_vdi_free_sram(inst->dev);
  
@@ -37,7 +55,7 @@ honours keep_dma_bufs (0250) and leaks those buffers too.
  	v4l2_ctrl_handler_free(&inst->v4l2_ctrl_hdl);
  	if (inst->v4l2_fh.vdev) {
  		v4l2_fh_del(&inst->v4l2_fh, filp);
-@@ -82,9 +91,14 @@
+@@ -82,9 +98,14 @@
  	 * in the wave5_vpu_dec_finish_decode.
  	 * So the spin lock and mutex were used to protect the list in the release function.
  	 */
@@ -55,7 +73,7 @@ honours keep_dma_bufs (0250) and leaks those buffers too.
  	spin_lock_irqsave(&inst->dev->irq_spinlock, flags);
  	list_del_init(&inst->list);
  	spin_unlock_irqrestore(&inst->dev->irq_spinlock, flags);
-@@ -96,17 +110,15 @@
+@@ -96,17 +117,15 @@
  		if (fail_res == WAVE5_SYSERR_VPU_STILL_RUNNING) {
  			dev_err(inst->dev->dev, "%s close failed, device is still running\n",
  				name);
