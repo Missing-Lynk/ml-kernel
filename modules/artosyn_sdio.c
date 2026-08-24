@@ -114,6 +114,19 @@
  */
 #define LINK_TYPE_IP		0xCC	/* IPv4 tunnel data (data_txq / netif_rx) */
 #define LINK_TYPE_CMD		0xDD	/* bb command / response (cmd_txq / cmd_rxq) */
+
+/* Depth of the command RX backlog. The chip sends control messages autonomously at ~48/s whether
+ * or not anything is reading them, so the queue is the only thing bounding memory: unbounded, it
+ * grows until the box runs out of unreclaimable slab (measured ~12 kB/s, OOM in ~40 min).
+ *
+ * Two depths, because a drop costs nothing in one case and can cost a command response in the
+ * other. With no reader attached nobody is waiting for any of it, so hold barely more than a
+ * doorbell's worth. With a reader attached a drop could take the response a blocked bb_ioctl wants,
+ * so hold ~20 s at the observed rate: deep enough that a daemon descheduled or briefly wedged loses
+ * nothing, and still bounded if it stops reading entirely.
+ */
+#define CMD_RXQ_MAX_IDLE	64
+#define CMD_RXQ_MAX_READER	1024
 #define LINK_TYPE_ACK		0xEE	/* flow-control ACK: big-endian u32 acked-byte count */
 #define LINK_TRAILER_LEN	4
 #define IP_HEAD_SHRINK		8	/* build_ip_head() compresses the IPv4 header 20 -> 12 */
@@ -243,6 +256,7 @@ struct artosyn_sdio_device {
 	 * drains it to zero (ops_drained) before tearing down func/ndev.
 	 */
 	refcount_t		refs;
+	atomic_t		cmd_readers;	/* open bb_ioctl readers; 0 = nobody drains cmd_rxq */
 	atomic_t		active_ops;
 	struct completion	ops_drained;
 
@@ -300,7 +314,8 @@ struct artosyn_sdio_eth {
 
 	struct sk_buff_head		data_txq;	/* IP/bulk TX */
 	struct sk_buff_head		cmd_txq;	/* command TX */
-	struct sk_buff_head		cmd_rxq;	/* command RX */
+	struct sk_buff_head		cmd_rxq;	/* command RX, depth per CMD_RXQ_MAX_* */
+	unsigned int			cmd_rxq_overflow;
 	struct sk_buff_head		unacked_txq;	/* lightweight ACK layer */
 	int				unacked_max;
 
@@ -962,6 +977,28 @@ static void artosyn_sdio_recv(struct artosyn_sdio_device *dev)
 			}
 			break;
 			case LINK_TYPE_CMD: {
+				/* cmd_rxq is drained only by a bb_ioctl reader. The chip sends
+				 * control messages autonomously, so with no reader attached the
+				 * queue is the only thing bounding memory: hold CMD_RXQ_MAX and
+				 * drop the OLDEST beyond it, since a stale status carries no
+				 * value once a newer one has arrived.
+				 */
+				unsigned int cap = atomic_read(&dev->cmd_readers) ?
+						   CMD_RXQ_MAX_READER : CMD_RXQ_MAX_IDLE;
+
+				while (skb_queue_len(&eth->cmd_rxq) >= cap) {
+					struct sk_buff *old = skb_dequeue(&eth->cmd_rxq);
+
+					if (!old)
+						break;
+
+					kfree_skb(old);
+					if (!eth->cmd_rxq_overflow++) {
+						pr_warn("cmd_rxq full at %u, dropping oldest (readers %d)\n",
+							cap, atomic_read(&dev->cmd_readers));
+					}
+				}
+
 				skb = netdev_alloc_skb(dev->ndev, payload);
 				if (skb) {
 					skb_put_data(skb, rbuf, payload);
@@ -1581,13 +1618,17 @@ static int artosyn_open(struct inode *inode, struct file *filp)
 		container_of(m, struct artosyn_sdio_device, misc);
 
 	refcount_inc(&dev->refs);
+	atomic_inc(&dev->cmd_readers);
 	filp->private_data = dev;
 	return 0;
 }
 
 static int artosyn_close(struct inode *inode, struct file *filp)
 {
-	artosyn_dev_put(filp->private_data);
+	struct artosyn_sdio_device *dev = filp->private_data;
+
+	atomic_dec(&dev->cmd_readers);
+	artosyn_dev_put(dev);
 	return 0;
 }
 
