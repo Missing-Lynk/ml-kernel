@@ -84,6 +84,10 @@ HW-validated: exact bitrate at five steps, and a forced IDR that recovers a rece
 
   Seen twice on the goggle after ~200k interrupts of a 60 fps compose blit: `DMAC_CFG 0x00000001`, `DMAC_INTSTATUS 0x00000003`, IRQ counts frozen, dmesg clean. Writing `INT_EN` back by hand restored the engine on the spot, 4091.6 ms per frame back to 16.6 ms with no restart. `test_tools/dmablit_race_test.c` reproduces the loss on demand.
 
+  `0510` also carries a second, unrelated change to the same file: `axi_chan_handle_err()` sets `vd->tx_result.result = DMA_TRANS_ABORTED` before completing the descriptor, and the error path prints the engine's own registers (`CH_LLP` against the descriptor's physical LLP, plus `CH_SAR`/`CH_DAR`/`CH_STATUS`) beside the existing LLI dump, which is only the driver's copy of what it programmed.
+
+  Mainline completes a refused descriptor exactly as a successful one, so `ml_dmablit` read a blit that never ran as done and the compositor composed the frame from stale pixels. It now takes the result through `tx->callback_result` and returns `-EIO`, so the caller falls back to a CPU copy for that plane. Three errors in one hour-long flight, all on the seam cross-fade band capture.
+
 ## Regenerating / editing a patch
 
 Patches are the source of truth; there is no checked-in copy of the patched file. To change one:

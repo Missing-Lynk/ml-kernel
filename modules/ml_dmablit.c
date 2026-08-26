@@ -63,19 +63,38 @@ static struct ml_bufmap *map_fd_cached(struct ml_bufcache *cl, int fd,
 	return ml_bufcache_map_fd(cl, g_chans[0]->device->dev, fd, dir);
 }
 
-static void ml_blit_done(void *param)
+/* One channel's outcome for a round: the completion the round waits on, plus whether the engine
+ * reported the transfer good. The engine's error path completes a descriptor exactly as its
+ * success path does, so the callback alone says only that the descriptor is finished, not that
+ * the bytes moved; the result the engine passes here is what separates the two.
+ */
+struct ml_blit_slot {
+	struct completion done;
+	enum dmaengine_tx_result result;
+};
+
+static void ml_blit_done(void *param, const struct dmaengine_result *res)
 {
-	complete(param);
+	struct ml_blit_slot *slot = param;
+
+	slot->result = res ? res->result : DMA_TRANS_NOERROR;
+	complete(&slot->done);
 }
 
 /* Block until each used channel's descriptor completes: single sleep per
  * channel, woken from the engine's completion IRQ (the descriptors carry
  * DMA_PREP_INTERRUPT), replacing the old usleep_range poll loop (~40 timer
  * wakeups per 2-3 ms blit at 120 blits/s was real sys time).
+ *
+ * A transfer the engine refused returns -EIO, which sends the caller down the same fallback as a
+ * rejected submit: the caller copies that region on the CPU instead of presenting whatever the
+ * destination happened to hold. Rate-limited, because the condition repeats per round while it
+ * lasts and one line per round buries the log it belongs in.
  */
-static int wait_chans(struct completion *done, const bool *used)
+static int wait_chans(struct ml_blit_slot *slot, const bool *used)
 {
 	int ch;
+	int ret = 0;
 
 	for (ch = 0; ch < g_nchan; ch++)
 		if (used[ch])
@@ -85,12 +104,18 @@ static int wait_chans(struct completion *done, const bool *used)
 		if (!used[ch])
 			continue;
 
-		if (!wait_for_completion_timeout(&done[ch],
+		if (!wait_for_completion_timeout(&slot[ch].done,
 				msecs_to_jiffies(timeout_ms)))
 			return -ETIMEDOUT;
+
+		if (slot[ch].result != DMA_TRANS_NOERROR) {
+			pr_warn_ratelimited("channel %d reported transfer result %d\n",
+					    ch, slot[ch].result);
+			ret = -EIO;
+		}
 	}
 
-	return 0;
+	return ret;
 }
 
 static long ml_dmablit_submit(struct ml_bufcache *cl, struct ml_dmablit_req *req)
@@ -110,7 +135,7 @@ static long ml_dmablit_submit(struct ml_bufcache *cl, struct ml_dmablit_req *req
 	 * callback can still complete() these until dmaengine_terminate_sync()
 	 * returns, so they must stay live past the round block.
 	 */
-	struct completion done[ML_DMABLIT_WANT_CHANS];
+	struct ml_blit_slot slot[ML_DMABLIT_WANT_CHANS];
 	bool used[ML_DMABLIT_WANT_CHANS];
 	int i, ch;
 	long ret;
@@ -182,9 +207,10 @@ static long ml_dmablit_submit(struct ml_bufcache *cl, struct ml_dmablit_req *req
 				goto terminate;
 			}
 
-			init_completion(&done[k]);
-			tx->callback = ml_blit_done;
-			tx->callback_param = &done[k];
+			init_completion(&slot[k].done);
+			slot[k].result = DMA_TRANS_NOERROR;
+			tx->callback_result = ml_blit_done;
+			tx->callback_param = &slot[k];
 			if (dma_submit_error(dmaengine_submit(tx))) {
 				ret = -EIO;
 				goto terminate;
@@ -193,7 +219,7 @@ static long ml_dmablit_submit(struct ml_bufcache *cl, struct ml_dmablit_req *req
 			used[k] = true;
 		}
 
-		ret = wait_chans(done, used);
+		ret = wait_chans(slot, used);
 		if (ret)
 			goto terminate;
 	}
