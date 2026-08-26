@@ -37,7 +37,8 @@
 #include "ml_dmablit.h"
 #include "ml_dmabuf_map.h"
 
-#define ML_DMABLIT_WANT_CHANS	2	/* the sweet spot; the engine has 3 */
+#define ML_DMABLIT_WANT_CHANS	3	/* every channel the engine has; see ML_DMABLIT_CONCURRENT */
+#define ML_DMABLIT_CONCURRENT	2	/* copies in flight per round: the bench-measured sweet spot */
 
 /* A 6 MB frame copies in << 1 ms; 1 s is a fault ceiling. Runtime-settable so the
  * timeout/terminate path can be exercised deliberately (a value below the real copy
@@ -183,23 +184,28 @@ static long ml_dmablit_submit(struct ml_bufcache *cl, struct ml_dmablit_req *req
 	 * completes a descriptor but does NOT start the next queued one - only the error
 	 * path calls axi_chan_start_first_queued - so a 2nd descriptor queued on the same
 	 * channel is stranded and never completes. Rounds keep at most one outstanding
-	 * descriptor per channel while still running g_nchan copies concurrently (2 = the
-	 * throughput sweet spot, bench-measured), so we lose nothing.
+	 * descriptor per channel while still running ML_DMABLIT_CONCURRENT copies at once.
+	 *
+	 * Copies rotate through every channel the engine has: a three-copy batch runs one copy
+	 * per channel, so no channel is re-enabled within microseconds of its own completion.
+	 * The engine still refuses the third copy's descriptor from time to time; wait_chans()
+	 * reports that as -EIO and the caller falls back to a CPU copy for that region.
 	 * A one-line driver fix would allow deeper queuing but we do not need it.
 	 */
-	for (i = 0; i < (int)req->n; i += g_nchan) {
+	for (i = 0; i < (int)req->n; i += ML_DMABLIT_CONCURRENT) {
 		int k;
 
 		for (k = 0; k < g_nchan; k++)
 			used[k] = false;
 
-		for (k = 0; k < g_nchan && (i + k) < (int)req->n; k++) {
+		for (k = 0; k < ML_DMABLIT_CONCURRENT && (i + k) < (int)req->n; k++) {
 			struct ml_dmablit_copy *c = &req->copy[i + k];
 			struct ml_bufmap *s = srcs[i + k];
 			struct dma_async_tx_descriptor *tx;
+			int ch = (i + k) % g_nchan;
 
-			/* channel k gets this round's k-th copy (already validated) */
-			tx = dmaengine_prep_dma_memcpy(g_chans[k], dst->base + c->dst_off,
+			/* this round's k-th copy goes to the next channel in rotation */
+			tx = dmaengine_prep_dma_memcpy(g_chans[ch], dst->base + c->dst_off,
 						       s->base + c->src_off, c->len,
 						       DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
 			if (!tx) {
@@ -207,16 +213,16 @@ static long ml_dmablit_submit(struct ml_bufcache *cl, struct ml_dmablit_req *req
 				goto terminate;
 			}
 
-			init_completion(&slot[k].done);
-			slot[k].result = DMA_TRANS_NOERROR;
+			init_completion(&slot[ch].done);
+			slot[ch].result = DMA_TRANS_NOERROR;
 			tx->callback_result = ml_blit_done;
-			tx->callback_param = &slot[k];
+			tx->callback_param = &slot[ch];
 			if (dma_submit_error(dmaengine_submit(tx))) {
 				ret = -EIO;
 				goto terminate;
 			}
 
-			used[k] = true;
+			used[ch] = true;
 		}
 
 		ret = wait_chans(slot, used);
