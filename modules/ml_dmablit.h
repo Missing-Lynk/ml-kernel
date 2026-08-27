@@ -11,9 +11,9 @@
  *
  * Contract: every buffer is a dmabuf fd. Each copy reads [src_off, src_off+len)
  * of a source dmabuf and writes it to [dst_off, dst_off+len) of the single
- * destination dmabuf. The kernel splits the batch across the (up to 2) engine
- * channels. Buffers MUST be physically contiguous (single DMA segment) - the
- * decoder's vb2-dma-contig output and DRM GEM-DMA/CMA buffers both are; a
+ * destination dmabuf. The kernel issues the whole batch as one engine descriptor
+ * on one channel. Buffers MUST be physically contiguous (single DMA segment) -
+ * the decoder's vb2-dma-contig output and DRM GEM-DMA/CMA buffers both are; a
  * multi-segment buffer is rejected with -EOPNOTSUPP so userspace falls back to
  * a CPU copy rather than ever mis-copying.
  */

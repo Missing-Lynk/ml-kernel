@@ -46,9 +46,16 @@ obj-m += artosyn_pwm.o
 obj-m += artosyn_mmc.o
 
 # ml_dmablit - char-device shim exposing the built-in dw-axi-dmac copy engine to userspace
-# as a batched dmabuf memcpy, for the GStreamer two-tile compositor (off-CPU compose). Uses
-# only in-kernel dmaengine + dma-buf APIs (both =y). Test: ../test_tools/ml_dmablit_test.c.
+# as a batched dmabuf memcpy, for the GStreamer two-tile compositor (off-CPU compose).
+# Test: ../test_tools/ml_dmablit_test.c.
+#
+# A batch is one descriptor and one channel enable, which the generic dmaengine memcpy op
+# cannot express, so this file also needs the controller driver's private header
+# (drivers/dma/dw-axi-dmac/dw-axi-dmac.h) for dw_axi_dma_prep_memcpy_batch; the symbol comes
+# from the built-in driver's Module.symvers. Per-file include so the other modules are
+# unaffected.
 obj-m += ml_dmablit.o
+CFLAGS_ml_dmablit.o := -I$(srctree)/drivers/dma/dw-axi-dmac
 
 # ml_mmzheap - dma-heap "mmz" over the shared MMZ carveout (same rmem coherent pool as the
 # wave5 codec), so ml-pipeline's composite buffers live beside the codec's instead of in the

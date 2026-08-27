@@ -6,10 +6,17 @@
  * dmaengine is a kernel-only API; userspace compositors batch dmabuf copies
  * through this device to move decoded tiles into the composite DRM buffer
  * without the CPU. Each batch of {src dmabuf, dst dmabuf, off, off, len}
- * entries becomes device_prep_dma_memcpy submissions, spread across the (up
- * to 2) engine channels - 2 being the measured sweet spot
- * (bench-measured; 3 regresses). One ioctl per displayed
- * frame carries up to 6 plane copies.
+ * entries becomes ONE dw-axi-dmac descriptor - a single LLI chain spanning
+ * every copy - issued on one channel, which the engine enables once and
+ * completes once. One ioctl per displayed frame carries up to 6 plane copies.
+ *
+ * That shape is the reason this module reaches past dmaengine into the
+ * controller driver's own header for dw_axi_dma_prep_memcpy_batch(). The
+ * generic device_prep_dma_memcpy takes one copy, so a batch would be one
+ * descriptor and one channel enable per copy, and on this SoC a channel
+ * re-enabled within microseconds of its own completion, under a concurrent
+ * display fetch, wedges the memory fabric: frozen frame, no printk, watchdog
+ * reset. Consecutive batches rotate through the channels for the same reason.
  *
  * ABI: ml_dmablit.h.
  *
@@ -34,22 +41,27 @@
 #include <linux/scatterlist.h>
 #include <linux/cache.h>
 
+/* The batch entry point (dw_axi_dma_prep_memcpy_batch) and its entry struct live in the
+ * controller driver's private header; Kbuild adds the include path for this file only.
+ */
+#include "dw-axi-dmac.h"
+
 #include "ml_dmablit.h"
 #include "ml_dmabuf_map.h"
 
-#define ML_DMABLIT_WANT_CHANS	3	/* every channel the engine has; see ML_DMABLIT_CONCURRENT */
-#define ML_DMABLIT_CONCURRENT	2	/* copies in flight per round: the bench-measured sweet spot */
+#define ML_DMABLIT_WANT_CHANS	3	/* every channel the engine has, rotated one batch at a time */
 
 /* A 6 MB frame copies in << 1 ms; 1 s is a fault ceiling. Runtime-settable so the
  * timeout/terminate path can be exercised deliberately (a value below the real copy
- * time forces it on every round; the caller falls back to CPU blits).
+ * time forces it on every batch; the caller falls back to CPU blits).
  */
 static unsigned int timeout_ms = 1000;
 module_param(timeout_ms, uint, 0644);
-MODULE_PARM_DESC(timeout_ms, "per-round completion timeout in ms (default 1000)");
+MODULE_PARM_DESC(timeout_ms, "per-batch completion timeout in ms (default 1000)");
 
 static struct dma_chan *g_chans[ML_DMABLIT_WANT_CHANS];
 static int g_nchan;
+static unsigned int g_next_chan;	/* round-robin cursor, see ml_dmablit_submit */
 static DEFINE_MUTEX(g_lock);		/* one compositor thread, but serialize to be safe */
 
 /* Per-open mapping cache (struct ml_bufcache, ml_dmabuf_map.h). The compositor
@@ -64,7 +76,7 @@ static struct ml_bufmap *map_fd_cached(struct ml_bufcache *cl, int fd,
 	return ml_bufcache_map_fd(cl, g_chans[0]->device->dev, fd, dir);
 }
 
-/* One channel's outcome for a round: the completion the round waits on, plus whether the engine
+/* The outcome of one batch: the completion the submit waits on, plus whether the engine
  * reported the transfer good. The engine's error path completes a descriptor exactly as its
  * success path does, so the callback alone says only that the descriptor is finished, not that
  * the bytes moved; the result the engine passes here is what separates the two.
@@ -82,63 +94,22 @@ static void ml_blit_done(void *param, const struct dmaengine_result *res)
 	complete(&slot->done);
 }
 
-/* Block until each used channel's descriptor completes: single sleep per
- * channel, woken from the engine's completion IRQ (the descriptors carry
- * DMA_PREP_INTERRUPT), replacing the old usleep_range poll loop (~40 timer
- * wakeups per 2-3 ms blit at 120 blits/s was real sys time).
- *
- * A transfer the engine refused returns -EIO, which sends the caller down the same fallback as a
- * rejected submit: the caller copies that region on the CPU instead of presenting whatever the
- * destination happened to hold. Rate-limited, because the condition repeats per round while it
- * lasts and one line per round buries the log it belongs in.
- */
-static int wait_chans(struct ml_blit_slot *slot, const bool *used)
-{
-	int ch;
-	int ret = 0;
-
-	for (ch = 0; ch < g_nchan; ch++)
-		if (used[ch])
-			dma_async_issue_pending(g_chans[ch]);
-
-	for (ch = 0; ch < g_nchan; ch++) {
-		if (!used[ch])
-			continue;
-
-		if (!wait_for_completion_timeout(&slot[ch].done,
-				msecs_to_jiffies(timeout_ms)))
-			return -ETIMEDOUT;
-
-		if (slot[ch].result != DMA_TRANS_NOERROR) {
-			pr_warn_ratelimited("channel %d reported transfer result %d\n",
-					    ch, slot[ch].result);
-			ret = -EIO;
-		}
-	}
-
-	return ret;
-}
-
 static long ml_dmablit_submit(struct ml_bufcache *cl, struct ml_dmablit_req *req)
 {
 	struct ml_bufmap *dst;
 
-	/* Resolved once in the validation pass and reused for submit: re-resolving
-	 * the fd there would re-run dma_buf_get on a table another thread can
-	 * retarget (dup2) between the passes, bypassing the bounds check below.
-	 * The pointers stay valid across the ioctl: at most n+1 <= 9 fresh-stamped
-	 * cache entries vs ML_BUFCACHE_ENTRIES slots, so LRU eviction cannot reach
-	 * them (same argument as ar_scaler's static_assert).
-	 */
-	struct ml_bufmap *srcs[ML_DMABLIT_MAX_COPIES];
+	/* One entry per copy, handed to the engine as a single LLI chain. */
+	struct axi_dma_memcpy_entry entries[ML_DMABLIT_MAX_COPIES];
 
-	/* Function scope, not per-round: on the terminate path a late descriptor
-	 * callback can still complete() these until dmaengine_terminate_sync()
-	 * returns, so they must stay live past the round block.
+	/* Function scope, not inside the submit block: on the terminate path a late
+	 * descriptor callback can still complete() this until dmaengine_terminate_sync()
+	 * returns, so it must stay live past the wait.
 	 */
-	struct ml_blit_slot slot[ML_DMABLIT_WANT_CHANS];
-	bool used[ML_DMABLIT_WANT_CHANS];
-	int i, ch;
+	struct ml_blit_slot slot;
+
+	struct dma_async_tx_descriptor *tx;
+	struct dma_chan *chan;
+	int i;
 	long ret;
 
 	if (req->n < 1 || req->n > ML_DMABLIT_MAX_COPIES)
@@ -160,6 +131,13 @@ static long ml_dmablit_submit(struct ml_bufcache *cl, struct ml_dmablit_req *req
 	/* Validate every entry BEFORE submitting any, so a bad batch never leaves
 	 * half the copies issued. Bounds against the mapped segment sizes; the
 	 * engine's memcpy wants 4-byte alignment.
+	 *
+	 * The mapping pointers stay valid for the rest of the ioctl: at most n+1 <= 9
+	 * fresh-stamped cache entries vs ML_BUFCACHE_ENTRIES slots, so LRU eviction
+	 * cannot reach them (same argument as ar_scaler's static_assert). Resolving the
+	 * fd once here is also what keeps the bounds check honest: re-resolving it at
+	 * submit would re-run dma_buf_get on a table another thread can retarget (dup2)
+	 * between the two passes.
 	 */
 	for (i = 0; i < (int)req->n; i++) {
 		struct ml_dmablit_copy *c = &req->copy[i];
@@ -175,67 +153,59 @@ static long ml_dmablit_submit(struct ml_bufcache *cl, struct ml_dmablit_req *req
 		    (u64)c->dst_off + c->len > dst->size)
 			return -EINVAL;
 
-		srcs[i] = s;
+		entries[i].dst = dst->base + c->dst_off;
+		entries[i].src = s->base + c->src_off;
+		entries[i].len = c->len;
 	}
 
-	/* Submit in ROUNDS: at most one descriptor per channel per round, issued and
-	 * waited before the next. This is a workaround for a dw-axi-dmac limitation in
-	 * this kernel: its non-cyclic completion handler (axi_chan_block_xfer_complete)
-	 * completes a descriptor but does NOT start the next queued one - only the error
-	 * path calls axi_chan_start_first_queued - so a 2nd descriptor queued on the same
-	 * channel is stranded and never completes. Rounds keep at most one outstanding
-	 * descriptor per channel while still running ML_DMABLIT_CONCURRENT copies at once.
-	 *
-	 * Copies rotate through every channel the engine has: a three-copy batch runs one copy
-	 * per channel, so no channel is re-enabled within microseconds of its own completion.
-	 * The engine still refuses the third copy's descriptor from time to time; wait_chans()
-	 * reports that as -EIO and the caller falls back to a CPU copy for that region.
-	 * A one-line driver fix would allow deeper queuing but we do not need it.
+	/* Rotate the channel from batch to batch. The batch is one descriptor and one
+	 * channel enable, so the only enable left that can land close behind a completion
+	 * is the next batch's, and rotating puts every other channel between the two.
+	 * Enabling a channel microseconds after its own completion, while the display
+	 * controller fetches from the same DDR, wedges the memory fabric with no printk.
 	 */
-	for (i = 0; i < (int)req->n; i += ML_DMABLIT_CONCURRENT) {
-		int k;
+	chan = g_chans[g_next_chan];
+	g_next_chan = (g_next_chan + 1) % (unsigned int)g_nchan;
 
-		for (k = 0; k < g_nchan; k++)
-			used[k] = false;
+	tx = dw_axi_dma_prep_memcpy_batch(chan, entries, req->n,
+					  DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
+	if (!tx)
+		return -EIO;
 
-		for (k = 0; k < ML_DMABLIT_CONCURRENT && (i + k) < (int)req->n; k++) {
-			struct ml_dmablit_copy *c = &req->copy[i + k];
-			struct ml_bufmap *s = srcs[i + k];
-			struct dma_async_tx_descriptor *tx;
-			int ch = (i + k) % g_nchan;
+	init_completion(&slot.done);
+	slot.result = DMA_TRANS_NOERROR;
+	tx->callback_result = ml_blit_done;
+	tx->callback_param = &slot;
+	if (dma_submit_error(dmaengine_submit(tx))) {
+		ret = -EIO;
+		goto terminate;
+	}
 
-			/* this round's k-th copy goes to the next channel in rotation */
-			tx = dmaengine_prep_dma_memcpy(g_chans[ch], dst->base + c->dst_off,
-						       s->base + c->src_off, c->len,
-						       DMA_PREP_INTERRUPT | DMA_CTRL_ACK);
-			if (!tx) {
-				ret = -EIO;
-				goto terminate;
-			}
+	/* Single sleep for the whole batch, woken from the engine's completion IRQ (the
+	 * descriptor carries DMA_PREP_INTERRUPT), which fires once at the end of the chain.
+	 *
+	 * A transfer the engine refused returns -EIO, which sends the caller down the same fallback
+	 * as a rejected submit: the caller copies that region on the CPU instead of presenting
+	 * whatever the destination happened to hold. Rate-limited, because the condition repeats per
+	 * batch while it lasts and one line per batch buries the log it belongs in.
+	 */
+	dma_async_issue_pending(chan);
+	if (!wait_for_completion_timeout(&slot.done, msecs_to_jiffies(timeout_ms))) {
+		ret = -ETIMEDOUT;
+		goto terminate;
+	}
 
-			init_completion(&slot[ch].done);
-			slot[ch].result = DMA_TRANS_NOERROR;
-			tx->callback_result = ml_blit_done;
-			tx->callback_param = &slot[ch];
-			if (dma_submit_error(dmaengine_submit(tx))) {
-				ret = -EIO;
-				goto terminate;
-			}
-
-			used[ch] = true;
-		}
-
-		ret = wait_chans(slot, used);
-		if (ret)
-			goto terminate;
+	if (slot.result != DMA_TRANS_NOERROR) {
+		pr_warn_ratelimited("batch reported transfer result %d\n", slot.result);
+		ret = -EIO;
+		goto terminate;
 	}
 
 	return 0;
 
 terminate:
-	/* Flush any queued work so the channels are clean for the next call. */
-	for (ch = 0; ch < g_nchan; ch++)
-		dmaengine_terminate_sync(g_chans[ch]);
+	/* Flush any queued work so the channel is clean for the next call. */
+	dmaengine_terminate_sync(chan);
 
 	return ret;
 }

@@ -1,8 +1,21 @@
-Why: carries the cfg_lock that 0510-dw-axi-dmac-platform.patch needs. DMAC_CFG
-is one controller-wide register holding both DMAC_EN and INT_EN, and mainline
-read-modify-writes it from process context (a channel start) and from the
-interrupt handler with nothing serializing the two. See 0510 for the failure
-mode; this patch only adds the lock and its include.
+Why: carries the two things 0510-dw-axi-dmac-platform.patch needs from this
+header.
+
+First, cfg_lock. DMAC_CFG is one controller-wide register holding both DMAC_EN
+and INT_EN, and mainline read-modify-writes it from process context (a channel
+start) and from the interrupt handler with nothing serializing the two. See 0510
+for that failure mode.
+
+Second, the declaration of dw_axi_dma_prep_memcpy_batch() and the entry struct it
+takes. The dmaengine API prepares one descriptor per memcpy, so a client with
+several copies to make submits several descriptors and the controller enables a
+channel once per copy. On this SoC a channel re-enabled within microseconds of
+its own completion, under a concurrent display fetch, wedges the memory fabric
+with no printk. The batch entry point puts every copy of a batch on one LLI chain
+and therefore one channel enable, which is what the vendor's fusion compositor
+does through its own /dev/axi_dma ioctl. The out-of-tree ml_dmablit module is the
+caller and reaches this private header through a per-file -I, the same way
+dw_mci-artosyn reaches drivers/mmc/host/dw_mmc.h.
 
 --- a/drivers/dma/dw-axi-dmac/dw-axi-dmac.h
 +++ b/drivers/dma/dw-axi-dmac/dw-axi-dmac.h
@@ -29,3 +42,24 @@ mode; this patch only adds the lock and its include.
  };
  
  /* LLI == Linked List Item */
+@@ -402,4 +411,20 @@
+ 	DWAXIDMAC_TRANS_WIDTH_MAX	= DWAXIDMAC_TRANS_WIDTH_512
+ };
+ 
++/*
++ * ML (Artosyn): one src -> dst copy inside a batch prepared by
++ * dw_axi_dma_prep_memcpy_batch(). An out-of-tree client fills an array of these
++ * and gets back a single descriptor covering all of them.
++ */
++struct axi_dma_memcpy_entry {
++	dma_addr_t	dst;
++	dma_addr_t	src;
++	size_t		len;
++};
++
++struct dma_async_tx_descriptor *
++dw_axi_dma_prep_memcpy_batch(struct dma_chan *dchan,
++			     const struct axi_dma_memcpy_entry *entries,
++			     unsigned int nr_entries, unsigned long flags);
++
+ #endif /* _AXI_DMA_PLATFORM_H */

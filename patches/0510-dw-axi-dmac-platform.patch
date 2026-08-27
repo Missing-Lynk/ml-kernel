@@ -35,6 +35,46 @@ virt-dma already carries a per-descriptor dmaengine_result and hands it to a
 callback_result client, so the fix is to set it: DMA_TRANS_ABORTED before the
 completion, which is what lets such a client have a fallback path at all.
 
+A third change, independent of both: batched memcpy on one channel enable.
+
+The dmaengine API prepares one descriptor per memcpy. A client with several
+copies to make therefore submits several descriptors, and the controller enables
+a channel once per copy. On this SoC that enable is a hazard: a channel
+re-enabled within microseconds of its own completion, while the display
+controller is fetching from the same DDR, wedges the memory fabric. The SoC stops
+dead with the last frame on the panel, no printk, no ping, and recovers only
+through the watchdog reset ~35 s later. Measured at 2.48 hangs per hour with the
+compose blit's three plane copies spread over two channels, which puts two of the
+three copies on channel 0 microseconds apart.
+
+The vendor never had this shape. Its fusion compositor builds one descriptor
+holding up to 128 src/dst/len triples and issues a single ioctl on /dev/axi_dma,
+so the engine walks the whole list in hardware on one enable.
+
+The hardware supports exactly that here too: every axi_dma_lli carries its own
+sar, dar, block_ts and llp, and this driver already chains LLIs when one copy
+exceeds the channel block size. The change is to let the chain cross from one
+copy to the next.
+
+dma_chan_prep_dma_memcpy()'s block-filling loop moves into axi_desc_fill_memcpy(),
+which appends one copy's blocks at a caller-held index.
+dw_axi_dma_prep_memcpy_batch() calls it once per entry and returns the single
+descriptor covering all of them; it is exported for the out-of-tree ml_dmablit
+module, which is the compositor's path to this engine.
+dma_chan_prep_dma_memcpy() becomes a one-entry call into it, so the standard
+dmaengine path and the batch path build identical chains.
+
+Serialising three plane copies on one channel costs about the duration of the
+middle plane, roughly +250 us on a measured 1471 us tile, against a 16.6 ms
+frame.
+
+One behaviour change comes with the split: nr_hw_descs is now the number of LLI
+blocks actually taken rather than the pre-computed upper bound, so a descriptor
+that fails part way through frees exactly the blocks it took. Mainline frees the
+bound, which hands dma_pool_free() a NULL lli for every block it never reached
+and logs "bad dma" for each. The bound can also exceed the real count, because
+the transfer width is recomputed per block and can grow as the addresses advance.
+
 --- a/drivers/dma/dw-axi-dmac/dw-axi-dmac-platform.c
 +++ b/drivers/dma/dw-axi-dmac/dw-axi-dmac-platform.c
 @@ -122,40 +122,75 @@
@@ -113,7 +153,176 @@ completion, which is what lets such a client have a fallback path at all.
  }
  
  static inline void axi_chan_irq_disable(struct axi_dma_chan *chan, u32 irq_mask)
-@@ -1081,6 +1116,32 @@
+@@ -915,35 +950,30 @@
+ 	return NULL;
+ }
+ 
+-static struct dma_async_tx_descriptor *
+-dma_chan_prep_dma_memcpy(struct dma_chan *dchan, dma_addr_t dst_adr,
+-			 dma_addr_t src_adr, size_t len, unsigned long flags)
++/*
++ * ML (Artosyn): fill hw_desc[*num ...] with the LLI blocks one src -> dst copy
++ * needs, advancing *num past the last one written. A copy longer than the
++ * channel's block size already spans several blocks here; every block carries
++ * its own sar, dar and block_ts, so the blocks of an unrelated copy can be
++ * appended straight after and the engine walks the whole chain on one channel
++ * enable. *num is advanced even on failure so the caller can free exactly the
++ * blocks that were taken.
++ */
++static int axi_desc_fill_memcpy(struct axi_dma_chan *chan,
++				struct axi_dma_desc *desc, u32 *num,
++				dma_addr_t dst_adr, dma_addr_t src_adr,
++				size_t len)
+ {
+-	struct axi_dma_chan *chan = dchan_to_axi_dma_chan(dchan);
+ 	size_t block_ts, max_block_ts, xfer_len;
+-	struct axi_dma_hw_desc *hw_desc = NULL;
+-	struct axi_dma_desc *desc = NULL;
+-	u32 xfer_width, reg, num;
+-	u64 llp = 0;
+-	u8 lms = 0; /* Select AXI0 master for LLI fetching */
+-
+-	dev_dbg(chan2dev(chan), "%s: memcpy: src: %pad dst: %pad length: %zd flags: %#lx",
+-		axi_chan_name(chan), &src_adr, &dst_adr, len, flags);
++	struct axi_dma_hw_desc *hw_desc;
++	u32 xfer_width, reg;
+ 
+ 	max_block_ts = chan->chip->dw->hdata->block_size[chan->id];
+-	xfer_width = axi_chan_get_xfer_width(chan, src_adr, dst_adr, len);
+-	num = DIV_ROUND_UP(len, max_block_ts << xfer_width);
+-	desc = axi_desc_alloc(num);
+-	if (unlikely(!desc))
+-		goto err_desc_get;
+ 
+-	desc->chan = chan;
+-	num = 0;
+-	desc->length = 0;
+ 	while (len) {
+ 		xfer_len = len;
+ 
+-		hw_desc = &desc->hw_desc[num];
++		hw_desc = &desc->hw_desc[*num];
+ 		/*
+ 		 * Take care for the alignment.
+ 		 * Actually source and destination widths can be different, but
+@@ -964,7 +994,7 @@
+ 
+ 		hw_desc->lli = axi_desc_get(chan, &hw_desc->llp);
+ 		if (unlikely(!hw_desc->lli))
+-			goto err_desc_get;
++			return -ENOMEM;
+ 
+ 		write_desc_sar(hw_desc, src_adr);
+ 		write_desc_dar(hw_desc, dst_adr);
+@@ -998,9 +1028,79 @@
+ 		len -= xfer_len;
+ 		dst_adr += xfer_len;
+ 		src_adr += xfer_len;
+-		num++;
++		(*num)++;
+ 	}
+ 
++	return 0;
++}
++
++/*
++ * ML (Artosyn): prepare one descriptor covering a batch of independent
++ * src -> dst copies. The whole batch is a single LLI chain on a single channel,
++ * so the engine crosses from one copy to the next by fetching the next LLI, and
++ * the channel is enabled once and completes once. This is what the vendor's
++ * fusion compositor does through its own /dev/axi_dma ioctl, which carries up
++ * to 128 triples per submission.
++ *
++ * The alternative available through the dmaengine API is one descriptor per
++ * copy, and on this SoC that hard-hangs: a channel re-enabled within
++ * microseconds of its own completion, under a concurrent display fetch, wedges
++ * the memory fabric with no printk and no recovery short of the watchdog.
++ *
++ * nr_hw_descs is set to the number of blocks actually taken, so a failure part
++ * way through frees those and no others.
++ */
++struct dma_async_tx_descriptor *
++dw_axi_dma_prep_memcpy_batch(struct dma_chan *dchan,
++			     const struct axi_dma_memcpy_entry *entries,
++			     unsigned int nr_entries, unsigned long flags)
++{
++	struct axi_dma_chan *chan = dchan_to_axi_dma_chan(dchan);
++	struct axi_dma_hw_desc *hw_desc = NULL;
++	struct axi_dma_desc *desc = NULL;
++	size_t max_block_ts;
++	u32 xfer_width, num;
++	unsigned int i;
++	u64 llp = 0;
++	u8 lms = 0; /* Select AXI0 master for LLI fetching */
++
++	if (unlikely(!nr_entries))
++		return NULL;
++
++	dev_dbg(chan2dev(chan), "%s: memcpy: %u entries, first src: %pad dst: %pad length: %zd flags: %#lx",
++		axi_chan_name(chan), nr_entries, &entries[0].src,
++		&entries[0].dst, entries[0].len, flags);
++
++	/*
++	 * Upper bound on the block count: within one copy the transfer width can
++	 * only grow as the addresses advance, never shrink, so the width of the
++	 * first block gives the largest block count that copy can need.
++	 */
++	max_block_ts = chan->chip->dw->hdata->block_size[chan->id];
++	for (i = 0, num = 0; i < nr_entries; i++) {
++		xfer_width = axi_chan_get_xfer_width(chan, entries[i].src,
++						     entries[i].dst, entries[i].len);
++		num += DIV_ROUND_UP(entries[i].len, max_block_ts << xfer_width);
++	}
++
++	desc = axi_desc_alloc(num);
++	if (unlikely(!desc))
++		return NULL;
++
++	desc->chan = chan;
++	desc->length = 0;
++	num = 0;
++	for (i = 0; i < nr_entries; i++) {
++		if (unlikely(axi_desc_fill_memcpy(chan, desc, &num, entries[i].dst,
++						  entries[i].src, entries[i].len)))
++			goto err_desc_get;
++	}
++
++	if (unlikely(!num))
++		goto err_desc_get;
++
++	desc->nr_hw_descs = num;
++
+ 	/* Set end-of-link to the last link descriptor of list */
+ 	set_desc_last(&desc->hw_desc[num - 1]);
+ 	/* Managed transfer list */
+@@ -1013,10 +1113,24 @@
+ 	return vchan_tx_prep(&chan->vc, &desc->vd, flags);
+ 
+ err_desc_get:
+-	if (desc)
+-		axi_desc_put(desc);
++	desc->nr_hw_descs = num;
++	axi_desc_put(desc);
+ 	return NULL;
+ }
++EXPORT_SYMBOL_GPL(dw_axi_dma_prep_memcpy_batch);
++
++static struct dma_async_tx_descriptor *
++dma_chan_prep_dma_memcpy(struct dma_chan *dchan, dma_addr_t dst_adr,
++			 dma_addr_t src_adr, size_t len, unsigned long flags)
++{
++	struct axi_dma_memcpy_entry entry = {
++		.dst = dst_adr,
++		.src = src_adr,
++		.len = len,
++	};
++
++	return dw_axi_dma_prep_memcpy_batch(dchan, &entry, 1, flags);
++}
+ 
+ static int dw_axi_dma_chan_slave_config(struct dma_chan *dchan,
+ 					struct dma_slave_config *config)
+@@ -1081,6 +1195,32 @@
  		axi_chan_name(chan), vd->tx.cookie, status);
  	axi_chan_list_dump_lli(chan, vd_to_axi_desc(vd));
  
@@ -146,7 +355,7 @@ completion, which is what lets such a client have a fallback path at all.
  	vchan_cookie_complete(vd);
  
  	/* Try to restart the controller */
-@@ -1484,6 +1545,8 @@
+@@ -1484,6 +1624,8 @@
  	chip->dw = dw;
  	chip->dev = &pdev->dev;
  	chip->dw->hdata = hdata;
