@@ -54,6 +54,10 @@
 /* A 6 MB frame copies in << 1 ms; 1 s is a fault ceiling. Runtime-settable so the
  * timeout/terminate path can be exercised deliberately (a value below the real copy
  * time forces it on every batch; the caller falls back to CPU blits).
+ *
+ * The floor is one jiffy: msecs_to_jiffies() rounds up and CONFIG_HZ is 250 here, so any value
+ * below 4 ms behaves as 4 ms. A batch completes in about 1.5 ms, so no setting of this parameter
+ * reaches the timeout path; exercising it needs a deliberate failure, not a short timeout.
  */
 static unsigned int timeout_ms = 1000;
 module_param(timeout_ms, uint, 0644);
