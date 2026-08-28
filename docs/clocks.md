@@ -43,8 +43,24 @@ The DC pixel clock is steered to pace the panel refresh. `artosyn_vo.c` holds th
 
 Two safety mechanisms wrap the one writable register (the feedback word at `0x0A108000 + 0x410`):
 
-- **Clamp** to +/-5% of the boot-time word.
+- **Clamp** to +/-5% of the boot-time word (`AR_PLL_BAND_PERMILLE`).
 - **Slew limiter**: steps of word/2048 (~0.05%) one per ~16 ms (a frame interval). A single step >= ~0.2% fires a DSI DPI-FIFO error (a transient the DSI `INT_ST1` bit7 latch catches; the panel can visibly drop sync); <=0.05% steps are transient-free. Only the PLL word is ever written; there is no relock kick.
+
+The two bound different things, and only one of them bounds the distance travelled. The slew limiter bounds the size of a single step; the clamp bounds the accumulated distance, at +/-5% of the boot word.
+
+The clamp is far wider than the consumer downstream of it, deliberately. The DSI drains the DPI FIFO at a line rate programmed from the **boot** pixel clock and holds that programming across a mode set: +0.05% is hardware-measured transient-free, +0.10% overruns the payload FIFO continuously. Either side of that much narrower band the panel fails, in a different way each side:
+
+| leaf rate vs boot | DPI FIFO | `INT_ST1` bit 7 `dpi_pld_wr_err` | panel |
+|---|---|---|---|
+| above by more than ~0.1% | write overrun | asserts on every read | black |
+| below by whole percent | starved, line phase slips | clean | every line rotated right by a quarter line, 480 px of 1920, wrapping |
+| within the band | matched | clean | correct |
+
+Both states have been produced on hardware and cleared by writing the boot rate back through `/sys/kernel/debug/ar9311_pixclk_rate`, with no reboot and no pipeline restart: 154199805 Hz (+0.36%) reading black, and 149760986 Hz (-2.53%) rotated, against a boot 153646640 Hz. In both the composite handed to the VO is pixel-perfect and every DSI host and PHY register reads nominal, PLL lock included, so the leaf rate is the only observable that separates them.
+
+The leaf is steered at runtime by `mlp-pace.c`, a PI servo on flip latency whose integrator is authorised between `PACE_HZ_MIN` 141100000 and `PACE_HZ_MAX` 155000000 and which seeds its baseline from the current leaf rate at each start, so a working point carries across restarts. Nothing returns the rate to the boot word. A rate that has drifted survives a full DSI re-init, because the re-init reprograms the DSI from the mode rather than from the leaf, and clears on an SoC reset, which returns the PLL to its boot word.
+
+Narrowing the clamp to the DSI's band was tried on hardware and reverted. It holds the panel correct, and it costs about 20 ms: `rx2flip` p50 goes from 21 ms to 41-46 ms and repeats from 2-3/s to 5-8/s, because the servo's runaway is what drags the panel period onto the source period and phase-locks them. The wide band is therefore load-bearing for latency, and the panel's exposure to a drifted rate is the accepted price until the source cadence matches the panel.
 
 The pixel leaf itself is a mux+gate registered with `clk_mux_ro_ops` (read-only) at `0x0A104000 + 0x4c`; the fixed-factor `pixel_pll_clkN` taps are /1, /2, /4, /8 (only /4 is validated). A debugfs knob `/sys/kernel/debug/ar9311_pixclk_rate` reads the current leaf rate and writes a `clk_set_rate` (mainline's writable clk debugfs is compiled out on this kernel). Measurement tool: `../test_tools/vblank_rate`.
 

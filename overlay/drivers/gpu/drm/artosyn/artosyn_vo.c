@@ -367,7 +367,31 @@ static void ar_vo_pipe_enable(struct drm_simple_display_pipe *pipe,
 {
 	struct ar_vo *vo = to_ar_vo(pipe->crtc.dev);
 	struct drm_framebuffer *fb = plane_state->fb;
+	const struct drm_display_mode *mode = &crtc_state->adjusted_mode;
 	u32 g;
+
+	/*
+	 * Put the pixel clock on the mode's rate. Every other consumer of this timing already works
+	 * from mode->clock: the DC timing registers below encode the mode's 2200x1125 totals, and
+	 * artosyn_dsi.c derives the D-PHY lane rate from it. The leaf itself was the one place still
+	 * carrying whatever the SPL left, 153646640 Hz against the mode's 148500000, so the panel ran
+	 * at 62.07 Hz where the mode asks for 60.00 and the DSI drained a DPI FIFO programmed for a
+	 * rate 3.47 percent below the one the DC fed it.
+	 *
+	 * A 60 fps source against a 62 Hz panel is a permanent 2 Hz beat, which is the repeat and
+	 * judder rate, and closing it downstream is not possible: the DSI tolerates about 0.05 percent
+	 * around the rate it was initialised with, seventy times less than the error. Setting it here
+	 * makes the rates agree by construction and leaves the frame pacer only crystal drift to
+	 * track.
+	 */
+	if (vo->pclk && mode->clock) {
+		unsigned long want = (unsigned long)mode->clock * 1000;
+		int ret = clk_set_rate(vo->pclk, want);
+
+		if (ret)
+			drm_warn(pipe->crtc.dev, "pixel clock set to %lu Hz failed (%d), running at %lu\n",
+				 want, ret, clk_get_rate(vo->pclk));
+	}
 
 	/*
 	 * DC subsystem bring-up at the CRG (libmpp dc_subsys_power_on @0x2ddcb0 then dc_hard_reset
