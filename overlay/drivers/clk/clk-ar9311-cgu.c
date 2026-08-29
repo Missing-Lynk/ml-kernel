@@ -274,6 +274,7 @@ enum ar9311_leaf_half {
  */
 #define AR_LEAF_GATE	BIT(0)	/* enable/disable writes the leaf's gate bit */
 #define AR_LEAF_MUX	BIT(1)	/* set_parent writes the leaf's 3-bit sel field */
+
 /*
  * AR_LEAF_DIV - the leaf's divider field is modelled, so its rate is
  * parent / (field + 1) rather than the parent's rate.
@@ -291,6 +292,15 @@ enum ar9311_leaf_half {
  * MIPI PCS at four times, and no frame reached memory.
  */
 #define AR_LEAF_DIV	BIT(2)
+
+/*
+ * AR_LEAF_EXACT - the settable mux answers rate requests by exact parent
+ * match only, refusing anything else. For a leaf whose rate is board policy
+ * (the codec clock, chosen per DTS from a validated set), the closest-tap
+ * rounding of __clk_mux_determine_rate would run an unvalidated rate without
+ * anyone having asked for it.
+ */
+#define AR_LEAF_EXACT	BIT(3)
 
 /* 7-bit divider field, encoding rate = parent / (field + 1). */
 #define AR_LEAF_DIV_MASK	0x7fu
@@ -351,7 +361,16 @@ static const struct ar9311_leaf_desc ar9311_leaves[] = {
 	 */
 	{ "cgu_rsz_clk",     0x14,  1, AR_HALF_LO,   PAR_GENERIC_OSC, AR_LEAF_GATE },
 	{ "cgu_de_clk",      0x14,  1, AR_HALF_HI,   PAR_GENERIC_OSC },
-	{ "cgu_venc_clk",    0x18,  1, AR_HALF_LO,   PAR_GENERIC_OSC },
+	/* The Wave5 codec's clock. Settable so a board can pin the codec rate
+	 * from its DTS (assigned-clock-rates on video-codec@a080000): decode
+	 * and encode times scale with this clock (per-tile decode compute is
+	 * 4.3 ms x 333 MHz / rate, measured at 166/333/500/600), and at
+	 * 500 MHz the three-instance decode+encode contention that costs the
+	 * goggle ~4 ms of frame latency at the boot rate disappears. Exact
+	 * rates only; the divider stays at its boot value of zero.
+	 */
+	{ "cgu_venc_clk",    0x18,  1, AR_HALF_LO,   PAR_GENERIC_OSC,
+	  AR_LEAF_GATE | AR_LEAF_MUX | AR_LEAF_EXACT },
 	{ "cgu_jpeg_clk",    0x18,  1, AR_HALF_HI,   PAR_GENERIC_OSC },
 	{ "cgu_mipi_csi_0_clk", 0x1c, 1, AR_HALF_LO, PAR_GENERIC_OSC,
 	  AR_LEAF_GATE | AR_LEAF_DIV },
@@ -616,6 +635,38 @@ static const struct clk_ops ar9311_leaf_gate_mux_ops = {
 	.get_parent	= ar9311_leaf_get_parent,
 	.set_parent	= ar9311_leaf_set_parent,
 	.determine_rate	= __clk_mux_determine_rate,
+	.is_enabled	= ar9311_leaf_is_enabled,
+	.enable		= ar9311_leaf_enable,
+	.disable	= ar9311_leaf_disable,
+};
+
+/* Exact-parent determine_rate: the leaf's rate menu is its parent list and
+ * nothing else, so a request matching no parent is refused, never rounded.
+ */
+static int ar9311_leaf_determine_rate_exact(struct clk_hw *hw,
+					    struct clk_rate_request *req)
+{
+	for (unsigned int i = 0; i < clk_hw_get_num_parents(hw); i++) {
+		struct clk_hw *parent = clk_hw_get_parent_by_index(hw, i);
+
+		if (!parent)
+			continue;
+
+		if (clk_hw_get_rate(parent) == req->rate) {
+			req->best_parent_hw = parent;
+			req->best_parent_rate = req->rate;
+
+			return 0;
+		}
+	}
+
+	return -EINVAL;
+}
+
+static const struct clk_ops ar9311_leaf_gate_mux_exact_ops = {
+	.get_parent	= ar9311_leaf_get_parent,
+	.set_parent	= ar9311_leaf_set_parent,
+	.determine_rate	= ar9311_leaf_determine_rate_exact,
 	.is_enabled	= ar9311_leaf_is_enabled,
 	.enable		= ar9311_leaf_enable,
 	.disable	= ar9311_leaf_disable,
@@ -920,6 +971,7 @@ static const struct {
 	{ 2,  "cgu_isp_clk" },
 	{ 3,  "cgu_isp_hdr_clk" },
 	{ 4,  "cgu_vif_axi_clk" },
+	{ 8,  "cgu_venc_clk" },
 	{ 10, "cgu_mipi_csi_0_clk" },
 	{ 11, "cgu_mipi_csi_1_clk" },
 	{ 12, "cgu_mipi_pcs_clk" },
@@ -1212,6 +1264,8 @@ static int ar9311_cgu_probe(struct platform_device *pdev)
 
 		if (d->caps & AR_LEAF_DIV)
 			li.ops = &ar9311_leaf_gate_div_ops;
+		else if (d->caps & AR_LEAF_EXACT)
+			li.ops = &ar9311_leaf_gate_mux_exact_ops;
 		else if (d->caps & AR_LEAF_MUX)
 			li.ops = &ar9311_leaf_gate_mux_ops;
 		else if (d->caps & AR_LEAF_GATE)

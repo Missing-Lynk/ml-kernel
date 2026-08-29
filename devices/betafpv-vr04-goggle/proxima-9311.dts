@@ -506,9 +506,21 @@
 			 * media pool instead of the display-fragmented global CMA. Wired up by
 			 * of_reserved_mem_device_init() in the wave5 probe overlay. */
 			memory-region = <&mmz_pool>;
-			/* clocks: media CRG gate 0x0a106008 bit 13 (ar_video_h26x_clock_on).
-			 * Not modelled here (the driver treats clocks as optional).
-			 * TODO: add a clock phandle once a CRG clk provider exists. */
+			/* The codec's CGU leaf, cgu_venc_clk (<&pixclk 11>, exact-rate
+			 * mux, clk-ar9311-cgu.c). The assigned rate is BOARD POLICY:
+			 * this goggle runs the codec at 500 MHz (fix_pll_clk500), where
+			 * the two decoders and the DVR encoder stop contending inside
+			 * the frame budget - 7.2 ms off the recording configuration's
+			 * frame latency against the 333 MHz boot rate, soaked for hours
+			 * at a ~1 K thermal cost. A board that omits the assignment
+			 * runs at whatever boot left (333 MHz); a rate matching no CGU
+			 * source exactly fails the wave5 probe rather than rounding.
+			 * The media CRG gate 0x0a106008 bit 13 (ar_video_h26x_clock_on)
+			 * is separate and stays boot-managed. */
+			clocks = <&pixclk 11>;
+			clock-names = "vcodec";
+			assigned-clocks = <&pixclk 11>;
+			assigned-clock-rates = <500000000>;
 			status = "okay";
 		};
 
