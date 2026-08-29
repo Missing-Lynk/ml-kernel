@@ -13,6 +13,11 @@ set -eu
 # list). Default = the goggle, so a bare `build.sh` is unchanged. build.sh passes this through.
 BOARD="${BOARD:-betafpv-vr04-goggle}"
 
+# ccache fronts the cross compiler (build.sh mounts the cache volume and sets CCACHE_DIR).
+# Every kbuild invocation must carry the same CC: kbuild treats a differing CC as a
+# reconfigure and rebuilds from scratch.
+KCC="ccache ${CROSS_COMPILE}gcc"
+
 # build_step <label> <cmd...>: quiet by default (log to a temp file, print "label OK" or the
 # last 60 lines on failure); VERBOSE=1 streams the command's output live instead.
 build_step() {
@@ -35,7 +40,7 @@ build_step() {
   fi
 }
 
-build_step defconfig make -j"$JOBS" defconfig
+build_step defconfig make -j"$JOBS" CC="$KCC" defconfig
 
 # Two ways our source reaches the tree, both BEFORE the config-fragment merge below so any
 # Kconfig they add/change is visible to olddefconfig (overlay/README.md,
@@ -131,7 +136,7 @@ if [ -z "$MINIMAL" ] && [ -f /repo/configs/artosyn.config ]; then
   # shellcheck disable=SC2086  # $frags is a space-separated list and must word-split
   ./scripts/kconfig/merge_config.sh -m -Q .config $frags
 
-  build_step olddefconfig make olddefconfig
+  build_step olddefconfig make CC="$KCC" olddefconfig
 
   # Verify the fragments took: merge_config writes the ask, olddefconfig resolves it. The two
   # disagreements differ in severity.
@@ -176,7 +181,7 @@ if [ -z "$MINIMAL" ] && [ -f /repo/configs/artosyn.config ]; then
   fi
 fi
 
-build_step "Image+dtbs" make -j"$JOBS" Image dtbs
+build_step "Image+dtbs" make -j"$JOBS" CC="$KCC" Image dtbs
 
 # Build the selected board's DT standalone (cpp for the dt-bindings includes, then the
 # freshly-built host dtc), output beside Image. The board's DTS lives in devices/$BOARD/;
@@ -196,6 +201,6 @@ done
 # still produces the Image. CROSS_COMPILE arrives in the environment from build.sh.
 if [ -z "$MINIMAL" ] && [ -d /out ]; then
   build_step "modules+stage" \
-    env KTREE="$PWD" CROSS="$CROSS_COMPILE" MODSRC=/repo/modules OUT=/out JOBS="$JOBS" \
+    env KTREE="$PWD" CROSS="$CROSS_COMPILE" KCC="$KCC" MODSRC=/repo/modules OUT=/out JOBS="$JOBS" \
     bash /repo/modules/stage.sh
 fi

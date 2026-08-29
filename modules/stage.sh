@@ -15,6 +15,9 @@
 # Inputs (environment):
 #   KTREE  configured + Image-built kernel tree (has .config, vmlinux.symvers)
 #   CROSS  CROSS_COMPILE prefix (e.g. /tc/bin/aarch64-linux- in-container, a host path on host)
+#   KCC    compiler invocation kbuild runs as CC (default ${CROSS}gcc; the container passes
+#          "ccache ${CROSS}gcc" and must pass the same CC the Image build used, or kbuild
+#          reconfigures)
 #   MODSRC directory holding the out-of-tree module sources (*.c *.h Kbuild)
 #   OUT    output base: out-of-tree objects land in $OUT/build, the staged image in $OUT/rootfs
 #   JOBS   parallelism (default: nproc)
@@ -24,6 +27,7 @@ set -eu
 : "${CROSS:?stage.sh: CROSS not set}"
 : "${MODSRC:?stage.sh: MODSRC not set}"
 : "${OUT:?stage.sh: OUT not set}"
+KCC="${KCC:-${CROSS}gcc}"
 JOBS="${JOBS:-$(nproc)}"
 
 KVER="$(cat "$KTREE/include/config/kernel.release" 2>/dev/null || make -s -C "$KTREE" kernelrelease)"
@@ -35,17 +39,17 @@ KVER="$(cat "$KTREE/include/config/kernel.release" 2>/dev/null || make -s -C "$K
 
 # Out-of-tree .ko finalize needs scripts/module.lds (the module linker script), which a
 # `make Image dtbs` tree does not generate. Prepare the module infra if it is missing.
-[ -f "$KTREE/scripts/module.lds" ] || make -C "$KTREE" ARCH=arm64 CROSS_COMPILE="$CROSS" modules_prepare
+[ -f "$KTREE/scripts/module.lds" ] || make -C "$KTREE" ARCH=arm64 CROSS_COMPILE="$CROSS" CC="$KCC" modules_prepare
 
 echo "=== building in-tree modules ==="
-make -C "$KTREE" ARCH=arm64 CROSS_COMPILE="$CROSS" -j"$JOBS" modules
+make -C "$KTREE" ARCH=arm64 CROSS_COMPILE="$CROSS" CC="$KCC" -j"$JOBS" modules
 
 echo "=== building out-of-tree Artosyn modules ==="
 BUILD_OUT="$OUT/build"
 rm -rf "$BUILD_OUT"
 mkdir -p "$BUILD_OUT"
 cp "$MODSRC"/*.c "$MODSRC"/*.h "$MODSRC"/Kbuild "$BUILD_OUT"/
-make -C "$KTREE" M="$BUILD_OUT" ARCH=arm64 CROSS_COMPILE="$CROSS" -j"$JOBS" modules
+make -C "$KTREE" M="$BUILD_OUT" ARCH=arm64 CROSS_COMPILE="$CROSS" CC="$KCC" -j"$JOBS" modules
 
 # Stage ONLY the modules we ship and load: the in-tree DRM stack (drm core + helpers +
 # dw-mipi-dsi + DRM_ARTOSYN), the wave5 codec + its v4l2/videobuf2 deps, the Artosyn camera

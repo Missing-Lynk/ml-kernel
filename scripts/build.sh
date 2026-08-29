@@ -145,6 +145,15 @@ do_build(){  # tree-dir
   local mod_out="$BUILD_DIR/ml-modules"
   mkdir -p "$mod_out"
 
+  # ccache volume: a hit returns the object bytes a previous real compile of identical
+  # preprocessed source, compiler and flags produced, so the Image stays bit-identical to an
+  # uncached build; a miss runs the pinned toolchain for real. compiler_check=content keys the
+  # cache on the compiler binary itself, because the toolchain re-extract does not keep mtimes
+  # (the default check) stable. The cache lives under the build dir, so `rm -rf build/`
+  # remains the full reset.
+  local cache_dir="$BUILD_DIR/ccache"
+  mkdir -p "$cache_dir"
+
   log "configure + build (container, -j$JOBS)"
   docker run --rm --network none \
     --user "$(id -u):$(id -g)" \
@@ -153,6 +162,10 @@ do_build(){  # tree-dir
     -v "$tc_root":/tc:ro \
     -v "$REPO":/repo:ro \
     -v "$mod_out":/out \
+    -v "$cache_dir":/ccache \
+    -e CCACHE_DIR=/ccache \
+    -e CCACHE_COMPILERCHECK=content \
+    -e CCACHE_MAXSIZE=5G \
     -e ARCH=arm64 \
     -e CROSS_COMPILE="/tc/bin/${CROSS_COMPILE_PREFIX}" \
     -e KBUILD_BUILD_USER="$KBUILD_BUILD_USER" \

@@ -14,6 +14,6 @@ set -e
 apt-get update
 apt-get install -y --no-install-recommends \
     make gcc g++ bc bison flex libssl-dev libelf-dev \
-    xz-utils cpio kmod rsync lz4 ca-certificates patch
+    xz-utils cpio kmod rsync lz4 ca-certificates patch ccache
 rm -rf /var/lib/apt/lists/*
 EOF
