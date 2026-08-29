@@ -55,7 +55,7 @@ The H.264 result contradicts the air unit, where h264-after-h264 self-sustained 
 
 ## The DVR runs the exposed configuration, and works anyway [open]
 
-`mlp-record` rebuilds its record bin, encoder element included, on every start/stop, so every recording is a fresh instance. It records **HEVC** unless `ML_DVR_CODEC=h264`, and that variable is unset on the goggle (checked in the running `ml-pipeline`'s `/proc/<pid>/environ`, not just in `/etc`). So the shipped DVR runs HEVC 1080p, precisely the configuration the isolated loop above fails on every second instance. Recordings nevertheless succeed. That conflict is **unresolved**, and it is the live question here.
+`mlp-record` rebuilds its record bin, encoder element included, on every start/stop, so every recording is a fresh instance. The DVR defaults to **H.264** (the codec measured to chain clean); `ML_DVR_CODEC=h265` opts into HEVC. The evidence below was gathered with the DVR running HEVC 1080p, precisely the configuration the isolated loop above fails on every second instance, and recordings nevertheless succeeded. That conflict is **unresolved** and applies to the `ML_DVR_CODEC=h265` opt-in.
 
 What the SD card shows, by `ffprobe` on each file's header:
 
@@ -73,7 +73,7 @@ The codec DT nodes are identical apart from the memory pool (air 32 MiB at `0x25
 ## Consequences for callers
 
 - **One long-lived encoder instance per firmware boot**, which is also the vendor's usage pattern. Recording start/stop must gate the muxer/file branch, not the encoder.
-- **The goggle DVR ships the exposed configuration** (HEVC, encoder element rebuilt per recording) and yet works in practice; see the open section above before acting on this. One recording per boot is safe either way. `ML_DVR_CODEC=h264` is measured safe in the isolated loop and is what the vendor DVR records, but it is **not a free hedge**: `mlp-rtsp` resolves the codec from the same variable (`mlp-rtsp.c`, `codec_is_h264()`), so flipping it switches the RTSP restream to H.264 as well. Do not flip it until the conflict above is resolved and the restream's codec requirement is checked.
+- **The goggle DVR defaults to H.264**, the codec measured to chain clean in the isolated loop and what the vendor DVR records. `mlp-rtsp` resolves the codec from the same `ML_DVR_CODEC` variable (`mlp-rtsp.c`, `codec_is_h264()`), so the RTSP restream follows the DVR codec; the restream consumers handle both (checked: the Android app negotiates from the SDP). The `ML_DVR_CODEC=h265` opt-in runs the exposed configuration (HEVC, encoder element rebuilt per recording), which works in practice; see the open section above before relying on it.
 - **Judge a recording by decoding it, not by the file existing.** Header-only 663-byte files and, under rate control, plausibly-sized corrupt ones are both failure shapes seen on this hardware.
 - **A test harness that opens the encoder repeatedly is measuring this defect, not its subject.** A series of per-run instances produces ~50% corrupt output regardless of what is fed in. This holds on both units.
 - The decoder has shown no equivalent behaviour under heavy instance churn.
