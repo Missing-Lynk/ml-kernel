@@ -122,6 +122,28 @@ the job timeout above already armed, making this a second unbounded wait
 independent of the one that timeout covers. The budget bounds both the per-pass
 wait and the pass count. Zero restores the upstream behaviour.
 
+(12) H.264 GOP. GOP_SIZE lands in avc_idr_period, and the seq-init path forwards
+it into the firmware's intra_period for HEVC and not for H.264. intra_period is
+the period the firmware refreshes on, which is why the forced-keyframe path in
+(8) drives that field rather than avc_idr_period, and only H264_I_PERIOD writes
+it. So a client setting GOP_SIZE alone got one IDR when the instance opened and
+none after: measured on a DVR recording, 853 access units carrying a single IDR
+where 14 were asked for. Anything joining mid-stream then has nothing to start
+decoding on, which surfaced as an RTSP client being answered 503 after the
+server's 20 s preroll timeout on every connection except the one racing the
+encoder's creation. The H.264 branch carries the same intra_period fallback the
+HEVC branch already has, so the standard control does what it says on both.
+
+(13) profile, level and frame_rate are reported at seq init. profile and level
+reach the SPS, so a stream whose SPS disagrees with them says the controls never
+arrived rather than that the firmware ignored them. frame_rate is what the rate
+controller divides the bitrate by and only S_PARM writes it, so a client that
+never issues one leaves it at the 30 set in open(): at 1080p60, targets of 3, 4
+and 6 Mbps measured 6.15, 7.42 and 10.78 on the wire, while at 720p30 a 4 Mbps
+target measured 4.40. The control defaults themselves are deliberately left
+upstream's - Baseline, CAVLC and level 1.0 are a policy a client is meant to
+override, not a driver defect, and this line is what shows whether it managed to.
+
 --- a/drivers/media/platform/chips-media/wave5/wave5-vpu-enc.c
 +++ b/drivers/media/platform/chips-media/wave5/wave5-vpu-enc.c
 @@ -125,6 +125,30 @@
@@ -664,7 +686,22 @@ wait and the pass count. Zero restores the upstream behaviour.
  	}
  	open_param->wave_param.mb_level_rc_enable = input.mb_level_rc_enable;
  	open_param->wave_param.cu_level_rc_enable = input.cu_level_rc_enable;
-@@ -1343,17 +1644,20 @@
+@@ -1212,6 +1513,14 @@
+ 		}
+ 	} else {
+ 		open_param->wave_param.avc_idr_period = input.avc_idr_period;
++		/* The firmware refreshes on intra_period, which is why the forced-keyframe path
++		 * drives it rather than avc_idr_period. Only H264_I_PERIOD writes it, so a client
++		 * that sets GOP_SIZE alone gets one IDR when the instance opens and none after,
++		 * and anything joining mid-stream has nothing to start decoding on. Carry the same
++		 * fallback the HEVC branch above uses.
++		 */
++		if (input.intra_period == 0)
++			open_param->wave_param.intra_period = input.avc_idr_period;
+ 	}
+ 	open_param->wave_param.entropy_coding_mode = input.entropy_coding_mode;
+ 	open_param->wave_param.lossless_enable = input.lossless_enable;
+@@ -1343,17 +1652,20 @@
  
  		ret = wave5_set_enc_openparam(&open_param, inst);
  		if (ret) {
@@ -689,16 +726,25 @@ wait and the pass count. Zero restores the upstream behaviour.
  
  		if (inst->mirror_direction) {
  			wave5_vpu_enc_give_command(inst, ENABLE_MIRRORING, NULL);
-@@ -1376,6 +1680,8 @@
+@@ -1376,6 +1688,17 @@
  			dev_warn(inst->dev->dev, "Sequence not found: %d\n", ret);
  			goto return_buffers;
  		}
-+		dev_info(inst->dev->dev, "%s: enc seq init done (fbc_buf_count %u, min_src %u)\n",
-+			 __func__, inst->fbc_buf_count, inst->min_src_buf_count);
++		/* What the instance was actually configured with, which a capture can be judged
++		 * against. profile and level reach the SPS, so a stream that does not match them
++		 * says the controls never arrived rather than that the firmware ignored them.
++		 * frame_rate is what the rate controller divides the bitrate by and only S_PARM
++		 * writes it, so a client that never issues one leaves it at the 30 set in open()
++		 * and a 60 fps stream then encodes at twice the requested bitrate.
++		 */
++		dev_info(inst->dev->dev,
++			 "%s: enc seq init done (fbc_buf_count %u, min_src %u, profile %u, level %u, frame_rate %u)\n",
++			 __func__, inst->fbc_buf_count, inst->min_src_buf_count,
++			 inst->enc_param.profile, inst->enc_param.level, inst->frame_rate);
  		ret = switch_state(inst, VPU_INST_STATE_INIT_SEQ);
  		if (ret)
  			goto return_buffers;
-@@ -1390,6 +1696,7 @@
+@@ -1390,6 +1713,7 @@
  		}
  
  		ret = switch_state(inst, VPU_INST_STATE_PIC_RUN);
@@ -706,7 +752,7 @@ wait and the pass count. Zero restores the upstream behaviour.
  	}
  	if (ret)
  		goto return_buffers;
-@@ -1429,10 +1736,28 @@
+@@ -1429,10 +1753,28 @@
  	v4l2_m2m_clear_state(m2m_ctx);
  }
  
@@ -735,7 +781,7 @@ wait and the pass count. Zero restores the upstream behaviour.
  
  	/*
  	 * Note that we don't need m2m_ctx->next_buf_last for this driver, so we
-@@ -1454,7 +1779,15 @@
+@@ -1454,7 +1796,15 @@
  		if (q_status.report_queue_count == 0)
  			break;
  
@@ -752,7 +798,7 @@ wait and the pass count. Zero restores the upstream behaviour.
  			break;
  
  		if (wave5_vpu_enc_get_output_info(inst, &enc_output_info))
-@@ -1520,6 +1853,9 @@
+@@ -1520,6 +1870,9 @@
  			break;
  		}
  		dev_dbg(inst->dev->dev, "%s: leave with active job", __func__);
@@ -762,7 +808,7 @@ wait and the pass count. Zero restores the upstream behaviour.
  		pm_runtime_put_autosuspend(inst->dev->dev);
  		return;
  	default:
-@@ -1558,8 +1894,23 @@
+@@ -1558,8 +1911,23 @@
  	return false;
  }
  
@@ -786,7 +832,7 @@ wait and the pass count. Zero restores the upstream behaviour.
  	.job_ready = wave5_vpu_enc_job_ready,
  };
  
-@@ -1579,6 +1930,7 @@
+@@ -1579,6 +1947,7 @@
  	inst->dev = dev;
  	inst->type = VPU_INST_TYPE_ENC;
  	inst->ops = &wave5_vpu_enc_inst_ops;
@@ -794,7 +840,7 @@ wait and the pass count. Zero restores the upstream behaviour.
  
  	inst->codec_info = kzalloc(sizeof(*inst->codec_info), GFP_KERNEL);
  	if (!inst->codec_info) {
-@@ -1590,6 +1942,7 @@
+@@ -1590,6 +1959,7 @@
  	v4l2_fh_add(&inst->v4l2_fh, filp);
  
  	INIT_LIST_HEAD(&inst->list);
@@ -802,7 +848,7 @@ wait and the pass count. Zero restores the upstream behaviour.
  
  	inst->v4l2_m2m_dev = inst->dev->v4l2_m2m_enc_dev;
  	inst->v4l2_fh.m2m_ctx =
-@@ -1740,6 +2093,8 @@
+@@ -1740,6 +2110,8 @@
  	v4l2_ctrl_new_std(v4l2_ctrl_hdl, &wave5_vpu_enc_ctrl_ops,
  			  V4L2_CID_MPEG_VIDEO_PREPEND_SPSPPS_TO_IDR,
  			  0, 1, 1, 0);
@@ -811,7 +857,7 @@ wait and the pass count. Zero restores the upstream behaviour.
  
  	if (v4l2_ctrl_hdl->error) {
  		ret = -ENODEV;
-@@ -1791,6 +2146,13 @@
+@@ -1791,6 +2163,13 @@
  
  static int wave5_vpu_enc_release(struct file *filp)
  {
